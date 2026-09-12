@@ -195,3 +195,88 @@ Upgrade Pattern: $upgrade_pattern"
 
     echo "$enhanced_context"
 }
+
+# Infer logical scope for a given file path
+infer_file_scope() {
+    local file="$1"
+    case "$file" in
+        *schema*|*seo*|*Schema*|*sitemap*|*robots.txt*|*acme-challenge*)
+            echo "seo" ;;
+        scripts/*|bin/*)
+            echo "scripts" ;;
+        *.config.*|.eslintrc*|pnpm-workspace*|*package.json|tsconfig*.json|*.toml|*.yaml|*.yml)
+            echo "config" ;;
+        .github/*|Dockerfile*|docker-compose*|k8s/*|terraform/*)
+            echo "ci" ;;
+        test/*|tests/*|spec/*|__tests__/*|*.test.*|*.spec.*)
+            echo "test" ;;
+        docs/*|*.md|*.rst|README*|CHANGELOG*|CONTRIBUTING*)
+            echo "docs" ;;
+        templates/*)
+            echo "templates" ;;
+        src/components/*|components/*)
+            local comp_sub
+            comp_sub=$(echo "$file" | sed -E 's|^(src/)?components/([^/]+).*|\2|')
+            if [ -n "$comp_sub" ] && [ "$comp_sub" != "$file" ]; then
+                if echo "$comp_sub" | grep -qi "schema"; then
+                    echo "seo"
+                else
+                    echo "ui"
+                fi
+            else
+                echo "ui"
+            fi
+            ;;
+        lib/*|aicommit.sh|cli/*)
+            echo "core" ;;
+        src/*|app/*)
+            local mod
+            mod=$(echo "$file" | awk -F/ '{print $2}')
+            mod="${mod%.*}"
+            echo "${mod:-core}" ;;
+        *)
+            local dir
+            dir=$(dirname "$file")
+            if [ "$dir" != "." ] && [ -n "$dir" ]; then
+                echo "$(basename "$dir")"
+            else
+                local base
+                base=$(basename "$file")
+                echo "${base%.*}"
+            fi
+            ;;
+    esac
+}
+
+# Group staged files into scopes.
+# Outputs lines in format: "<scope>|<file1>,<file2>,..."
+group_staged_files_by_scope() {
+    local staged_files="$1"
+    [ -z "$staged_files" ] && return 0
+
+    local tmp_scope_dir
+    tmp_scope_dir=$(mktemp -d "/tmp/.aicommit_scopes_XXXXXX")
+
+    while IFS= read -r f; do
+        [ -z "$f" ] && continue
+        local s
+        s=$(infer_file_scope "$f")
+        echo "$f" >> "${tmp_scope_dir}/${s}"
+    done <<< "$staged_files"
+
+    for scope_file in "$tmp_scope_dir"/*; do
+        [ -e "$scope_file" ] || continue
+        local s
+        s=$(basename "$scope_file")
+        local files
+        files=$(tr '\n' ',' < "$scope_file" | sed 's/,$//')
+        echo "${s}|${files}"
+    done
+    rm -rf "$tmp_scope_dir"
+}
+
+# Returns count of unique scopes
+count_staged_scopes() {
+    local staged_files="$1"
+    group_staged_files_by_scope "$staged_files" | grep -c '.' || echo "0"
+}

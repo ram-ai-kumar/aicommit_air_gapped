@@ -23,15 +23,66 @@ display_setup_info() {
 
 display_commit_message() {
     local commit_msg="$1"
+    local title="${2:-Suggested Commit:}"
+    local box_width=72
+    local border_line
+    border_line=$(printf '─%.0s' {1..74})
 
     echo ""
-    echo "Suggested Commit:"
-    echo "┌─────────────────────────────────────────────────────────────────┐"
-    echo "$commit_msg" | fold -w 63 | while IFS= read -r line; do
-        printf "│ %-63s │\n" "$line"
-    done
-    echo "└─────────────────────────────────────────────────────────────────┘"
+    echo "$title"
+    echo "┌${border_line}┐"
+
+    while IFS= read -r raw_line || [ -n "$raw_line" ]; do
+        if [ -z "$raw_line" ]; then
+            printf "│ %-${box_width}s │\n" ""
+            continue
+        fi
+
+        # Check if line is a bullet item to preserve hanging indent on wrap
+        if [[ "$raw_line" =~ ^([[:space:]]*[-*+][[:space:]])(.*) ]]; then
+            local prefix="${BASH_REMATCH[1]}"
+            local rest="${BASH_REMATCH[2]}"
+            local indent="  "
+            local first=1
+
+            echo "${prefix}${rest}" | fold -s -w "$box_width" | while IFS= read -r wrapped_line || [ -n "$wrapped_line" ]; do
+                if [ $first -eq 1 ]; then
+                    printf "│ %-${box_width}s │\n" "$wrapped_line"
+                    first=0
+                else
+                    # Prepend indent for continuation if not already indented
+                    local indented_line="$wrapped_line"
+                    if [[ ! "$indented_line" =~ ^[[:space:]]{2} ]]; then
+                        indented_line="${indent}${wrapped_line}"
+                    fi
+                    echo "$indented_line" | fold -s -w "$box_width" | while IFS= read -r sub_line || [ -n "$sub_line" ]; do
+                        printf "│ %-${box_width}s │\n" "$sub_line"
+                    done
+                fi
+            done
+        else
+            echo "$raw_line" | fold -s -w "$box_width" | while IFS= read -r wrapped_line || [ -n "$wrapped_line" ]; do
+                printf "│ %-${box_width}s │\n" "$wrapped_line"
+            done
+        fi
+    done <<< "$commit_msg"
+
+    echo "└${border_line}┘"
     echo ""
+}
+
+display_split_confirmation() {
+    local count="$1"
+    local scopes="$2"
+    echo "💡 Staged changes span $count distinct scopes: [$scopes]"
+    echo "Split into $count atomic commits? ([Y]/n/all-in-one)"
+}
+
+display_split_progress() {
+    local current="$1"
+    local total="$2"
+    local scope="$3"
+    echo "📦 Preparing commit $current of $total (scope: $scope)..."
 }
 
 display_error() {

@@ -417,6 +417,11 @@ extract_conventional_commit() {
     # Step 6: Post-processing & Normalization
     cleaned=$(printf '%s' "$cleaned" | sed 's/`//g; s/\*\*//g')
 
+    # Remove immediate token stutters (e.g. "an and", "op optimize", "and and")
+    if command -v perl >/dev/null 2>&1; then
+        cleaned=$(printf '%s\n' "$cleaned" | perl -pe 's/\b([a-zA-Z]{2,})\s+\1\b/\1/g; s/\b([a-zA-Z]{2,})\s+\1([a-zA-Z]+)\b/\1\2/g')
+    fi
+
     # Trim leading and trailing empty lines and normalize header-body separation
     printf '%s\n' "$cleaned" | awk '
         BEGIN { header = ""; body_count = 0; reading_body = 0 }
@@ -513,6 +518,84 @@ generate_commit_message() {
 process_commit() {
     local commit_msg="$1"
     echo "$commit_msg" | git commit -F -
+}
+
+# Execute an atomic git commit for a specific subset of staged files
+# using git plumbing so unstaged modifications and other staged files are preserved.
+# Args: $1=commit_msg, $2=files_to_commit (comma-separated list of relative paths)
+commit_staged_subset() {
+    local commit_msg="$1"
+    local files_to_commit="$2"
+
+    local -a commit_files=()
+    IFS=',' read -r -a commit_files <<< "$files_to_commit"
+
+    local git_dir
+    git_dir=$(git rev-parse --git-dir)
+    local tmp_index="${git_dir}/index.aicommit.$$"
+    cp "${git_dir}/index" "$tmp_index"
+
+    local has_head=false
+    if git rev-parse --verify HEAD >/dev/null 2>&1; then
+        has_head=true
+    fi
+
+    # Find all staged files in real index
+    local staged_files
+    staged_files=$(git diff --staged --name-only)
+
+    # For files staged in real index that are NOT in commit_files:
+    # revert them in tmp_index to match HEAD (or remove if new file)
+    while IFS= read -r f; do
+        [ -z "$f" ] && continue
+        local is_target=false
+        for cf in "${commit_files[@]}"; do
+            # Trim whitespace
+            cf="${cf#"${cf%%[![:space:]]*}"}"
+            cf="${cf%"${cf##*[![:space:]]}"}"
+            if [ "$f" = "$cf" ]; then
+                is_target=true
+                break
+            fi
+        done
+        if [ "$is_target" = false ]; then
+            if [ "$has_head" = true ] && git ls-tree HEAD -- "$f" 2>/dev/null | grep -q .; then
+                GIT_INDEX_FILE="$tmp_index" git restore --staged --source=HEAD -- "$f" >/dev/null 2>&1 || true
+            else
+                GIT_INDEX_FILE="$tmp_index" git rm --cached -q -- "$f" 2>/dev/null || true
+            fi
+        fi
+    done <<< "$staged_files"
+
+    local tree_sha
+    tree_sha=$(GIT_INDEX_FILE="$tmp_index" git write-tree 2>/dev/null)
+    rm -f "$tmp_index"
+
+    if [ -z "$tree_sha" ]; then
+        display_error "Failed to create git tree for subset commit"
+        return 1
+    fi
+
+    local parent_args=()
+    if [ "$has_head" = true ]; then
+        parent_args=("-p" "$(git rev-parse HEAD)")
+    fi
+
+    local commit_sha
+    commit_sha=$(printf '%s\n' "$commit_msg" | git commit-tree "$tree_sha" "${parent_args[@]}")
+    if [ -z "$commit_sha" ]; then
+        display_error "Failed to create git commit tree"
+        return 1
+    fi
+
+    local current_ref
+    current_ref=$(git symbolic-ref HEAD 2>/dev/null || git rev-parse HEAD)
+    git update-ref "$current_ref" "$commit_sha"
+
+    # Invoke post-commit hook if present
+    if [ -x "${git_dir}/hooks/post-commit" ]; then
+        "${git_dir}/hooks/post-commit" 2>/dev/null || true
+    fi
 }
 
 # Cleanup ephemeral context files (keeps FULL_PROMPT for --regenerate)
