@@ -273,3 +273,28 @@ teardown() {
     [ "$status" -eq 0 ]
     [ "$output" -eq 3 ]
 }
+
+@test "infer_file_scope identifies core, prompt, and test scopes" {
+    run infer_file_scope "aicommit.sh"
+    [ "$output" = "core" ]
+    run infer_file_scope "lib/core.sh"
+    [ "$output" = "core" ]
+    run infer_file_scope "templates/prompt.txt"
+    [ "$output" = "prompt" ]
+    run infer_file_scope "test/unit/test_core.bats"
+    [ "$output" = "test" ]
+}
+
+@test "group_staged_files_by_scope correctly groups 8 standard changes into 3 scopes" {
+    local files
+    files="$(printf 'aicommit.sh\nlib/context-analyzer.sh\nlib/core.sh\nlib/output-formatter.sh\ntemplates/prompt.txt\ntest/unit/test_context_analyzer.bats\ntest/unit/test_core.bats\ntest/unit/test_output_formatter.bats')"
+    run group_staged_files_by_scope "$files"
+    [ "$status" -eq 0 ]
+    assert_output_contains "core|aicommit.sh,lib/context-analyzer.sh,lib/core.sh,lib/output-formatter.sh"
+    assert_output_contains "prompt|templates/prompt.txt"
+    assert_output_contains "test|test/unit/test_context_analyzer.bats,test/unit/test_core.bats,test/unit/test_output_formatter.bats"
+
+    run count_staged_scopes "$files"
+    [ "$status" -eq 0 ]
+    [ "$output" -eq 3 ]
+}
