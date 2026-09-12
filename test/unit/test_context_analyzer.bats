@@ -232,3 +232,44 @@ teardown() {
     run build_enhanced_context "$staged" "$changes"
     assert_output_contains "Focus Directory"
 }
+
+# ─── Scope Inference and Grouping ─────────────────────────────────────────────
+
+@test "infer_file_scope identifies config files" {
+    run infer_file_scope "eslint.config.js"
+    [ "$output" = "config" ]
+    run infer_file_scope "pnpm-workspace.yaml"
+    [ "$output" = "config" ]
+}
+
+@test "infer_file_scope identifies scripts" {
+    run infer_file_scope "scripts/validate-html.js"
+    [ "$output" = "scripts" ]
+    run infer_file_scope "bin/deploy.sh"
+    [ "$output" = "scripts" ]
+}
+
+@test "infer_file_scope identifies seo and schema files" {
+    run infer_file_scope "src/components/Schema.astro"
+    [ "$output" = "seo" ]
+    run infer_file_scope "public/.well-known/acme-challenge/test"
+    [ "$output" = "seo" ]
+}
+
+@test "group_staged_files_by_scope clusters files into distinct scopes" {
+    local files
+    files="$(printf 'eslint.config.js\npnpm-workspace.yaml\nscripts/validate-html.js\nscripts/validate-markdown.js\nsrc/components/Schema.astro\npublic/.well-known/acme-challenge/sample')"
+    run group_staged_files_by_scope "$files"
+    [ "$status" -eq 0 ]
+    assert_output_contains "config|eslint.config.js,pnpm-workspace.yaml"
+    assert_output_contains "scripts|scripts/validate-html.js,scripts/validate-markdown.js"
+    assert_output_contains "seo|src/components/Schema.astro,public/.well-known/acme-challenge/sample"
+}
+
+@test "count_staged_scopes counts distinct scopes correctly" {
+    local files
+    files="$(printf 'eslint.config.js\npnpm-workspace.yaml\nscripts/validate-html.js\nscripts/validate-markdown.js\nsrc/components/Schema.astro')"
+    run count_staged_scopes "$files"
+    [ "$status" -eq 0 ]
+    [ "$output" -eq 3 ]
+}

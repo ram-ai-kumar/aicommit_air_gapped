@@ -375,3 +375,57 @@ EOF
     [ ! -f "${d}/FILE_CONTEXT" ]
     [ ! -f "${d}/FULL_PROMPT" ]
 }
+
+# ─── Stutter Cleanup & Scope Retention ───────────────────────────────────────
+
+@test "extract_conventional_commit retains compound scope" {
+    local input
+    input="@@@
+feat(config, scripts, seo): update tooling and validation
+
+- update configuration
+@@@"
+    local result
+    result=$(extract_conventional_commit "$input")
+    echo "$result" | grep -qF "feat(config, scripts, seo): update tooling and validation"
+}
+
+@test "extract_conventional_commit cleans duplicate token stutters" {
+    local input
+    input="@@@
+refactor(validation): optimize error counting
+
+- update eslint configuration to use defineConfig and add @eslint/js an and sharp dependencies
+- refactor Markdown validation to remove unused file path parameters and op optimize error counting
+- update build script and and check dependencies
+@@@"
+    local result
+    result=$(extract_conventional_commit "$input")
+    echo "$result" | grep -qF "add @eslint/js and sharp dependencies"
+    echo "$result" | grep -qF "parameters and optimize error counting"
+    echo "$result" | grep -qF "update build script and check dependencies"
+    ! echo "$result" | grep -qF "an and"
+    ! echo "$result" | grep -qF "op optimize"
+    ! echo "$result" | grep -qF "and and"
+}
+
+# ─── commit_staged_subset ────────────────────────────────────────────────────
+
+@test "commit_staged_subset commits only specified file leaving others staged" {
+    echo "content1" > file1.txt
+    echo "content2" > file2.txt
+    git add file1.txt file2.txt
+
+    run commit_staged_subset "feat(file1): add file1" "file1.txt"
+    [ "$status" -eq 0 ]
+
+    # Verify commit log
+    local log_msg
+    log_msg=$(git log -1 --pretty=%s)
+    [ "$log_msg" = "feat(file1): add file1" ]
+
+    # file2.txt should still be staged
+    local remaining_staged
+    remaining_staged=$(git diff --staged --name-only)
+    [ "$remaining_staged" = "file2.txt" ]
+}

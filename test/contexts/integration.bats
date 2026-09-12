@@ -171,3 +171,38 @@ teardown() {
     d=$(get_aicommit_tmp_dir)
     [ ! -f "${d}/CHANGES_CONTEXT" ]
 }
+
+@test "aic auto-splits multi-scope staged changes and commits all atomically without prompts" {
+    mkdir -p scripts
+    echo "console.log('config');" > eslint.config.js
+    echo "console.log('scripts');" > scripts/validate.js
+    git add eslint.config.js scripts/validate.js
+
+    pgrep() { return 0; }
+    ollama() {
+        case "$1" in
+            list)
+                echo "NAME            ID              SIZE    MODIFIED"
+                echo "test-model      abc123          4.7 GB  2 days ago"
+                ;;
+            run)
+                printf '%s\n' "@@@" "chore: atomic update" "@@@"
+                return 0
+                ;;
+        esac
+    }
+    export -f pgrep ollama
+    export AI_MODEL="test-model"
+
+    run aic
+    [ "$status" -eq 0 ]
+    assert_output_contains "All atomic commits completed!"
+
+    local commit_count
+    commit_count=$(git rev-list --count HEAD)
+    [ "$commit_count" -ge 2 ]
+
+    local remaining
+    remaining=$(git diff --staged --name-only)
+    [ -z "$remaining" ]
+}

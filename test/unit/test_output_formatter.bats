@@ -65,6 +65,41 @@ teardown() {
     assert_output_contains "└"
 }
 
+@test "display_commit_message wraps lines on word boundaries without cutting words" {
+    local long_msg="feat: update eslint configuration to use defineConfig and add packages and dependencies"
+    run display_commit_message "$long_msg"
+    [ "$status" -eq 0 ]
+    assert_output_contains "defineConfig and add"
+    assert_output_contains "and dependencies"
+}
+
+@test "display_commit_message supports 72 content characters width" {
+    local line_72="123456789012345678901234567890123456789012345678901234567890123456789012"
+    run display_commit_message "$line_72"
+    [ "$status" -eq 0 ]
+    assert_output_contains "│ $line_72 │"
+}
+
+@test "display_commit_message wraps bullets with hanging indent" {
+    local bullet_msg="- update eslint configuration to use defineConfig and add @eslint/js and sharp dependencies"
+    run display_commit_message "$bullet_msg"
+    [ "$status" -eq 0 ]
+    assert_output_contains "│   and sharp dependencies"
+}
+
+@test "display_split_confirmation shows count and scope names" {
+    run display_split_confirmation "3" "config, scripts, seo"
+    [ "$status" -eq 0 ]
+    assert_output_contains "3 distinct scopes"
+    assert_output_contains "config, scripts, seo"
+}
+
+@test "display_split_progress shows current and total with scope" {
+    run display_split_progress "1" "3" "config"
+    [ "$status" -eq 0 ]
+    assert_output_contains "commit 1 of 3 (scope: config)"
+}
+
 # ─── display_error ────────────────────────────────────────────────────────────
 
 @test "display_error shows error icon" {
