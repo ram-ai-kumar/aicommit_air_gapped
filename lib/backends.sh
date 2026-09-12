@@ -105,7 +105,7 @@ invoke_ollama() {
     local ollama_pid=$!
 
     local progress_dev="/dev/null"
-    if [ -w /dev/tty ] 2>/dev/null; then
+    if (: > /dev/tty) 2>/dev/null; then
         progress_dev="/dev/tty"
     fi
 
