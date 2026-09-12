@@ -104,19 +104,24 @@ invoke_ollama() {
     ollama run "${extra_args[@]}" "$current_model" < "$prompt_file" > "$response_file" 2> "$error_file" &
     local ollama_pid=$!
 
+    local progress_dev="/dev/null"
+    if [ -w /dev/tty ] 2>/dev/null; then
+        progress_dev="/dev/tty"
+    fi
+
     local elapsed=0
-    printf "🧠 Generating commit message using $current_model..." > /dev/tty
+    printf "🧠 Generating commit message using $current_model..." > "$progress_dev"
     while kill -0 "$ollama_pid" 2>/dev/null; do
         sleep 0.5
         elapsed=$((elapsed + 5)) # We add .5 seconds each time
         # Only print every second to reduce terminal noise
         if (( elapsed % 10 == 0 )); then
-            printf "\r🧠 Generating commit message using $current_model... (%ds)" "$((elapsed / 10))" > /dev/tty
+            printf "\r🧠 Generating commit message using $current_model... (%ds)" "$((elapsed / 10))" > "$progress_dev"
         fi
         if [ "$elapsed" -ge $((timeout_secs * 10)) ]; then
             kill "$ollama_pid" 2>/dev/null
             wait "$ollama_pid" 2>/dev/null
-            printf "\r\033[K" > /dev/tty
+            printf "\r\033[K" > "$progress_dev"
 
             # Check if this might be a memory issue
             local error_content
@@ -136,7 +141,7 @@ invoke_ollama() {
     done
     wait "$ollama_pid"
     local exit_code=$?
-    printf "\n" > /dev/tty
+    printf "\n" > "$progress_dev"
 
     if [ $exit_code -ne 0 ]; then
         local error_content
