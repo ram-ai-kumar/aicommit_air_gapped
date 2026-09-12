@@ -94,6 +94,23 @@ teardown() {
     assert_output_contains "config, scripts, seo"
 }
 
+@test "display_split_confirmation shows preview of file samples per scope" {
+    local groups="core|aicommit.sh,lib/core.sh
+prompt|templates/prompt.txt
+test|test1.bats,test2.bats,test3.bats,test4.bats"
+    run display_split_confirmation "3" "core, prompt, test" "$groups"
+    [ "$status" -eq 0 ]
+    assert_output_contains "core"
+    assert_output_contains "(2 files):"
+    assert_output_contains "aicommit.sh, lib/core.sh"
+    assert_output_contains "prompt"
+    assert_output_contains "(1 file):"
+    assert_output_contains "templates/prompt.txt"
+    assert_output_contains "test"
+    assert_output_contains "(4 files):"
+    assert_output_contains "(+1 more)"
+}
+
 @test "display_split_progress shows current and total with scope" {
     run display_split_progress "1" "3" "config"
     [ "$status" -eq 0 ]
