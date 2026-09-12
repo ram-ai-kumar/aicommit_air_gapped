@@ -125,7 +125,7 @@ aicommit() {
             # When --yes permission is given (e.g. via aic or aicommit --yes), default to splitting
             split_mode=true
         else
-            display_split_confirmation "$num_scopes" "$scope_names"
+            display_split_confirmation "$num_scopes" "$scope_names" "$scope_groups"
             read -r split_choice
             split_choice=${split_choice:-y}
             case "$split_choice" in

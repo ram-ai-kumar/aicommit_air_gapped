@@ -74,7 +74,36 @@ display_commit_message() {
 display_split_confirmation() {
     local count="$1"
     local scopes="$2"
+    local scope_groups="$3"
+    local group_line="" grp_scope="" grp_files="" file_count=0 preview=""
+    local first_three="" remaining=0 count_str=""
+
     echo "💡 Staged changes span $count distinct scopes: [$scopes]"
+
+    if [ -n "$scope_groups" ]; then
+        while IFS= read -r group_line; do
+            [ -z "$group_line" ] && continue
+            grp_scope=$(echo "$group_line" | cut -d'|' -f1)
+            grp_files=$(echo "$group_line" | cut -d'|' -f2)
+            [ -z "$grp_scope" ] && continue
+
+            file_count=$(echo "$grp_files" | tr ',' '\n' | grep -c '.' || echo "0")
+
+            if [ "$file_count" -gt 3 ]; then
+                first_three=$(echo "$grp_files" | cut -d',' -f1-3 | sed 's/,/, /g')
+                remaining=$((file_count - 3))
+                preview="${first_three}, ... (+${remaining} more)"
+            else
+                preview=$(echo "$grp_files" | sed 's/,/, /g')
+            fi
+
+            count_str="($file_count files):"
+            [ "$file_count" -eq 1 ] && count_str="($file_count file):"
+            printf '  • %-10s %-11s %s\n' "$grp_scope" "$count_str" "$preview"
+        done <<< "$scope_groups"
+        echo ""
+    fi
+
     echo "Split into $count atomic commits? ([Y]/n/all-in-one)"
 }
 
