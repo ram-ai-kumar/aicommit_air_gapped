@@ -208,14 +208,14 @@ infer_file_scope() {
             echo "config" ;;
         .github/*|Dockerfile*|docker-compose*|k8s/*|terraform/*)
             echo "ci" ;;
-        test/*|tests/*|spec/*|__tests__/*|*.test.*|*.spec.*)
+        test/*|tests/*|spec/*|__tests__/*|*.test.*|*.spec.*|*.bats)
             echo "test" ;;
         docs/*|*.md|*.rst|README*|CHANGELOG*|CONTRIBUTING*)
             echo "docs" ;;
-        templates/*)
-            echo "templates" ;;
+        templates/*|*prompt*)
+            echo "prompt" ;;
         src/components/*|components/*)
-            local comp_sub
+            local comp_sub=""
             comp_sub=$(echo "$file" | sed -E 's|^(src/)?components/([^/]+).*|\2|')
             if [ -n "$comp_sub" ] && [ "$comp_sub" != "$file" ]; then
                 if echo "$comp_sub" | grep -qi "schema"; then
@@ -230,19 +230,17 @@ infer_file_scope() {
         lib/*|aicommit.sh|cli/*)
             echo "core" ;;
         src/*|app/*)
-            local mod
+            local mod=""
             mod=$(echo "$file" | awk -F/ '{print $2}')
             mod="${mod%.*}"
             echo "${mod:-core}" ;;
         *)
-            local dir
+            local dir=""
             dir=$(dirname "$file")
             if [ "$dir" != "." ] && [ -n "$dir" ]; then
                 echo "$(basename "$dir")"
             else
-                local base
-                base=$(basename "$file")
-                echo "${base%.*}"
+                echo "core"
             fi
             ;;
     esac
@@ -254,23 +252,20 @@ group_staged_files_by_scope() {
     local staged_files="$1"
     [ -z "$staged_files" ] && return 0
 
-    local tmp_scope_dir
+    local tmp_scope_dir="" s="" files="" f="" scope_file=""
     tmp_scope_dir=$(mktemp -d "/tmp/.aicommit_scopes_XXXXXX")
 
     while IFS= read -r f; do
         [ -z "$f" ] && continue
-        local s
         s=$(infer_file_scope "$f")
         echo "$f" >> "${tmp_scope_dir}/${s}"
     done <<< "$staged_files"
 
     for scope_file in "$tmp_scope_dir"/*; do
         [ -e "$scope_file" ] || continue
-        local s
         s=$(basename "$scope_file")
-        local files
         files=$(tr '\n' ',' < "$scope_file" | sed 's/,$//')
-        echo "${s}|${files}"
+        [ -n "$s" ] && [ -n "$files" ] && echo "${s}|${files}"
     done
     rm -rf "$tmp_scope_dir"
 }
@@ -278,5 +273,5 @@ group_staged_files_by_scope() {
 # Returns count of unique scopes
 count_staged_scopes() {
     local staged_files="$1"
-    group_staged_files_by_scope "$staged_files" | grep -c '.' || echo "0"
+    group_staged_files_by_scope "$staged_files" | grep -c '|' || echo "0"
 }

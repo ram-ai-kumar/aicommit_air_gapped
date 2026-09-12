@@ -25,7 +25,8 @@ display_commit_message() {
     local commit_msg="$1"
     local title="${2:-Suggested Commit:}"
     local box_width=72
-    local border_line
+    local border_line="" raw_line="" prefix="" rest="" indent="  " first=1
+    local wrapped_line="" indented_line="" sub_line=""
     border_line=$(printf '─%.0s' {1..74})
 
     echo ""
@@ -40,10 +41,9 @@ display_commit_message() {
 
         # Check if line is a bullet item to preserve hanging indent on wrap
         if [[ "$raw_line" =~ ^([[:space:]]*[-*+][[:space:]])(.*) ]]; then
-            local prefix="${BASH_REMATCH[1]}"
-            local rest="${BASH_REMATCH[2]}"
-            local indent="  "
-            local first=1
+            prefix="${BASH_REMATCH[1]}"
+            rest="${BASH_REMATCH[2]}"
+            first=1
 
             echo "${prefix}${rest}" | fold -s -w "$box_width" | while IFS= read -r wrapped_line || [ -n "$wrapped_line" ]; do
                 if [ $first -eq 1 ]; then
@@ -51,7 +51,7 @@ display_commit_message() {
                     first=0
                 else
                     # Prepend indent for continuation if not already indented
-                    local indented_line="$wrapped_line"
+                    indented_line="$wrapped_line"
                     if [[ ! "$indented_line" =~ ^[[:space:]]{2} ]]; then
                         indented_line="${indent}${wrapped_line}"
                     fi

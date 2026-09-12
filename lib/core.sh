@@ -527,8 +527,10 @@ commit_staged_subset() {
     local commit_msg="$1"
     local files_to_commit="$2"
 
-    local -a commit_files=()
-    IFS=',' read -r -a commit_files <<< "$files_to_commit"
+    local commit_files=() item=""
+    while IFS= read -r item; do
+        [ -n "$item" ] && commit_files+=("$item")
+    done <<< "$(echo "$files_to_commit" | tr ',' '\n')"
 
     local git_dir
     git_dir=$(git rev-parse --git-dir)
@@ -541,14 +543,14 @@ commit_staged_subset() {
     fi
 
     # Find all staged files in real index
-    local staged_files
+    local staged_files f="" cf="" is_target=false
     staged_files=$(git diff --staged --name-only)
 
     # For files staged in real index that are NOT in commit_files:
     # revert them in tmp_index to match HEAD (or remove if new file)
     while IFS= read -r f; do
         [ -z "$f" ] && continue
-        local is_target=false
+        is_target=false
         for cf in "${commit_files[@]}"; do
             # Trim whitespace
             cf="${cf#"${cf%%[![:space:]]*}"}"

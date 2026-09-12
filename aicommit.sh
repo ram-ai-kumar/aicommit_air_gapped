@@ -116,8 +116,8 @@ aicommit() {
     # Check for multi-scope staging
     local scope_groups num_scopes scope_names
     scope_groups=$(group_staged_files_by_scope "$staged_files")
-    num_scopes=$(echo "$scope_groups" | grep -c '.' || echo "0")
-    scope_names=$(echo "$scope_groups" | awk -F'|' '{print $1}' | tr '\n' ', ' | sed 's/, $//')
+    num_scopes=$(count_staged_scopes "$staged_files")
+    scope_names=$(echo "$scope_groups" | awk -F'|' '{printf (NR>1?", ":"") $1} END{print ""}')
 
     # If changes span 2+ scopes and split_mode wasn't explicitly forced, handle splitting
     if [ "$split_mode" = "false" ] && [ "$num_scopes" -ge 2 ] && [ "$dry_run" != "true" ]; then
@@ -142,11 +142,15 @@ aicommit() {
             return 1
         fi
 
+        local group_line="" grp_scope="" grp_files="" idx=1
+        local subset_changes="" subset_staged="" subset_numstat="" grp_commit_msg="" grp_resp="y"
+        local edit_file="" edited_msg="" f_item=""
+        local -a grp_file_array=()
+
         if [ "$dry_run" = "true" ]; then
             echo "🔍 Dry run — detected $num_scopes atomic commit groups:"
             while IFS= read -r group_line; do
                 [ -z "$group_line" ] && continue
-                local grp_scope grp_files
                 grp_scope=$(echo "$group_line" | cut -d'|' -f1)
                 grp_files=$(echo "$group_line" | cut -d'|' -f2)
                 echo "  • Scope: $grp_scope -> $grp_files"
@@ -154,20 +158,21 @@ aicommit() {
             return 0
         fi
 
-        local idx=1
+        idx=1
         while IFS= read -r group_line; do
             [ -z "$group_line" ] && continue
-            local grp_scope grp_files grp_pathspecs
             grp_scope=$(echo "$group_line" | cut -d'|' -f1)
             grp_files=$(echo "$group_line" | cut -d'|' -f2)
-            grp_pathspecs=$(echo "$grp_files" | tr ',' ' ')
+            grp_file_array=()
+            while IFS= read -r f_item; do
+                [ -n "$f_item" ] && grp_file_array+=("$f_item")
+            done <<< "$(echo "$grp_files" | tr ',' '\n')"
 
             display_split_progress "$idx" "$num_scopes" "$grp_scope"
 
-            local subset_changes subset_staged subset_numstat
-            subset_changes=$(git diff --staged -- $grp_pathspecs)
+            subset_changes=$(git diff --staged -- "${grp_file_array[@]}")
             subset_staged=$(echo "$grp_files" | tr ',' '\n')
-            subset_numstat=$(git diff --staged --numstat -- $grp_pathspecs)
+            subset_numstat=$(git diff --staged --numstat -- "${grp_file_array[@]}")
 
             if [ -z "$subset_changes" ]; then
                 echo "⚠️ No staged changes remaining for scope: $grp_scope"
@@ -176,14 +181,13 @@ aicommit() {
             fi
 
             build_ai_context "$subset_changes" "$subset_staged" "$subset_numstat"
-            local grp_commit_msg
             if ! grp_commit_msg=$(generate_commit_message) || [ -z "$grp_commit_msg" ]; then
                 display_error "Failed to generate commit message for scope: $grp_scope"
                 return 1
             fi
 
             display_commit_message "$grp_commit_msg" "Suggested Commit ($idx/$num_scopes - scope: $grp_scope):"
-            local grp_resp="y"
+            grp_resp="y"
             if [ "$auto_yes" != "true" ]; then
                 display_commit_confirmation
                 read -r grp_resp
@@ -195,10 +199,9 @@ aicommit() {
                     echo "✅ Committed scope '$grp_scope' ($grp_files)"
                     ;;
                 e|E)
-                    local edit_file="${tmp_dir}/COMMIT_EDITMSG"
+                    edit_file="${tmp_dir}/COMMIT_EDITMSG"
                     printf '%s\n' "$grp_commit_msg" > "$edit_file"
                     ${EDITOR:-vi} "$edit_file"
-                    local edited_msg
                     edited_msg=$(cat "$edit_file" 2>/dev/null || true)
                     rm -f "$edit_file"
                     if [ -n "$edited_msg" ]; then
