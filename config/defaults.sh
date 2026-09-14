@@ -16,6 +16,12 @@ AI_MODEL="${AI_MODEL:-$DEFAULT_AI_MODEL}"
 # Override in ~/.aicommitrc: AI_PROMPT_FILE="$HOME/.aicommit/templates/custom-prompt.txt"
 AI_PROMPT_FILE="${AI_PROMPT_FILE:-$AICOMMIT_DIR/templates/prompt.txt}"
 
+# Path to prompt template for logical context grouping
+AI_GROUPING_PROMPT_FILE="${AI_GROUPING_PROMPT_FILE:-$AICOMMIT_DIR/templates/context-grouping-prompt.txt}"
+
+# Enable AI model for logical scope grouping (true by default, falls back to heuristic)
+AI_ENABLE_LLM_GROUPING="${AI_ENABLE_LLM_GROUPING:-true}"
+
 # Timeout for LLM inference (seconds). Increase for large models or slow hardware.
 # Override in ~/.aicommitrc: AI_TIMEOUT=240
 AI_TIMEOUT="${AI_TIMEOUT:-120}"

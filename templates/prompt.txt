@@ -7,6 +7,7 @@ RULES:
 2. Header: STRICT maximum 72 chars, lowercase, imperative mood.
    - Do NOT chain multiple clauses with 'and' (e.g., avoid "update X, add Y, and refactor Z"). Provide a concise synthesis.
 3. Scope: repository name or affected area (e.g., 'config', 'scripts', 'seo', 'auth').
+   - If a logical context or feature is specified, align scope with that logical feature.
    - Retain all relevant scope information.
 4. Body: Use when 2+ concerns are genuinely distinct (different features, behaviours, or areas).
    - Each bullet describes WHAT CHANGED or WHY — never just names a file.

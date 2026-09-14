@@ -409,6 +409,58 @@ refactor(validation): optimize error counting
     ! echo "$result" | grep -qF "and and"
 }
 
+@test "extract_conventional_commit resolves terminal cursor backspaces and line wraps" {
+    local input
+    input="feat(aicommit): implement logical context grouping and multi-commit split c"$'\x1b[?25l\x1b[?25h\x1b[7D\x1b[K\n'"confirmation
+
+- introduce AI-driven context analyzer to group staged files by
+  feature/fun"$'\x1b[11D\x1b[K\n'"feature/functionality instead of directory structure"
+
+    local result
+    result=$(extract_conventional_commit "$input")
+    echo "$result" | grep -qF "feat(aicommit): implement logical context grouping and multi-commit confirmation"
+    echo "$result" | grep -qF "feature/functionality instead of directory structure"
+    ! echo "$result" | grep -qF "feature/fun"
+    ! echo "$result" | grep -qF "split c"
+}
+
+@test "extract_conventional_commit repairs word-wrap stutter fragments and joins wrapped headers" {
+    local input
+    input="feat(aicommit): implement logical context grouping and multi-commit
+split c
+
+confirmation
+
+- introduce AI-driven context analyzer to group staged files by
+  feature/fun
+feature/functionality instead of directory structure
+- add user prompt template for intelligent file clustering into atomic
+  comm
+commit contexts
+- update split confirmation UI to display grouped file previews with
+  dynami
+dynamic width alignment
+- add unit and integration tests for context grouping logic, output
+  formatt
+formatting, and abort handling
+- disable live AI grouping in test environment to ensure deterministic
+  unit
+unit test behavior"
+
+    local result
+    result=$(extract_conventional_commit "$input")
+    echo "$result" | grep -qF "feat(aicommit): implement logical context grouping and multi-commit split confirmation"
+    echo "$result" | grep -qF "feature/functionality instead of directory structure"
+    echo "$result" | grep -qF "commit contexts"
+    echo "$result" | grep -qF "dynamic width alignment"
+    echo "$result" | grep -qF "formatting, and abort handling"
+    echo "$result" | grep -qF "unit test behavior"
+    ! echo "$result" | grep -qF "feature/fun"
+    ! echo "$result" | grep -qF "split c"
+    ! echo "$result" | grep -qE '^confirmation$'
+}
+
+
 # ─── commit_staged_subset ────────────────────────────────────────────────────
 
 @test "commit_staged_subset commits only specified file leaving others staged" {

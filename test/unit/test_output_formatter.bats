@@ -32,11 +32,12 @@ teardown() {
     assert_output_contains "Ollama running"
 }
 
-@test "display_setup_info shows formatted git status output when changes are staged" {
+@test "display_setup_info does not duplicate git status list when changes are staged" {
     echo "test content" > test_file.txt
     git add test_file.txt
     run display_setup_info "1" "test_file.txt"
-    assert_output_contains "new file:   test_file.txt"
+    refute_output_contains "new file:   test_file.txt"
+    assert_output_contains "1 files"
     git reset test_file.txt >/dev/null 2>&1 || true
     rm -f test_file.txt
 }
@@ -87,11 +88,28 @@ teardown() {
     assert_output_contains "│   and sharp dependencies"
 }
 
+@test "display_commit_message shows multi-bullet body without blank rows" {
+    local bullet_msg="docs(build/Legal-Agreements): refactor MVP legal agreement documents
+
+- remove 230 lines from NDA terms while adding 70 lines of updated content
+- reduce SoW land clearance terms from 815 lines to 161 lines
+- condense MSA content from 142 to 108 lines
+- trim MVP checklist from 183 to 92 lines"
+    run display_commit_message "$bullet_msg"
+    [ "$status" -eq 0 ]
+    assert_output_contains "remove 230 lines"
+    assert_output_contains "reduce SoW land clearance"
+    assert_output_contains "condense MSA content"
+    assert_output_contains "trim MVP checklist"
+    refute_output_contains "│   │"
+}
+
 @test "display_split_confirmation shows count and scope names" {
     run display_split_confirmation "3" "config, scripts, seo"
     [ "$status" -eq 0 ]
     assert_output_contains "3 distinct scopes"
     assert_output_contains "config, scripts, seo"
+    assert_output_contains "Make all-in-one commit? ([Y] all-in-one / [n] multi-commits / [x] abort)"
 }
 
 @test "display_split_confirmation shows preview of file samples per scope" {
@@ -102,13 +120,15 @@ test|test1.bats,test2.bats,test3.bats,test4.bats"
     [ "$status" -eq 0 ]
     assert_output_contains "core"
     assert_output_contains "(2 files):"
-    assert_output_contains "aicommit.sh, lib/core.sh"
+    assert_output_contains "- aicommit.sh"
+    assert_output_contains "- lib/core.sh"
     assert_output_contains "prompt"
     assert_output_contains "(1 file):"
-    assert_output_contains "templates/prompt.txt"
+    assert_output_contains "- templates/prompt.txt"
     assert_output_contains "test"
     assert_output_contains "(4 files):"
-    assert_output_contains "(+1 more)"
+    assert_output_contains "- test1.bats"
+    assert_output_contains "- test4.bats"
 }
 
 @test "display_split_progress shows current and total with scope" {

@@ -24,6 +24,35 @@ teardown() {
     assert_output_contains "Unsupported backend"
 }
 
+@test "validate_backend_prerequisites caches successful validation and runs only once" {
+    export AI_BACKEND="ollama"
+    local count_file="$TEST_TEMP_DIR/load_count"
+    echo "0" > "$count_file"
+
+    pgrep() { return 0; }
+    ollama() {
+        case "$1" in
+            list) echo "NAME ID SIZE MODIFIED"; echo "test-model abc 1GB 1d ago" ;;
+            run)
+                local cur
+                cur=$(cat "$count_file")
+                echo $((cur + 1)) > "$count_file"
+                return 0
+                ;;
+        esac
+    }
+    export -f pgrep ollama
+    export AI_MODEL="test-model"
+
+    # First call runs the checks and caches the result
+    validate_backend_prerequisites
+    [ "$(cat "$count_file")" -eq 1 ]
+
+    # Second call uses cache and does not re-run test_model_loadability
+    validate_backend_prerequisites
+    [ "$(cat "$count_file")" -eq 1 ]
+}
+
 # ─── invoke_llm routing ───────────────────────────────────────────────────────
 
 @test "invoke_llm with unknown backend returns 1" {

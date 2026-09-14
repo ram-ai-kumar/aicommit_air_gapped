@@ -28,6 +28,8 @@ fi
 # Interactive AI-powered conventional commit
 aicommit() {
     local dry_run=false verbose=false regenerate=false split_mode=false auto_yes=false
+    local explicit_split=false explicit_all=false
+    local is_aic="${AIC_SHORTCUT:-false}"
 
     while [ $# -gt 0 ]; do
         case "$1" in
@@ -39,23 +41,26 @@ aicommit() {
                 echo ""
                 echo "Options:"
                 echo "  --help, -h         Show this help message"
-                echo "  --yes, -y          Automatically accept all prompts (split and commit)"
-                echo "  --split, -s        Split changes across distinct scopes into atomic commits"
+                echo "  --yes, -y          Automatically accept generated commit messages without interactive prompts"
+                echo "  --split, -s        Split staged changes into atomic commits by logical scope"
+                echo "  --no-split, --all  Keep all staged changes in a single all-in-one commit"
                 echo "  --dry-run, -d      Build context and show prompt without calling LLM"
                 echo "  --verbose, -v      Show temp file paths and enhanced context"
                 echo "  --regenerate, -r   Re-run LLM on cached prompt without re-analyzing"
                 echo ""
                 echo "Examples:"
-                echo "  git add -p && aicommit      Stage changes, then generate commit"
-                echo "  aicommit --split             Intelligently split into atomic commits by scope"
-                echo "  aicommit --yes               Auto-accept prompts and commit"
-                echo "  aicommit --dry-run           Preview the prompt sent to LLM"
-                echo "  aicommit --regenerate        Regenerate from last analysis"
+                echo "  git add -p && aicommit        Stage changes, then generate commit"
+                echo "  aicommit --split               Split into atomic commits by logical scope"
+                echo "  aicommit --yes                 Auto-accept commit message and commit (all-in-one)"
+                echo "  aicommit --split --yes         Split and auto-commit each atomic scope"
+                echo "  aicommit --dry-run             Preview the prompt sent to LLM"
+                echo "  aicommit --regenerate          Regenerate from last analysis"
                 return 0
                 ;;
             --yes|-y)        auto_yes=true ;;
-            --split|-s)      split_mode=true ;;
-            --no-split|--all) split_mode=false ;;
+            --split|-s)      split_mode=true; explicit_split=true ;;
+            --no-split|--all) split_mode=false; explicit_all=true ;;
+            --shortcut)      is_aic=true ;;
             --dry-run|-d)    dry_run=true ;;
             --verbose|-v)    verbose=true ;;
             --regenerate|-r) regenerate=true ;;
@@ -63,6 +68,11 @@ aicommit() {
         esac
         shift
     done
+
+    if [ "$explicit_split" = "true" ] && [ "$explicit_all" = "true" ]; then
+        display_error "Conflicting options: cannot specify both --split and --no-split/--all"
+        return 1
+    fi
 
     export AICOMMIT_MODE=true
     local tmp_dir
@@ -113,31 +123,45 @@ aicommit() {
         return 1
     fi
 
-    # Check for multi-scope staging
-    local scope_groups num_scopes scope_names
-    scope_groups=$(group_staged_files_by_scope "$staged_files")
-    num_scopes=$(count_staged_scopes "$staged_files")
-    scope_names=$(echo "$scope_groups" | awk -F'|' '{printf (NR>1?", ":"") $1} END{print ""}')
+    # Validate Ollama + LLM presence once upfront (skip for --dry-run)
+    if [ "$dry_run" != "true" ] && ! validate_prerequisites; then
+        return 1
+    fi
 
-    # If changes span 2+ scopes and split_mode wasn't explicitly forced, handle splitting
-    if [ "$split_mode" = "false" ] && [ "$num_scopes" -ge 2 ] && [ "$dry_run" != "true" ]; then
-        if [ "$auto_yes" = "true" ]; then
-            # When --yes permission is given (e.g. via aic or aicommit --yes), default to splitting
-            split_mode=true
-        else
+    # Display git status list of modified files
+    display_staged_files
+
+    local scope_groups="" num_scopes=0 scope_names=""
+
+    # Check for multi-scope staging only when run as full aicommit (not as 'aic' shortcut)
+    # When running as 'aic', assume all-in-one commit without checking for logical grouping
+    if [ "$is_aic" != "true" ] && [ "$split_mode" = "false" ] && [ "$dry_run" != "true" ]; then
+        scope_groups=$(group_staged_files_by_scope "$staged_files" "$changes" "$numstat_data")
+        num_scopes=$(echo "$scope_groups" | grep -c '|' || echo "0")
+        scope_names=$(echo "$scope_groups" | awk -F'|' '{printf (NR>1?", ":"") $1} END{print ""}')
+
+        # If changes span 2+ scopes, prompt user for approval
+        if [ "$num_scopes" -ge 2 ]; then
             display_split_confirmation "$num_scopes" "$scope_names" "$scope_groups"
             read -r split_choice
             split_choice=${split_choice:-y}
             case "$split_choice" in
-                y|Y|s|S|yes|Yes) split_mode=true ;;
-                all|all-in-one|n|N|no) split_mode=false ;;
-                *) echo "❌ Cancelled"; return 0 ;;
+                y|Y|yes|Yes|""|a|A|1|all|all-in-one) split_mode=false ;;
+                n|N|no|No|m|M|multi|split|s|S) split_mode=true ;;
+                x|X|abort|Abort|q|Q|cancel) echo "❌ Commit aborted."; return 0 ;;
+                *) echo "❌ Commit aborted."; return 0 ;;
             esac
         fi
     fi
 
     # Split atomic commits workflow
     if [ "$split_mode" = "true" ]; then
+        if [ -z "$scope_groups" ]; then
+            scope_groups=$(group_staged_files_by_scope "$staged_files" "$changes" "$numstat_data")
+            num_scopes=$(echo "$scope_groups" | grep -c '|' || echo "0")
+            scope_names=$(echo "$scope_groups" | awk -F'|' '{printf (NR>1?", ":"") $1} END{print ""}')
+        fi
+
         if [ "$dry_run" != "true" ] && ! validate_prerequisites; then
             return 1
         fi
@@ -159,14 +183,11 @@ aicommit() {
         fi
 
         idx=1
-        while IFS= read -r group_line; do
+        while IFS= read -r -u 3 group_line; do
             [ -z "$group_line" ] && continue
             grp_scope=$(echo "$group_line" | cut -d'|' -f1)
             grp_files=$(echo "$group_line" | cut -d'|' -f2)
-            grp_file_array=()
-            while IFS= read -r f_item; do
-                [ -n "$f_item" ] && grp_file_array+=("$f_item")
-            done <<< "$(echo "$grp_files" | tr ',' '\n')"
+            IFS=',' read -r -a grp_file_array <<< "$grp_files"
 
             display_split_progress "$idx" "$num_scopes" "$grp_scope"
 
@@ -180,7 +201,7 @@ aicommit() {
                 continue
             fi
 
-            build_ai_context "$subset_changes" "$subset_staged" "$subset_numstat"
+            build_ai_context "$subset_changes" "$subset_staged" "$subset_numstat" "$grp_scope"
             if ! grp_commit_msg=$(generate_commit_message) || [ -z "$grp_commit_msg" ]; then
                 display_error "Failed to generate commit message for scope: $grp_scope"
                 return 1
@@ -218,7 +239,7 @@ aicommit() {
                     ;;
             esac
             idx=$((idx + 1))
-        done <<< "$scope_groups"
+        done 3<<< "$scope_groups"
 
         cleanup_aicommit_all
         echo "🎉 All atomic commits completed!"
@@ -283,8 +304,7 @@ aicommit() {
     esac
 }
 
-# Quick AI commit — auto-commits without confirmation (--yes permission given)
-# Automatically splits multi-scope changes into atomic commits unless --no-split/--all is given
+# Quick AI commit — auto-commits all-in-one without confirmation or scope grouping
 aic() {
-    aicommit --yes "$@"
+    AIC_SHORTCUT=true aicommit --yes --shortcut "$@"
 }

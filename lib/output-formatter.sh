@@ -2,19 +2,24 @@
 # aicommit — Output Formatter
 # Display helpers for commit messages, errors, and status.
 
-display_setup_info() {
-    local file_count="$1" file_list="$2"
+display_staged_files() {
     local staged_status=""
-
     if command -v git &>/dev/null; then
         staged_status=$(git status 2>/dev/null | awk '/Changes to be committed:/{flag=1; next} /^[A-Za-z]/{flag=0} flag' | grep -E '^\s*(modified|new file|deleted|renamed|typechange):' || true)
     fi
 
-    echo "💡 Setup: Ollama running, model ready"
     if [ -n "$staged_status" ]; then
-        echo "📁 Staged ($file_count files):"
+        echo "Changes to be committed:"
         echo "$staged_status"
-    elif [ -n "$file_list" ]; then
+        echo ""
+    fi
+}
+
+display_setup_info() {
+    local file_count="$1" file_list="$2"
+
+    echo "💡 Setup: Ollama running, model ready"
+    if [ -n "$file_list" ]; then
         echo "📁 Staged ($file_count files): $file_list"
     else
         echo "📁 Staged ($file_count files)"
@@ -40,9 +45,9 @@ display_commit_message() {
         fi
 
         # Check if line is a bullet item to preserve hanging indent on wrap
-        if [[ "$raw_line" =~ ^([[:space:]]*[-*+][[:space:]])(.*) ]]; then
-            prefix="${BASH_REMATCH[1]}"
-            rest="${BASH_REMATCH[2]}"
+        if printf '%s\n' "$raw_line" | grep -qE '^[[:space:]]*[-*+][[:space:]]'; then
+            prefix=$(printf '%s\n' "$raw_line" | sed -E -n 's/^([[:space:]]*[-*+][[:space:]])(.*)/\1/p')
+            rest=$(printf '%s\n' "$raw_line" | sed -E -n 's/^([[:space:]]*[-*+][[:space:]])(.*)/\2/p')
             first=1
 
             echo "${prefix}${rest}" | fold -s -w "$box_width" | while IFS= read -r wrapped_line || [ -n "$wrapped_line" ]; do
@@ -52,7 +57,7 @@ display_commit_message() {
                 else
                     # Prepend indent for continuation if not already indented
                     indented_line="$wrapped_line"
-                    if [[ ! "$indented_line" =~ ^[[:space:]]{2} ]]; then
+                    if [[ "$indented_line" != "  "* ]]; then
                         indented_line="${indent}${wrapped_line}"
                     fi
                     echo "$indented_line" | fold -s -w "$box_width" | while IFS= read -r sub_line || [ -n "$sub_line" ]; do
@@ -75,8 +80,8 @@ display_split_confirmation() {
     local count="$1"
     local scopes="$2"
     local scope_groups="$3"
-    local group_line="" grp_scope="" grp_files="" file_count=0 preview=""
-    local first_three="" remaining=0 count_str=""
+    local group_line="" grp_scope="" grp_files="" file_count=0 count_str=""
+    local f=""
 
     echo "💡 Staged changes span $count distinct scopes: [$scopes]"
 
@@ -88,23 +93,20 @@ display_split_confirmation() {
             [ -z "$grp_scope" ] && continue
 
             file_count=$(echo "$grp_files" | tr ',' '\n' | grep -c '.' || echo "0")
-
-            if [ "$file_count" -gt 3 ]; then
-                first_three=$(echo "$grp_files" | cut -d',' -f1-3 | sed 's/,/, /g')
-                remaining=$((file_count - 3))
-                preview="${first_three}, ... (+${remaining} more)"
-            else
-                preview=$(echo "$grp_files" | sed 's/,/, /g')
-            fi
-
             count_str="($file_count files):"
             [ "$file_count" -eq 1 ] && count_str="($file_count file):"
-            printf '  • %-10s %-11s %s\n' "$grp_scope" "$count_str" "$preview"
+
+            echo "  • $grp_scope $count_str"
+            while IFS= read -r f; do
+                f=$(echo "$f" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')
+                [ -z "$f" ] && continue
+                echo "      - $f"
+            done <<< "$(echo "$grp_files" | tr ',' '\n')"
         done <<< "$scope_groups"
         echo ""
     fi
 
-    echo "Split into $count atomic commits? ([Y]/n/all-in-one)"
+    echo "Make all-in-one commit? ([Y] all-in-one / [n] multi-commits / [x] abort)"
 }
 
 display_split_progress() {

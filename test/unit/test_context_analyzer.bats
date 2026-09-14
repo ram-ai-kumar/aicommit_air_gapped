@@ -298,3 +298,42 @@ teardown() {
     [ "$status" -eq 0 ]
     [ "$output" -eq 3 ]
 }
+
+@test "group_staged_files_logically clusters related multi-directory files into feature contexts" {
+    local files
+    files="$(printf 'config/initializers/apartment.rb\ntest/integration/tenant_switching_test.rb\ntest/support/database_cleaner_apartment.rb\nconfig/initializers/devise.rb\ntest/integration/google_oauth_test.rb\napp/views/shared/nav/_user_menu.html.erb\napp/models/product.rb\napp/models/spare.rb\nAGENTS.md\ndocs/plans/index.md')"
+    run group_staged_files_logically "$files"
+    [ "$status" -eq 0 ]
+    assert_output_contains "apartment multi-tenancy config & tests|config/initializers/apartment.rb,test/integration/tenant_switching_test.rb,test/support/database_cleaner_apartment.rb"
+    assert_output_contains "google oauth & devise authentication|config/initializers/devise.rb,test/integration/google_oauth_test.rb,app/views/shared/nav/_user_menu.html.erb"
+    assert_output_contains "product & spare catalog|app/models/product.rb,app/models/spare.rb"
+    assert_output_contains "documentation & plans|AGENTS.md,docs/plans/index.md"
+}
+
+@test "validate_and_reconcile_contexts extracts contexts and accounts for all staged files" {
+    local staged="app/models/product.rb\napp/models/spare.rb\nconfig/initializers/devise.rb\nmissed_file.txt"
+    local raw="<think>Grouping changes logically...</think>
+@@@
+product models | app/models/product.rb, app/models/spare.rb
+auth config | config/initializers/devise.rb, hallucinated_file.rb
+@@@"
+    run validate_and_reconcile_contexts "$raw" "$staged"
+    [ "$status" -eq 0 ]
+    assert_output_contains "product models|app/models/product.rb,app/models/spare.rb"
+    assert_output_contains "auth config|config/initializers/devise.rb"
+    assert_output_contains "additional changes|missed_file.txt"
+    refute_output_contains "hallucinated_file.rb"
+}
+
+@test "validate_and_reconcile_contexts rejects malformed scope names like joined_files=... and recovers files" {
+    local staged="aicommit.sh\nconfig/defaults.sh\nlib/backends.sh"
+    local raw="@@@
+joined_files=aicommit.sh,config/defaults.sh | aicommit.sh, config/defaults.sh
+core functionality | lib/backends.sh
+@@@"
+    run validate_and_reconcile_contexts "$raw" "$staged"
+    [ "$status" -eq 0 ]
+    refute_output_contains "joined_files"
+    assert_output_contains "core functionality|lib/backends.sh"
+    assert_output_contains "additional changes|aicommit.sh,config/defaults.sh"
+}

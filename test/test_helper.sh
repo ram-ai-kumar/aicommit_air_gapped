@@ -26,6 +26,8 @@ setup_test_env() {
     git config user.email "test@example.com"
     # Disable global/system gitignore so tests can add .env and other files freely
     git config core.excludesFile /dev/null
+    # Disable global/system git hooks so tests do not run slow external linters/scanners
+    git config core.hooksPath /dev/null
 
     # Isolate aicommit install from real ~/.aicommit
     export AICOMMIT_DIR="$TEST_TEMP_DIR/aicommit"
@@ -39,9 +41,13 @@ setup_test_env() {
     # Reset caches that survive between tests (set to empty, not unset — avoids
     # "unbound variable" errors when the lib is sourced under set -u contexts)
     export _AICOMMIT_REPO_NAME=""
+    export _AICOMMIT_PREREQS_CHECKED_MODEL=""
 
     # aicommit.sh references $ZSH_VERSION; guard against set -u failures in bash
     export ZSH_VERSION="${ZSH_VERSION:-}"
+
+    # Disable live AI grouping in tests so unit tests test deterministic heuristics
+    export AI_DISABLE_GROUPING="true"
 
     # Global mock for timeout to respect internal mocked functions
     timeout() {

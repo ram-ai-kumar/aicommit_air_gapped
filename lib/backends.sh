@@ -2,36 +2,47 @@
 # LLM Backend Abstraction Layer
 # Provides unified interface for different LLM backends
 
-# Validate backend prerequisites and model availability
+# Global cache to ensure presence of Ollama + LLM is only verified once per session
+_AICOMMIT_PREREQS_CHECKED_MODEL=""
+
+# Validate backend prerequisites and model availability (cached per session)
 validate_backend_prerequisites() {
     local backend="${AI_BACKEND:-ollama}"
     local model="${AI_MODEL:-$DEFAULT_AI_MODEL}"
 
+    if [ -n "$_AICOMMIT_PREREQS_CHECKED_MODEL" ] && [ "$_AICOMMIT_PREREQS_CHECKED_MODEL" = "${backend}:${model}" ]; then
+        return 0
+    fi
+
     case "$backend" in
         ollama)
-            validate_ollama_prerequisites "$model"
+            validate_ollama_prerequisites "$model" || return 1
             ;;
         *)
             display_error "Unsupported backend: $backend" "Supported backends: ollama"
             return 1
             ;;
     esac
+
+    _AICOMMIT_PREREQS_CHECKED_MODEL="${backend}:${model}"
+    return 0
 }
 
 # Invoke LLM with unified interface
-# Args: model, prompt_file, response_file, error_file, timeout_secs
+# Args: model, prompt_file, response_file, error_file, timeout_secs, action_label (optional)
 invoke_llm() {
     local model="$1"
     local prompt_file="$2"
     local response_file="$3"
     local error_file="$4"
     local timeout_secs="$5"
+    local action_label="${6:-Generating commit message}"
 
     local backend="${AI_BACKEND:-ollama}"
 
     case "$backend" in
         ollama)
-            invoke_ollama "$model" "$prompt_file" "$response_file" "$error_file" "$timeout_secs"
+            invoke_ollama "$model" "$prompt_file" "$response_file" "$error_file" "$timeout_secs" "$action_label"
             ;;
         *)
             display_error "Unsupported backend: $backend" "Supported backends: ollama"
@@ -89,6 +100,7 @@ invoke_ollama() {
     local response_file="$3"
     local error_file="$4"
     local timeout_secs="$5"
+    local action_label="${6:-Generating commit message}"
 
     # Use the configured AI_MODEL
     local current_model="${AI_MODEL:-$model}"
@@ -100,8 +112,13 @@ invoke_ollama() {
         extra_args+=("--think=false")
     fi
 
-    # Run ollama in background to allow timeout and elapsed-time display
-    ollama run "${extra_args[@]}" "$current_model" < "$prompt_file" > "$response_file" 2> "$error_file" &
+    # Disable automatic word wrapping in Ollama CLI to prevent cursor backspace and rewrite artifacts
+    if ollama run --help 2>&1 | grep -q -- "--nowordwrap"; then
+        extra_args+=("--nowordwrap")
+    fi
+
+    # Run ollama in background to allow timeout and elapsed-time display (TERM=dumb & COLUMNS=1000 prevents terminal escapes)
+    COLUMNS=1000 TERM=dumb NO_COLOR=1 ollama run "${extra_args[@]}" "$current_model" < "$prompt_file" > "$response_file" 2> "$error_file" &
     local ollama_pid=$!
 
     local progress_dev="/dev/null"
@@ -110,13 +127,13 @@ invoke_ollama() {
     fi
 
     local elapsed=0
-    printf "🧠 Generating commit message using $current_model..." > "$progress_dev"
+    printf "=> %s using $current_model..." "$action_label" > "$progress_dev"
     while kill -0 "$ollama_pid" 2>/dev/null; do
         sleep 0.5
         elapsed=$((elapsed + 5)) # We add .5 seconds each time
         # Only print every second to reduce terminal noise
         if (( elapsed % 10 == 0 )); then
-            printf "\r🧠 Generating commit message using $current_model... (%ds)" "$((elapsed / 10))" > "$progress_dev"
+            printf "\r=> %s using $current_model... (%ds)" "$action_label" "$((elapsed / 10))" > "$progress_dev"
         fi
         if [ "$elapsed" -ge $((timeout_secs * 10)) ]; then
             kill "$ollama_pid" 2>/dev/null

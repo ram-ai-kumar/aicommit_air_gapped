@@ -1,0 +1,22 @@
+You are an expert software developer and Git release engineer.
+Analyze the staged git files and change statistics below and group them into distinct, cohesive, logical atomic commit contexts.
+
+CRITICAL RULES:
+1. Group by FEATURE, FUNCTION, or LOGICAL CONTEXT — NEVER by technical directory or layer (do NOT group files simply as 'models', 'views', 'controllers', 'initializers', 'test', 'db', or 'docs').
+2. Correlate tests, configs, models, migrations, views, and documentation that belong to the same feature or purpose into one context:
+   - E.g., multi-tenancy initializer + tenant integration test + database cleaner helper -> 'apartment multi-tenancy config & tests'
+   - E.g., devise initializer + oauth integration test + user menu view -> 'google oauth & devise authentication'
+   - E.g., product model + spare model -> 'product & spare catalog'
+   - E.g., remaining test coverage additions -> 'test suite coverage'
+3. Every staged file must be assigned to EXACTLY ONE context. Do not drop or omit any files.
+4. Each context name should be a short, lowercase, descriptive phrase (2 to 5 words). Do NOT include variable names, code tokens, or '='.
+5. Output format MUST strictly follow this format inside @@@ delimiters, with one context per line:
+@@@
+<context name> | <file1>,<file2>,...
+<context name> | <file3>,<file4>,...
+@@@
+
+Staged files and statistics to analyze:
+${STAGED_FILES_CONTEXT}
+
+Group the changes into logical contexts now:

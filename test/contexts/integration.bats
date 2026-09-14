@@ -172,7 +172,7 @@ teardown() {
     [ ! -f "${d}/CHANGES_CONTEXT" ]
 }
 
-@test "aic auto-splits multi-scope staged changes and commits all atomically without prompts" {
+@test "aic commits all-in-one without logical grouping checks or prompts" {
     mkdir -p scripts
     echo "console.log('config');" > eslint.config.js
     echo "console.log('scripts');" > scripts/validate.js
@@ -186,7 +186,7 @@ teardown() {
                 echo "test-model      abc123          4.7 GB  2 days ago"
                 ;;
             run)
-                printf '%s\n' "@@@" "chore: atomic update" "@@@"
+                printf '%s\n' "@@@" "chore: quick all in one commit" "@@@"
                 return 0
                 ;;
         esac
@@ -195,6 +195,42 @@ teardown() {
     export AI_MODEL="test-model"
 
     run aic
+    [ "$status" -eq 0 ]
+    assert_output_contains "Committed!"
+    refute_output_contains "distinct scopes"
+
+    local commit_count
+    commit_count=$(git rev-list --count HEAD)
+    [ "$commit_count" -eq 1 ]
+
+    local remaining
+    remaining=$(git diff --staged --name-only)
+    [ -z "$remaining" ]
+}
+
+@test "aic --split splits multi-scope staged changes into atomic commits" {
+    mkdir -p scripts
+    echo "console.log('config');" > eslint.config.js
+    echo "console.log('scripts');" > scripts/validate.js
+    git add eslint.config.js scripts/validate.js
+
+    pgrep() { return 0; }
+    ollama() {
+        case "$1" in
+            list)
+                echo "NAME            ID              SIZE    MODIFIED"
+                echo "test-model      abc123          4.7 GB  2 days ago"
+                ;;
+            run)
+                printf '%s\n' "@@@" "chore: atomic split commit" "@@@"
+                return 0
+                ;;
+        esac
+    }
+    export -f pgrep ollama
+    export AI_MODEL="test-model"
+
+    run aic --split
     [ "$status" -eq 0 ]
     assert_output_contains "All atomic commits completed!"
 
@@ -206,3 +242,196 @@ teardown() {
     remaining=$(git diff --staged --name-only)
     [ -z "$remaining" ]
 }
+
+@test "aicommit aborts commit when user selects 'x' option" {
+    mkdir -p scripts
+    echo "console.log('config');" > eslint.config.js
+    echo "console.log('scripts');" > scripts/validate.js
+    git add eslint.config.js scripts/validate.js
+
+    pgrep() { return 0; }
+    ollama() {
+        case "$1" in
+            list)
+                echo "NAME            ID              SIZE    MODIFIED"
+                echo "test-model      abc123          4.7 GB  2 days ago"
+                ;;
+            run)
+                echo "OK"
+                return 0
+                ;;
+        esac
+    }
+    export -f pgrep ollama
+    export AI_MODEL="test-model"
+
+    # Simulate typing 'x'
+    run aicommit <<< "x"
+    [ "$status" -eq 0 ]
+    assert_output_contains "Commit aborted"
+
+    # Files should still be staged
+    local remaining
+    remaining=$(git diff --staged --name-only)
+    [ -n "$remaining" ]
+}
+
+@test "aicommit proceeds with all-in-one commit when user selects default/Y option" {
+    mkdir -p scripts
+    echo "console.log('config');" > eslint.config.js
+    echo "console.log('scripts');" > scripts/validate.js
+    git add eslint.config.js scripts/validate.js
+
+    pgrep() { return 0; }
+    ollama() {
+        case "$1" in
+            list)
+                echo "NAME            ID              SIZE    MODIFIED"
+                echo "test-model      abc123          4.7 GB  2 days ago"
+                ;;
+            run)
+                printf '%s\n' "@@@" "chore: all in one commit" "@@@"
+                return 0
+                ;;
+        esac
+    }
+    export -f pgrep ollama
+    export AI_MODEL="test-model"
+
+    # Send Enter (default = Y) to select all-in-one, then 'y' to confirm the commit message
+    run aicommit <<< $'\ny'
+    [ "$status" -eq 0 ]
+    assert_output_contains "Committed!"
+
+    local commit_count
+    commit_count=$(git rev-list --count HEAD)
+    [ "$commit_count" -eq 1 ]
+
+    local log_msg
+    log_msg=$(git log -1 --pretty=%s)
+    [ "$log_msg" = "chore: all in one commit" ]
+}
+
+@test "aicommit proceeds with multi-commits when user selects 'n' option" {
+    mkdir -p scripts
+    echo "console.log('config');" > eslint.config.js
+    echo "console.log('scripts');" > scripts/validate.js
+    git add eslint.config.js scripts/validate.js
+
+    pgrep() { return 0; }
+    ollama() {
+        case "$1" in
+            list)
+                echo "NAME            ID              SIZE    MODIFIED"
+                echo "test-model      abc123          4.7 GB  2 days ago"
+                ;;
+            run)
+                printf '%s\n' "@@@" "chore: multi-commit split" "@@@"
+                return 0
+                ;;
+        esac
+    }
+    export -f pgrep ollama
+    export AI_MODEL="test-model"
+
+    # Send 'n' to select multi-commits, then confirm each commit
+    run aicommit <<< $'n\ny\ny'
+    [ "$status" -eq 0 ]
+    assert_output_contains "All atomic commits completed!"
+
+    local commit_count
+    commit_count=$(git rev-list --count HEAD)
+    [ "$commit_count" -ge 2 ]
+}
+
+@test "aicommit proceeds with all-in-one commit when user selects '1' option" {
+    mkdir -p scripts
+    echo "console.log('config');" > eslint.config.js
+    echo "console.log('scripts');" > scripts/validate.js
+    git add eslint.config.js scripts/validate.js
+
+    pgrep() { return 0; }
+    ollama() {
+        case "$1" in
+            list)
+                echo "NAME            ID              SIZE    MODIFIED"
+                echo "test-model      abc123          4.7 GB  2 days ago"
+                ;;
+            run)
+                printf '%s\n' "@@@" "chore: all in one commit with 1" "@@@"
+                return 0
+                ;;
+        esac
+    }
+    export -f pgrep ollama
+    export AI_MODEL="test-model"
+
+    # Send '1' to select all-in-one, then 'y' to confirm the commit message
+    run aicommit <<< $'1\ny'
+    [ "$status" -eq 0 ]
+    assert_output_contains "Committed!"
+
+    local commit_count
+    commit_count=$(git rev-list --count HEAD)
+    [ "$commit_count" -eq 1 ]
+
+    local log_msg
+    log_msg=$(git log -1 --pretty=%s)
+    [ "$log_msg" = "chore: all in one commit with 1" ]
+}
+
+@test "aicommit rejects conflicting --split and --no-split options" {
+    mkdir -p scripts
+    echo "console.log('config');" > eslint.config.js
+    git add eslint.config.js
+
+    run aicommit --split --no-split
+    [ "$status" -eq 1 ]
+    assert_output_contains "Conflicting options"
+}
+
+@test "aicommit --split --yes splits and auto-commits all scopes without prompts" {
+    mkdir -p scripts
+    echo "console.log('config');" > eslint.config.js
+    echo "console.log('scripts');" > scripts/validate.js
+    git add eslint.config.js scripts/validate.js
+
+    pgrep() { return 0; }
+    ollama() {
+        case "$1" in
+            list)
+                echo "NAME            ID              SIZE    MODIFIED"
+                echo "test-model      abc123          4.7 GB  2 days ago"
+                ;;
+            run)
+                printf '%s\n' "@@@" "chore: split auto commit" "@@@"
+                return 0
+                ;;
+        esac
+    }
+    export -f pgrep ollama
+    export AI_MODEL="test-model"
+
+    run aicommit --split --yes
+    [ "$status" -eq 0 ]
+    assert_output_contains "All atomic commits completed!"
+
+    local commit_count
+    commit_count=$(git rev-list --count HEAD)
+    [ "$commit_count" -ge 2 ]
+}
+
+@test "aicommit validates ollama presence upfront once before analysis" {
+    mkdir -p scripts
+    echo "console.log('config');" > eslint.config.js
+    git add eslint.config.js
+
+    pgrep() { return 1; }
+    export -f pgrep
+
+    run aicommit
+    [ "$status" -eq 1 ]
+    assert_output_contains "Ollama is not running"
+}
+
+

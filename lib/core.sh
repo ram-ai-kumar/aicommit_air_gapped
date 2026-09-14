@@ -5,7 +5,6 @@
 # Validate prerequisites using backend abstraction
 validate_prerequisites() {
     validate_backend_prerequisites
-    return 0
 }
 
 # Get temp directory scoped to current repo
@@ -153,11 +152,12 @@ filter_and_truncate_diff() {
 }
 
 # Build AI context — writes CHANGES_CONTEXT to temp dir
-# Args: $1=diff, $2=staged_files, $3=numstat_data
+# Args: $1=diff, $2=staged_files, $3=numstat_data, $4=logical_scope (optional)
 build_ai_context() {
     local changes="$1"
     local staged_files="$2"
     local numstat_data="$3"
+    local logical_scope="${4:-}"
     local tmp_dir
     tmp_dir=$(get_aicommit_tmp_dir)
 
@@ -253,6 +253,14 @@ ${stat_only_stat}"
 ${commit_history}"
     fi
 
+    if [ -n "$logical_scope" ]; then
+        changes_context="${changes_context}
+
+=== LOGICAL COMMIT SCOPE & FEATURE ===
+This atomic commit is scoped specifically to: ${logical_scope}.
+Generate the commit message type, scope, and description focused on this logical concern."
+    fi
+
     printf '%s' "$changes_context" > "${tmp_dir}/CHANGES_CONTEXT"
 }
 
@@ -264,9 +272,32 @@ extract_conventional_commit() {
     local raw_input="$1"
     [ -z "$raw_input" ] && return 0
 
-    # Step 1: Strip ANSI escape sequences and carriage returns
+    # Step 1: Strip carriage returns and resolve terminal cursor backspaces
     local cleaned
-    cleaned=$(printf '%s' "$raw_input" | tr -d '\r' | sed -E $'s/\x1B\\[[0-9;]*[a-zA-Z]//g')
+    cleaned=$(printf '%s' "$raw_input" | tr -d '\r')
+
+    # Resolve terminal cursor backspaces and line clears (\x1b[<N>D\x1b[K) emitted by terminal word-wrappers
+    if command -v perl >/dev/null 2>&1; then
+        cleaned=$(printf '%s\n' "$cleaned" | perl -0777 -pe '
+            # Strip non-destructive ANSI escapes (cursor show/hide, colors) first
+            s/\x1b\[\?[0-9]+[hl]//g;
+            s/\x1b\[[0-9;]*m//g;
+
+            # Resolve terminal cursor backspaces (\x1b[<N>D) with optional erase and newline
+            while (/(\x1b\[(\d+)D(?:\x1b\[[0-9;]*[a-zA-Z])?\n?)/) {
+                my $len = $2;
+                s/.{$len}\x1b\[${len}D(?:\x1b\[[0-9;]*[a-zA-Z])?\n?//s;
+            }
+
+            # Resolve ASCII backspaces (\b)
+            while (/.\x08/) {
+                s/.\x08//g;
+            }
+        ')
+    fi
+
+    # Strip remaining ANSI escape sequences
+    cleaned=$(printf '%s\n' "$cleaned" | sed -E $'s/\x1B\\[[0-9;]*[a-zA-Z]//g')
 
     # Step 2: Handle reasoning / thinking closing tags
     # If any closing tag (</think>, </thought>, </thinking>, </reasoning>) exists,
@@ -417,9 +448,17 @@ extract_conventional_commit() {
     # Step 6: Post-processing & Normalization
     cleaned=$(printf '%s' "$cleaned" | sed 's/`//g; s/\*\*//g')
 
-    # Remove immediate token stutters (e.g. "an and", "op optimize", "and and")
+    # Remove immediate token stutters and terminal word-wrap fragment stutters
     if command -v perl >/dev/null 2>&1; then
-        cleaned=$(printf '%s\n' "$cleaned" | perl -pe 's/\b([a-zA-Z]{2,})\s+\1\b/\1/g; s/\b([a-zA-Z]{2,})\s+\1([a-zA-Z]+)\b/\1\2/g')
+        cleaned=$(printf '%s\n' "$cleaned" | perl -0777 -pe '
+            # Remove word-wrap fragment stutters where line N ends with a prefix of line N+1 leading word
+            # e.g. "feature/fun\nfeature/functionality" -> "feature/functionality"
+            s/(?:^[ \t]*|[ \t]+)([a-zA-Z0-9_\/\-\.]+)[ \t]*\n+[ \t]*(?=\1[a-zA-Z0-9_\/\-\.]*)/ /mg;
+
+            # Remove token duplication stutters (e.g. "an and", "and and")
+            s/\b([a-zA-Z]{2,})\s+\1\b/\1/g;
+            s/\b([a-zA-Z]{2,})\s+\1([a-zA-Z]+)\b/\1\2/g;
+        ')
     fi
 
     # Trim leading and trailing empty lines and normalize header-body separation
@@ -434,6 +473,11 @@ extract_conventional_commit() {
                 next
             }
             if (!reading_body) {
+                # If next line is not empty and not a bullet point, it is a continuation of the header line
+                if ($0 != "" && $0 !~ /^[[:space:]]*[-*+]/) {
+                    header = header " " $0
+                    next
+                }
                 if ($0 == "") next
                 reading_body = 1
             }
