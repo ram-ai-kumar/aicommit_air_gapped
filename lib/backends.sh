@@ -158,7 +158,7 @@ invoke_ollama() {
     done
     wait "$ollama_pid"
     local exit_code=$?
-    printf "\n" > "$progress_dev"
+    printf "\r\033[K" > "$progress_dev"
 
     if [ $exit_code -ne 0 ]; then
         local error_content

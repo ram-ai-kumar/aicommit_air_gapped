@@ -45,7 +45,7 @@ aicommit() {
                 echo "  --split, -s        Split staged changes into atomic commits by logical scope"
                 echo "  --no-split, --all  Keep all staged changes in a single all-in-one commit"
                 echo "  --dry-run, -d      Build context and show prompt without calling LLM"
-                echo "  --verbose, -v      Show temp file paths and enhanced context"
+                echo "  --verbose, -v      Show diagnostics: staged file list, backend/model, temp paths"
                 echo "  --regenerate, -r   Re-run LLM on cached prompt without re-analyzing"
                 echo ""
                 echo "Examples:"
@@ -105,9 +105,9 @@ aicommit() {
             response=${response:-y}
         fi
         case $response in
-            y|Y) process_commit "$commit_msg"; cleanup_aicommit_all; display_success ;;
+            y|Y) process_commit "$commit_msg" && display_success; cleanup_aicommit_all ;;
             e|E) git commit -e -m "$commit_msg"; cleanup_aicommit_all ;;
-            *)   echo "❌ Cancelled" ;;
+            *)   echo "❌ Commit cancelled." ;;
         esac
         return 0
     fi
@@ -128,8 +128,8 @@ aicommit() {
         return 1
     fi
 
-    # Display git status list of modified files
-    display_staged_files
+    # Staged file list is diagnostics — shown only in --verbose
+    [ "$verbose" = "true" ] && display_staged_files "$staged_files" "$numstat_data"
 
     local scope_groups="" num_scopes=0 scope_names=""
 
@@ -148,8 +148,8 @@ aicommit() {
             case "$split_choice" in
                 y|Y|yes|Yes|""|a|A|1|all|all-in-one) split_mode=false ;;
                 n|N|no|No|m|M|multi|split|s|S) split_mode=true ;;
-                x|X|abort|Abort|q|Q|cancel) echo "❌ Commit aborted."; return 0 ;;
-                *) echo "❌ Commit aborted."; return 0 ;;
+                x|X|abort|Abort|q|Q|cancel) echo "❌ Commit cancelled."; return 0 ;;
+                *) echo "❌ Commit cancelled."; return 0 ;;
             esac
         fi
     fi
@@ -216,8 +216,9 @@ aicommit() {
             fi
             case "$grp_resp" in
                 y|Y)
-                    commit_staged_subset "$grp_commit_msg" "$grp_files"
-                    echo "✅ Committed scope '$grp_scope' ($grp_files)"
+                    if commit_staged_subset "$grp_commit_msg" "$grp_files"; then
+                        display_scope_success "$grp_scope"
+                    fi
                     ;;
                 e|E)
                     edit_file="${tmp_dir}/COMMIT_EDITMSG"
@@ -226,8 +227,9 @@ aicommit() {
                     edited_msg=$(cat "$edit_file" 2>/dev/null || true)
                     rm -f "$edit_file"
                     if [ -n "$edited_msg" ]; then
-                        commit_staged_subset "$edited_msg" "$grp_files"
-                        echo "✅ Committed scope '$grp_scope' ($grp_files)"
+                        if commit_staged_subset "$edited_msg" "$grp_files"; then
+                            display_scope_success "$grp_scope"
+                        fi
                     else
                         echo "⚠️ Commit message was empty. Skipping scope '$grp_scope'."
                     fi
@@ -251,24 +253,14 @@ aicommit() {
         return 1
     fi
 
-    # Build context first (this creates FILE_COUNT safely)
+    # Build context for the LLM prompt
     build_ai_context "$changes" "$staged_files" "$numstat_data"
     if [ $? -ne 0 ]; then
         return 1
     fi
 
-    local file_list file_count
-    # Read count from temp file to avoid xtrace pollution in subshell capture
-    file_count=$(cat "${tmp_dir}/FILE_COUNT" 2>/dev/null || echo "0")
-    # Build list from staged_files safely
-    file_list=$(printf '%s' "$staged_files" | tr '\n' ', ' | sed 's/,$//')
-
-    display_setup_info "$file_count" "$file_list"
-    if [ $? -ne 0 ]; then
-        return 1
-    fi
-
     if [ "$verbose" = "true" ]; then
+        display_setup_info
         echo "📂 Temp dir: ${tmp_dir}"
         echo "   CHANGES_CONTEXT: ${tmp_dir}/CHANGES_CONTEXT"
         echo "   FULL_PROMPT:     ${tmp_dir}/FULL_PROMPT"
@@ -298,9 +290,9 @@ aicommit() {
     fi
 
     case $response in
-        y|Y) process_commit "$commit_msg"; cleanup_aicommit_all; display_success ;;
+        y|Y) process_commit "$commit_msg" && display_success; cleanup_aicommit_all ;;
         e|E) git commit -e -m "$commit_msg"; cleanup_aicommit_all ;;
-        *)   echo "❌ Cancelled" ;;
+        *)   echo "❌ Commit cancelled." ;;
     esac
 }
 

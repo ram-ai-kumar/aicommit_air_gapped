@@ -13,33 +13,65 @@ teardown() {
 # ─── display_setup_info ───────────────────────────────────────────────────────
 
 @test "display_setup_info exits 0" {
-    run display_setup_info "2" "app.js, app.py"
+    run display_setup_info
     [ "$status" -eq 0 ]
 }
 
-@test "display_setup_info includes file count" {
-    run display_setup_info "3" "a.js, b.py, c.sh"
-    assert_output_contains "3 files"
+@test "display_setup_info shows backend" {
+    run display_setup_info
+    assert_output_contains "Backend: ollama"
 }
 
-@test "display_setup_info includes file list" {
-    run display_setup_info "1" "app.js"
-    assert_output_contains "app.js"
+@test "display_setup_info shows configured model" {
+    run display_setup_info
+    assert_output_contains "Model: $(get_default_ai_model)"
 }
 
-@test "display_setup_info mentions Ollama status" {
-    run display_setup_info "1" "app.js"
-    assert_output_contains "Ollama running"
-}
-
-@test "display_setup_info does not duplicate git status list when changes are staged" {
+@test "display_setup_info does not list staged files" {
     echo "test content" > test_file.txt
     git add test_file.txt
-    run display_setup_info "1" "test_file.txt"
-    refute_output_contains "new file:   test_file.txt"
-    assert_output_contains "1 files"
+    run display_setup_info
+    refute_output_contains "test_file.txt"
+    refute_output_contains "Staged"
     git reset test_file.txt >/dev/null 2>&1 || true
     rm -f test_file.txt
+}
+
+# ─── display_staged_files ─────────────────────────────────────────────────────
+
+@test "display_staged_files shows header with file count and churn" {
+    echo "line" > app.js
+    git add app.js
+    run display_staged_files "$(git diff --staged --name-only)" "$(git diff --staged --numstat)"
+    [ "$status" -eq 0 ]
+    assert_output_contains "Staged changes (1 file, +1 -0):"
+}
+
+@test "display_staged_files shows new file status word" {
+    echo "x" > newfile.js
+    git add newfile.js
+    run display_staged_files "$(git diff --staged --name-only)" "$(git diff --staged --numstat)"
+    assert_output_contains "new file:   newfile.js"
+}
+
+@test "display_staged_files shows modified and renamed status words" {
+    echo "a" > mod_me.txt
+    echo "r" > orig.txt
+    git add mod_me.txt orig.txt
+    git commit -qm "init"
+    echo "b" >> mod_me.txt
+    git add mod_me.txt
+    git mv orig.txt moved.txt
+    run display_staged_files "$(git diff --staged --name-only)" "$(git diff --staged --numstat)"
+    assert_output_contains "Staged changes (2 files,"
+    assert_output_contains "modified:   mod_me.txt"
+    assert_output_contains "renamed:    orig.txt -> moved.txt"
+}
+
+@test "display_staged_files prints nothing when no staged changes" {
+    run display_staged_files "" ""
+    [ "$status" -eq 0 ]
+    refute_output_contains "Staged changes"
 }
 
 # ─── display_commit_message ───────────────────────────────────────────────────
@@ -131,6 +163,16 @@ test|test1.bats,test2.bats,test3.bats,test4.bats"
     assert_output_contains "- test4.bats"
 }
 
+@test "display_split_confirmation caps file list with overflow count" {
+    local groups="big|f1.js,f2.js,f3.js,f4.js,f5.js,f6.js,f7.js"
+    run display_split_confirmation "1" "big" "$groups"
+    [ "$status" -eq 0 ]
+    assert_output_contains "(7 files):"
+    assert_output_contains "- f5.js"
+    refute_output_contains "- f6.js"
+    assert_output_contains "… and 2 more"
+}
+
 @test "display_split_progress shows current and total with scope" {
     run display_split_progress "1" "3" "config"
     [ "$status" -eq 0 ]
@@ -174,6 +216,16 @@ test|test1.bats,test2.bats,test3.bats,test4.bats"
 @test "display_success shows Committed" {
     run display_success
     assert_output_contains "Committed"
+}
+
+@test "display_success shows short commit SHA when HEAD exists" {
+    echo "x" > f.txt
+    git add f.txt
+    git commit -qm "init"
+    local sha
+    sha=$(git rev-parse --short HEAD)
+    run display_success
+    assert_output_contains "Committed! ($sha)"
 }
 
 # ─── display_commit_confirmation ─────────────────────────────────────────────

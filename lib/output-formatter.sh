@@ -2,28 +2,41 @@
 # aicommit — Output Formatter
 # Display helpers for commit messages, errors, and status.
 
+# Display staged file list with count and churn summary.
+# Args: $1=staged_files (newline-separated), $2=numstat_data
 display_staged_files() {
-    local staged_status=""
+    local staged_files="$1" numstat_data="$2"
+    local name_status=""
     if command -v git &>/dev/null; then
-        staged_status=$(git status 2>/dev/null | awk '/Changes to be committed:/{flag=1; next} /^[A-Za-z]/{flag=0} flag' | grep -E '^\s*(modified|new file|deleted|renamed|typechange):' || true)
+        name_status=$(git diff --staged --name-status 2>/dev/null)
     fi
+    [ -z "$name_status" ] && return 0
 
-    if [ -n "$staged_status" ]; then
-        echo "Changes to be committed:"
-        echo "$staged_status"
-        echo ""
-    fi
+    local file_count adds dels plural status file rest
+    file_count=$(printf '%s\n' "$staged_files" | grep -c '.')
+    adds=$(printf '%s\n' "$numstat_data" | awk '{a += $1} END {print a + 0}')
+    dels=$(printf '%s\n' "$numstat_data" | awk '{d += $2} END {print d + 0}')
+    plural="s"
+    [ "$file_count" -eq 1 ] && plural=""
+
+    echo ""
+    printf 'Staged changes (%s file%s, +%s -%s):\n' "$file_count" "$plural" "$adds" "$dels"
+    printf '%s\n' "$name_status" | while IFS=$'\t' read -r status file rest; do
+        case "$status" in
+            M*)  printf '        modified:   %s\n' "$file" ;;
+            A*)  printf '        new file:   %s\n' "$file" ;;
+            D*)  printf '        deleted:    %s\n' "$file" ;;
+            R*)  printf '        renamed:    %s -> %s\n' "$file" "$rest" ;;
+            C*)  printf '        copied:     %s -> %s\n' "$file" "$rest" ;;
+            T*)  printf '        typechange: %s\n' "$file" ;;
+            *)   printf '        %s: %s\n' "$status" "$file" ;;
+        esac
+    done
+    echo ""
 }
 
 display_setup_info() {
-    local file_count="$1" file_list="$2"
-
-    echo "💡 Setup: Ollama running, model ready"
-    if [ -n "$file_list" ]; then
-        echo "📁 Staged ($file_count files): $file_list"
-    else
-        echo "📁 Staged ($file_count files)"
-    fi
+    echo "💡 Backend: ${AI_BACKEND:-ollama} · Model: ${AI_MODEL:-$DEFAULT_AI_MODEL}"
 }
 
 display_commit_message() {
@@ -97,10 +110,16 @@ display_split_confirmation() {
             [ "$file_count" -eq 1 ] && count_str="($file_count file):"
 
             echo "  • $grp_scope $count_str"
+            local shown=0
             while IFS= read -r f; do
                 f=$(echo "$f" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')
                 [ -z "$f" ] && continue
+                if [ "$shown" -ge 5 ]; then
+                    echo "      … and $((file_count - shown)) more"
+                    break
+                fi
                 echo "      - $f"
+                shown=$((shown + 1))
             done <<< "$(echo "$grp_files" | tr ',' '\n')"
         done <<< "$scope_groups"
         echo ""
@@ -124,7 +143,24 @@ display_error() {
 }
 
 display_success() {
-    echo "✅ Committed!"
+    local sha
+    sha=$(git rev-parse --short HEAD 2>/dev/null || true)
+    if [ -n "$sha" ]; then
+        echo "✅ Committed! ($sha)"
+    else
+        echo "✅ Committed!"
+    fi
+}
+
+# Success line for one atomic commit in --split mode
+display_scope_success() {
+    local scope="$1" sha
+    sha=$(git rev-parse --short HEAD 2>/dev/null || true)
+    if [ -n "$sha" ]; then
+        echo "✅ Committed scope '$scope' ($sha)"
+    else
+        echo "✅ Committed scope '$scope'"
+    fi
 }
 
 display_commit_confirmation() {
