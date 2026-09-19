@@ -32,11 +32,19 @@ teardown() {
     [ "$status" -eq 0 ]
 }
 
-@test "dry-run shows Staged files summary" {
+@test "dry-run --verbose shows staged files summary" {
     echo "function test() {}" > app.js
     git add app.js
-    run aicommit --dry-run
+    run aicommit --dry-run --verbose
     assert_output_contains "Staged"
+}
+
+@test "dry-run is quiet by default: no staged list or backend line" {
+    echo "content" > app.js
+    git add app.js
+    run aicommit --dry-run
+    refute_output_contains "Staged changes"
+    refute_output_contains "Backend:"
 }
 
 @test "dry-run shows Dry run message" {
@@ -46,11 +54,18 @@ teardown() {
     assert_output_contains "Dry run"
 }
 
-@test "dry-run shows Ollama running setup line" {
+@test "dry-run --verbose shows backend and model line" {
+    echo "content" > app.js
+    git add app.js
+    run aicommit --dry-run --verbose
+    assert_output_contains "Backend: ollama"
+}
+
+@test "dry-run does not repeat staged file list after staged summary" {
     echo "content" > app.js
     git add app.js
     run aicommit --dry-run
-    assert_output_contains "Ollama running"
+    refute_output_contains "📁 Staged"
 }
 
 @test "dry-run creates FULL_PROMPT file" {
@@ -123,11 +138,11 @@ teardown() {
     [ "$status" -eq 0 ]
 }
 
-@test "dry-run file count reflects staged files" {
+@test "dry-run --verbose file count reflects staged files" {
     echo "a" > f1.sh
     echo "b" > f2.sh
     git add f1.sh f2.sh
-    run aicommit --dry-run
+    run aicommit --dry-run --verbose
     assert_output_contains "2 files"
 }
 
@@ -268,7 +283,7 @@ teardown() {
     # Simulate typing 'x'
     run aicommit <<< "x"
     [ "$status" -eq 0 ]
-    assert_output_contains "Commit aborted"
+    assert_output_contains "Commit cancelled"
 
     # Files should still be staged
     local remaining
