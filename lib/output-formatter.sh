@@ -94,22 +94,56 @@ display_split_confirmation() {
     local scopes="$2"
     local scope_groups="$3"
     local group_line="" grp_scope="" grp_files="" file_count=0 count_str=""
-    local f=""
+    local f="" s=""
 
-    echo "💡 Staged changes span $count distinct scopes: [$scopes]"
-
+    # Filter and validate scope groups
+    # Only keep lines with '|', non-empty scope and files, and no variable assignments ('=')
+    local -a valid_groups=()
+    local -a valid_scopes=()
     if [ -n "$scope_groups" ]; then
         while IFS= read -r group_line; do
             [ -z "$group_line" ] && continue
-            grp_scope=$(echo "$group_line" | cut -d'|' -f1)
-            grp_files=$(echo "$group_line" | cut -d'|' -f2)
+            echo "$group_line" | grep -q '|' || continue
+
+            grp_scope=$(echo "$group_line" | cut -d'|' -f1 | sed -E 's/^[[:space:]*#-]+//; s/[[:space:]]+$//; s/`//g; s/\*\*//g')
+            grp_files=$(echo "$group_line" | cut -d'|' -f2- | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')
+
             [ -z "$grp_scope" ] && continue
+            [ -z "$grp_files" ] && continue
+            echo "$grp_scope" | grep -q '=' && continue
+            echo "$grp_scope" | grep -qiE '^(joined_files|staged_files|files|local |export )' && continue
+
+            valid_groups+=("${grp_scope}|${grp_files}")
+            valid_scopes+=("$grp_scope")
+        done <<< "$scope_groups"
+    fi
+
+    # Reconcile count and scopes from valid groups when available
+    if [ ${#valid_groups[@]} -gt 0 ]; then
+        count="${#valid_groups[@]}"
+        local s_joined=""
+        for s in "${valid_scopes[@]}"; do
+            [ -n "$s_joined" ] && s_joined="${s_joined}, "
+            s_joined="${s_joined}${s}"
+        done
+        scopes="$s_joined"
+    fi
+
+    echo "💡 Staged changes span $count distinct scopes: [$scopes]"
+
+    if [ ${#valid_groups[@]} -gt 0 ]; then
+        local total=${#valid_groups[@]}
+        local idx=1
+        for group_line in "${valid_groups[@]}"; do
+            grp_scope=$(echo "$group_line" | cut -d'|' -f1)
+            grp_files=$(echo "$group_line" | cut -d'|' -f2-)
 
             file_count=$(echo "$grp_files" | tr ',' '\n' | grep -c '.' || echo "0")
             count_str="($file_count files):"
             [ "$file_count" -eq 1 ] && count_str="($file_count file):"
 
-            echo "  • $grp_scope $count_str"
+            echo ""
+            echo "  📁 Category $idx of $total: $grp_scope $count_str"
             local shown=0
             while IFS= read -r f; do
                 f=$(echo "$f" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')
@@ -121,7 +155,8 @@ display_split_confirmation() {
                 echo "      - $f"
                 shown=$((shown + 1))
             done <<< "$(echo "$grp_files" | tr ',' '\n')"
-        done <<< "$scope_groups"
+            idx=$((idx + 1))
+        done
         echo ""
     fi
 

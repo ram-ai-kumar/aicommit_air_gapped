@@ -458,6 +458,7 @@ validate_and_reconcile_contexts() {
         while IFS= read -r f; do
             f=$(echo "$f" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//; s/`//g; s/\*\*//g')
             [ -z "$f" ] && continue
+            echo "$f" | grep -q '=' && continue
 
             local is_staged=false
             for sf in "${staged_array[@]}"; do

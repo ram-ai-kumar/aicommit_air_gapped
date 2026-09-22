@@ -173,6 +173,27 @@ test|test1.bats,test2.bats,test3.bats,test4.bats"
     assert_output_contains "… and 2 more"
 }
 
+@test "display_split_confirmation formats categories with clear separation and category numbers" {
+    local groups="core|aicommit.sh,lib/core.sh
+prompt|templates/prompt.txt"
+    run display_split_confirmation "2" "core, prompt" "$groups"
+    [ "$status" -eq 0 ]
+    assert_output_contains "📁 Category 1 of 2: core (2 files):"
+    assert_output_contains "📁 Category 2 of 2: prompt (1 file):"
+}
+
+@test "display_split_confirmation rejects malformed scope lines and reconciles count" {
+    local groups="joined_files=public/asset.svg,public/test.txt
+static assets & certificate challenge|public/asset.svg,public/test.txt
+layout updates|src/layouts/Layout.astro"
+    run display_split_confirmation "3" "joined_files=..., static assets & certificate challenge, layout updates" "$groups"
+    [ "$status" -eq 0 ]
+    assert_output_contains "2 distinct scopes: [static assets & certificate challenge, layout updates]"
+    assert_output_contains "📁 Category 1 of 2: static assets & certificate challenge (2 files):"
+    assert_output_contains "📁 Category 2 of 2: layout updates (1 file):"
+    refute_output_contains "joined_files"
+}
+
 @test "display_split_progress shows current and total with scope" {
     run display_split_progress "1" "3" "config"
     [ "$status" -eq 0 ]

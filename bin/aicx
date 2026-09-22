@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# aicx CLI wrapper — runs aicx() as a standalone command
+set -e
+
+AICOMMIT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+source "$AICOMMIT_DIR/aicommit.sh"
+aicx "$@"

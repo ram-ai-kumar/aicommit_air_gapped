@@ -40,7 +40,7 @@ aicommit() {
                 echo "Analyzes staged changes and generates commit messages using local LLM."
                 echo ""
                 echo "Options:"
-                echo "  --help, -h         Show this help message"
+                echo "  --help, -h         Show this help message and exit"
                 echo "  --yes, -y          Automatically accept generated commit messages without interactive prompts"
                 echo "  --split, -s        Split staged changes into atomic commits by logical scope"
                 echo "  --no-split, --all  Keep all staged changes in a single all-in-one commit"
@@ -48,13 +48,20 @@ aicommit() {
                 echo "  --verbose, -v      Show diagnostics: staged file list, backend/model, temp paths"
                 echo "  --regenerate, -r   Re-run LLM on cached prompt without re-analyzing"
                 echo ""
+                echo "Quick Shell Shims:"
+                echo "  aic                Fast all-in-one commit (shorthand for: aicommit --yes --no-split)"
+                echo "  aicc               Fast atomic split commits (shorthand for: aicommit --yes --split)"
+                echo "  aicx               Verbose dry-run preview (shorthand for: aicommit --dry-run --verbose --no-split)"
+                echo "  aiccx              Verbose dry-run split preview (shorthand for: aicommit --dry-run --verbose --split)"
+                echo ""
                 echo "Examples:"
                 echo "  git add -p && aicommit        Stage changes, then generate commit"
-                echo "  aicommit --split               Split into atomic commits by logical scope"
-                echo "  aicommit --yes                 Auto-accept commit message and commit (all-in-one)"
-                echo "  aicommit --split --yes         Split and auto-commit each atomic scope"
-                echo "  aicommit --dry-run             Preview the prompt sent to LLM"
-                echo "  aicommit --regenerate          Regenerate from last analysis"
+                echo "  aic                           Fast all-in-one commit"
+                echo "  aicc                          Split and auto-commit each atomic scope"
+                echo "  aicx                          Preview prompt and staged files (0 changes made)"
+                echo "  aiccx                         Preview atomic scope groups (0 changes made)"
+                echo "  aicommit --dry-run            Preview the prompt sent to LLM"
+                echo "  aicommit --regenerate         Regenerate from last analysis"
                 return 0
                 ;;
             --yes|-y)        auto_yes=true ;;
@@ -137,6 +144,7 @@ aicommit() {
     # When running as 'aic', assume all-in-one commit without checking for logical grouping
     if [ "$is_aic" != "true" ] && [ "$split_mode" = "false" ] && [ "$dry_run" != "true" ]; then
         scope_groups=$(group_staged_files_by_scope "$staged_files" "$changes" "$numstat_data")
+        scope_groups=$(printf '%s\n' "$scope_groups" | awk -F'|' 'NF>=2 && $1!="" && $2!="" && $1 !~ /=/ && $1 !~ /^(joined_files|staged_files|files)/ {print $0}')
         num_scopes=$(echo "$scope_groups" | grep -c '|' || echo "0")
         scope_names=$(echo "$scope_groups" | awk -F'|' '{printf (NR>1?", ":"") $1} END{print ""}')
 
@@ -158,6 +166,7 @@ aicommit() {
     if [ "$split_mode" = "true" ]; then
         if [ -z "$scope_groups" ]; then
             scope_groups=$(group_staged_files_by_scope "$staged_files" "$changes" "$numstat_data")
+            scope_groups=$(printf '%s\n' "$scope_groups" | awk -F'|' 'NF>=2 && $1!="" && $2!="" && $1 !~ /=/ && $1 !~ /^(joined_files|staged_files|files)/ {print $0}')
             num_scopes=$(echo "$scope_groups" | grep -c '|' || echo "0")
             scope_names=$(echo "$scope_groups" | awk -F'|' '{printf (NR>1?", ":"") $1} END{print ""}')
         fi
@@ -298,5 +307,20 @@ aicommit() {
 
 # Quick AI commit — auto-commits all-in-one without confirmation or scope grouping
 aic() {
-    AIC_SHORTCUT=true aicommit --yes --shortcut "$@"
+    AIC_SHORTCUT=true aicommit --yes --no-split --shortcut "$@"
+}
+
+# Quick AI commit categorized — auto-commits each atomic scope separately
+aicc() {
+    AIC_SHORTCUT=true aicommit --yes --split --shortcut "$@"
+}
+
+# Verbose dry-run inspection for single all-in-one commit (0 changes made)
+aicx() {
+    AIC_SHORTCUT=true aicommit --dry-run --verbose --no-split --shortcut "$@"
+}
+
+# Verbose dry-run inspection for atomic split commits (0 changes made)
+aiccx() {
+    AIC_SHORTCUT=true aicommit --dry-run --verbose --split --shortcut "$@"
 }

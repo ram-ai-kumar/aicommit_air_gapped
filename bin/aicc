@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# aicc CLI wrapper — runs aicc() as a standalone command
+set -e
+
+AICOMMIT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+source "$AICOMMIT_DIR/aicommit.sh"
+aicc "$@"
