@@ -145,9 +145,8 @@ teardown() {
 }
 
 @test "display_split_confirmation shows preview of file samples per scope" {
-    local groups="core|aicommit.sh,lib/core.sh
-prompt|templates/prompt.txt
-test|test1.bats,test2.bats,test3.bats,test4.bats"
+    local groups
+    groups=$(printf 'core\taicommit.sh\tlib/core.sh\nprompt\ttemplates/prompt.txt\ntest\ttest1.bats\ttest2.bats\ttest3.bats\ttest4.bats')
     run display_split_confirmation "3" "core, prompt, test" "$groups"
     [ "$status" -eq 0 ]
     assert_output_contains "core"
@@ -164,7 +163,8 @@ test|test1.bats,test2.bats,test3.bats,test4.bats"
 }
 
 @test "display_split_confirmation caps file list with overflow count" {
-    local groups="big|f1.js,f2.js,f3.js,f4.js,f5.js,f6.js,f7.js"
+    local groups
+    groups=$(printf 'big\tf1.js\tf2.js\tf3.js\tf4.js\tf5.js\tf6.js\tf7.js')
     run display_split_confirmation "1" "big" "$groups"
     [ "$status" -eq 0 ]
     assert_output_contains "(7 files):"
@@ -174,8 +174,8 @@ test|test1.bats,test2.bats,test3.bats,test4.bats"
 }
 
 @test "display_split_confirmation formats categories with clear separation and category numbers" {
-    local groups="core|aicommit.sh,lib/core.sh
-prompt|templates/prompt.txt"
+    local groups
+    groups=$(printf 'core\taicommit.sh\tlib/core.sh\nprompt\ttemplates/prompt.txt')
     run display_split_confirmation "2" "core, prompt" "$groups"
     [ "$status" -eq 0 ]
     assert_output_contains "📁 Category 1 of 2: core (2 files):"
@@ -183,9 +183,8 @@ prompt|templates/prompt.txt"
 }
 
 @test "display_split_confirmation rejects malformed scope lines and reconciles count" {
-    local groups="joined_files=public/asset.svg,public/test.txt
-static assets & certificate challenge|public/asset.svg,public/test.txt
-layout updates|src/layouts/Layout.astro"
+    local groups
+    groups=$(printf 'joined_files=public/asset.svg,public/test.txt\nstatic assets & certificate challenge\tpublic/asset.svg\tpublic/test.txt\nlayout updates\tsrc/layouts/Layout.astro')
     run display_split_confirmation "3" "joined_files=..., static assets & certificate challenge, layout updates" "$groups"
     [ "$status" -eq 0 ]
     assert_output_contains "2 distinct scopes: [static assets & certificate challenge, layout updates]"

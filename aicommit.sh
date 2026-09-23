@@ -108,7 +108,16 @@ aicommit() {
         local response="y"
         if [ "$auto_yes" != "true" ]; then
             display_commit_confirmation
-            read -r response
+            # `read` returning non-zero here means stdin hit EOF with nothing to
+            # read (e.g. invoked from a hook with stdin on /dev/null) — NOT the
+            # same as piped input ("echo y | aicommit"), which still succeeds.
+            # Without this check, `response=${response:-y}` would silently treat
+            # "no input at all" as if the user had confirmed.
+            if ! read -r response; then
+                display_error "No input available to confirm the commit (stdin closed)" \
+                    "Re-run with --yes to accept generated messages automatically"
+                return 1
+            fi
             response=${response:-y}
         fi
         case $response in
@@ -119,11 +128,13 @@ aicommit() {
         return 0
     fi
 
-    # Capture staged changes (3 git calls total)
+    # Capture staged changes. core.quotePath=false (via agit) keeps non-ASCII
+    # filenames as raw UTF-8 instead of octal-escaped "quoted\342\204\242strings"
+    # that never match anything downstream (pathspecs, case patterns, grep).
     local changes staged_files numstat_data
-    changes=$(git diff --staged)
-    staged_files=$(git diff --staged --name-only)
-    numstat_data=$(git diff --staged --numstat)
+    changes=$(agit diff --staged)
+    staged_files=$(agit diff --staged -z --name-only | tr '\0' '\n')
+    numstat_data=$(agit diff --staged --numstat)
 
     if [ -z "$changes" ] || [ -z "$staged_files" ]; then
         display_error "No staged changes"
@@ -140,18 +151,23 @@ aicommit() {
 
     local scope_groups="" num_scopes=0 scope_names=""
 
-    # Check for multi-scope staging only when run as full aicommit (not as 'aic' shortcut)
-    # When running as 'aic', assume all-in-one commit without checking for logical grouping
-    if [ "$is_aic" != "true" ] && [ "$split_mode" = "false" ] && [ "$dry_run" != "true" ]; then
+    # Check for multi-scope staging only when run as full aicommit, interactively,
+    # without --yes (which by definition means "don't ask, just do the all-in-one commit").
+    # When running as 'aic', assume all-in-one commit without checking for logical grouping.
+    if [ "$is_aic" != "true" ] && [ "$auto_yes" != "true" ] && [ "$split_mode" = "false" ] && [ "$dry_run" != "true" ]; then
         scope_groups=$(group_staged_files_by_scope "$staged_files" "$changes" "$numstat_data")
-        scope_groups=$(printf '%s\n' "$scope_groups" | awk -F'|' 'NF>=2 && $1!="" && $2!="" && $1 !~ /=/ && $1 !~ /^(joined_files|staged_files|files)/ {print $0}')
-        num_scopes=$(echo "$scope_groups" | grep -c '|' || echo "0")
-        scope_names=$(echo "$scope_groups" | awk -F'|' '{printf (NR>1?", ":"") $1} END{print ""}')
+        scope_groups=$(printf '%s\n' "$scope_groups" | awk -F'\t' 'NF>=2 && $1!="" && $2!="" && $1 !~ /=/ && $1 !~ /^(joined_files|staged_files|files)/ {print $0}')
+        num_scopes=$(printf '%s\n' "$scope_groups" | count_lines)
+        scope_names=$(printf '%s\n' "$scope_groups" | awk -F'\t' '{printf (NR>1?", ":"") $1} END{print ""}')
 
         # If changes span 2+ scopes, prompt user for approval
         if [ "$num_scopes" -ge 2 ]; then
             display_split_confirmation "$num_scopes" "$scope_names" "$scope_groups"
-            read -r split_choice
+            if ! read -r split_choice; then
+                display_error "No input available to choose a commit strategy (stdin closed)" \
+                    "Re-run with --yes (all-in-one) or --split (atomic commits) to choose explicitly"
+                return 1
+            fi
             split_choice=${split_choice:-y}
             case "$split_choice" in
                 y|Y|yes|Yes|""|a|A|1|all|all-in-one) split_mode=false ;;
@@ -164,50 +180,100 @@ aicommit() {
 
     # Split atomic commits workflow
     if [ "$split_mode" = "true" ]; then
+        local groups_source="regrouped"
+
         if [ -z "$scope_groups" ]; then
-            scope_groups=$(group_staged_files_by_scope "$staged_files" "$changes" "$numstat_data")
-            scope_groups=$(printf '%s\n' "$scope_groups" | awk -F'|' 'NF>=2 && $1!="" && $2!="" && $1 !~ /=/ && $1 !~ /^(joined_files|staged_files|files)/ {print $0}')
-            num_scopes=$(echo "$scope_groups" | grep -c '|' || echo "0")
-            scope_names=$(echo "$scope_groups" | awk -F'|' '{printf (NR>1?", ":"") $1} END{print ""}')
+            # Reuse the grouping decision from a preceding `aiccx`/`--dry-run --split`
+            # when the staged set is unchanged, so the preview the user reviewed is
+            # actually what gets committed — not a second, independently-computed
+            # (and possibly LLM-nondeterministic) grouping.
+            local fp_now
+            fp_now=$(staged_fingerprint)
+            if [ -f "${tmp_dir}/SCOPE_GROUPS" ] && [ -f "${tmp_dir}/STAGED_FINGERPRINT" ] \
+               && [ "$(cat "${tmp_dir}/STAGED_FINGERPRINT" 2>/dev/null)" = "$fp_now" ]; then
+                scope_groups=$(cat "${tmp_dir}/SCOPE_GROUPS")
+                num_scopes=$(printf '%s\n' "$scope_groups" | count_lines)
+                scope_names=$(printf '%s\n' "$scope_groups" | awk -F'\t' '{printf (NR>1?", ":"") $1} END{print ""}')
+                groups_source="reused"
+            else
+                [ -f "${tmp_dir}/SCOPE_GROUPS" ] && echo "⚠️  Staged set changed since preview — regrouping"
+                scope_groups=$(group_staged_files_by_scope "$staged_files" "$changes" "$numstat_data")
+                scope_groups=$(printf '%s\n' "$scope_groups" | awk -F'\t' 'NF>=2 && $1!="" && $2!="" && $1 !~ /=/ && $1 !~ /^(joined_files|staged_files|files)/ {print $0}')
+                num_scopes=$(printf '%s\n' "$scope_groups" | count_lines)
+                scope_names=$(printf '%s\n' "$scope_groups" | awk -F'\t' '{printf (NR>1?", ":"") $1} END{print ""}')
+            fi
         fi
 
         if [ "$dry_run" != "true" ] && ! validate_prerequisites; then
             return 1
         fi
 
-        local group_line="" grp_scope="" grp_files="" idx=1
+        local grp_scope="" grp_files="" idx=1 group_line=""
         local subset_changes="" subset_staged="" subset_numstat="" grp_commit_msg="" grp_resp="y"
         local edit_file="" edited_msg="" f_item=""
-        local -a grp_file_array=()
+        local -a grp_file_array=() grp_pathspec_array=()
 
         if [ "$dry_run" = "true" ]; then
+            # Persist the decision so a subsequent `aicc` on the same staged set
+            # executes exactly this grouping instead of recomputing its own.
+            umask 077
+            printf '%s\n' "$scope_groups" > "${tmp_dir}/SCOPE_GROUPS"
+            staged_fingerprint > "${tmp_dir}/STAGED_FINGERPRINT"
+
             echo "🔍 Dry run — detected $num_scopes atomic commit groups:"
             while IFS= read -r group_line; do
-                [ -z "$group_line" ] && continue
-                grp_scope=$(echo "$group_line" | cut -d'|' -f1)
-                grp_files=$(echo "$group_line" | cut -d'|' -f2)
+                _aicommit_split_tab_line "$group_line"
+                [ -z "$_aicommit_split_scope" ] && continue
+                grp_scope="$_aicommit_split_scope"
+                grp_files=$(printf ', %s' "${_aicommit_split_files[@]}"); grp_files="${grp_files#, }"
                 echo "  • Scope: $grp_scope -> $grp_files"
             done <<< "$scope_groups"
             return 0
         fi
 
+        # Show the resolved plan before the first commit — the user should never
+        # be surprised by what `aicc` decided, regardless of whether it came from
+        # a reused preview or a fresh grouping.
+        if [ "$groups_source" = "reused" ]; then
+            echo "♻️  Reusing $num_scopes group(s) from last preview:"
+        else
+            echo "📋 Resolved $num_scopes atomic commit group(s):"
+        fi
+        while IFS= read -r group_line; do
+            _aicommit_split_tab_line "$group_line"
+            [ -z "$_aicommit_split_scope" ] && continue
+            grp_files=$(printf ', %s' "${_aicommit_split_files[@]}"); grp_files="${grp_files#, }"
+            echo "  • $_aicommit_split_scope -> $grp_files"
+        done <<< "$scope_groups"
+
         idx=1
+        local committed_count=0
         while IFS= read -r -u 3 group_line; do
-            [ -z "$group_line" ] && continue
-            grp_scope=$(echo "$group_line" | cut -d'|' -f1)
-            grp_files=$(echo "$group_line" | cut -d'|' -f2)
-            IFS=',' read -r -a grp_file_array <<< "$grp_files"
+            _aicommit_split_tab_line "$group_line"
+            [ -z "$_aicommit_split_scope" ] && continue
+            grp_scope="$_aicommit_split_scope"
+            grp_file_array=("${_aicommit_split_files[@]}")
+            [ ${#grp_file_array[@]} -eq 0 ] && continue
+
+            grp_pathspec_array=()
+            for f_item in "${grp_file_array[@]}"; do
+                grp_pathspec_array+=("$(to_pathspec "$f_item")")
+            done
 
             display_split_progress "$idx" "$num_scopes" "$grp_scope"
 
-            subset_changes=$(git diff --staged -- "${grp_file_array[@]}")
-            subset_staged=$(echo "$grp_files" | tr ',' '\n')
-            subset_numstat=$(git diff --staged --numstat -- "${grp_file_array[@]}")
+            subset_changes=$(agit diff --staged -- "${grp_pathspec_array[@]}")
+            subset_staged=$(printf '%s\n' "${grp_file_array[@]}")
+            subset_numstat=$(agit diff --staged --numstat -- "${grp_pathspec_array[@]}")
 
             if [ -z "$subset_changes" ]; then
-                echo "⚠️ No staged changes remaining for scope: $grp_scope"
-                idx=$((idx + 1))
-                continue
+                # No longer a soft warning: an empty subset here means the group's
+                # files no longer match the staged set (pathspec bug, stale reused
+                # preview, or a file unstaged mid-run) — the run must stop, not
+                # silently skip a scope and still report success (see RC4/RC5).
+                display_error "No staged changes matched for scope '$grp_scope'" \
+                    "Expected files: ${grp_file_array[*]}"
+                return 1
             fi
 
             build_ai_context "$subset_changes" "$subset_staged" "$subset_numstat" "$grp_scope"
@@ -220,24 +286,40 @@ aicommit() {
             grp_resp="y"
             if [ "$auto_yes" != "true" ]; then
                 display_commit_confirmation
-                read -r grp_resp
+                if ! read -r grp_resp; then
+                    display_error "No input available to confirm scope '$grp_scope' (stdin closed)" \
+                        "Re-run with --yes to accept generated messages automatically"
+                    return 1
+                fi
                 grp_resp=${grp_resp:-y}
             fi
             case "$grp_resp" in
                 y|Y)
-                    if commit_staged_subset "$grp_commit_msg" "$grp_files"; then
+                    if commit_staged_subset "$grp_commit_msg" "${grp_file_array[@]}"; then
                         display_scope_success "$grp_scope"
+                        committed_count=$((committed_count + 1))
+                    else
+                        display_error "Commit failed for scope: $grp_scope"
+                        return 1
                     fi
                     ;;
                 e|E)
+                    if [ ! -t 0 ]; then
+                        display_error "Editing the commit message requires an interactive terminal" "stdin is not a TTY"
+                        return 1
+                    fi
                     edit_file="${tmp_dir}/COMMIT_EDITMSG"
                     printf '%s\n' "$grp_commit_msg" > "$edit_file"
                     ${EDITOR:-vi} "$edit_file"
                     edited_msg=$(cat "$edit_file" 2>/dev/null || true)
                     rm -f "$edit_file"
                     if [ -n "$edited_msg" ]; then
-                        if commit_staged_subset "$edited_msg" "$grp_files"; then
+                        if commit_staged_subset "$edited_msg" "${grp_file_array[@]}"; then
                             display_scope_success "$grp_scope"
+                            committed_count=$((committed_count + 1))
+                        else
+                            display_error "Commit failed for scope: $grp_scope"
+                            return 1
                         fi
                     else
                         echo "⚠️ Commit message was empty. Skipping scope '$grp_scope'."
@@ -253,8 +335,14 @@ aicommit() {
         done 3<<< "$scope_groups"
 
         cleanup_aicommit_all
-        echo "🎉 All atomic commits completed!"
-        return 0
+        if [ "$committed_count" -eq "$num_scopes" ]; then
+            echo "🎉 All atomic commits completed! ($committed_count/$num_scopes)"
+            return 0
+        else
+            display_error "Only $committed_count of $num_scopes atomic commits completed" \
+                "One or more scopes were skipped — see output above"
+            return 1
+        fi
     fi
 
     # Validate prerequisites (skip for dry-run)
@@ -294,7 +382,11 @@ aicommit() {
     local response="y"
     if [ "$auto_yes" != "true" ]; then
         display_commit_confirmation
-        read -r response
+        if ! read -r response; then
+            display_error "No input available to confirm the commit (stdin closed)" \
+                "Re-run with --yes to accept generated messages automatically"
+            return 1
+        fi
         response=${response:-y}
     fi
 
@@ -305,22 +397,46 @@ aicommit() {
     esac
 }
 
+# True if $@ already includes an explicit split-mode flag. The quick shims below
+# each inject a default (--no-split for aic/aicx, --split for aicc/aiccx) — without
+# this check, a caller override (e.g. `aic --split`) collides with that injected
+# default and `aicommit` rejects the call as "Conflicting options", even though the
+# override is exactly what a "shorthand for X, but you can still pass flags" shim
+# should honor.
+_aicommit_has_split_flag() {
+    local a
+    for a in "$@"; do
+        case "$a" in
+            --split|-s|--no-split|--all) return 0 ;;
+        esac
+    done
+    return 1
+}
+
 # Quick AI commit — auto-commits all-in-one without confirmation or scope grouping
 aic() {
-    AIC_SHORTCUT=true aicommit --yes --no-split --shortcut "$@"
+    local -a args=("$@")
+    _aicommit_has_split_flag "$@" || args=(--no-split "${args[@]}")
+    AIC_SHORTCUT=true aicommit --yes --shortcut "${args[@]}"
 }
 
 # Quick AI commit categorized — auto-commits each atomic scope separately
 aicc() {
-    AIC_SHORTCUT=true aicommit --yes --split --shortcut "$@"
+    local -a args=("$@")
+    _aicommit_has_split_flag "$@" || args=(--split "${args[@]}")
+    AIC_SHORTCUT=true aicommit --yes --shortcut "${args[@]}"
 }
 
 # Verbose dry-run inspection for single all-in-one commit (0 changes made)
 aicx() {
-    AIC_SHORTCUT=true aicommit --dry-run --verbose --no-split --shortcut "$@"
+    local -a args=("$@")
+    _aicommit_has_split_flag "$@" || args=(--no-split "${args[@]}")
+    AIC_SHORTCUT=true aicommit --dry-run --verbose --shortcut "${args[@]}"
 }
 
 # Verbose dry-run inspection for atomic split commits (0 changes made)
 aiccx() {
-    AIC_SHORTCUT=true aicommit --dry-run --verbose --split --shortcut "$@"
+    local -a args=("$@")
+    _aicommit_has_split_flag "$@" || args=(--split "${args[@]}")
+    AIC_SHORTCUT=true aicommit --dry-run --verbose --shortcut "${args[@]}"
 }

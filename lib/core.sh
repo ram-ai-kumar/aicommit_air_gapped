@@ -18,6 +18,76 @@ get_aicommit_tmp_dir() {
     echo "$tmp_dir"
 }
 
+# All git reads/writes touching paths go through this: disables path quoting/octal
+# escaping (core.quotePath) so non-ASCII filenames round-trip as raw UTF-8 instead
+# of "quoted\342\204\242strings" that never match anything downstream.
+agit() {
+    git -c core.quotePath=false "$@"
+}
+
+# Convert a repo-root-relative path into a pathspec that resolves the same way
+# regardless of the caller's CWD. Without this, `git diff -- <path>` silently
+# matches nothing when run from any subdirectory of the repo (pathspecs are
+# CWD-relative; `git diff --name-only` output is always repo-root-relative).
+to_pathspec() {
+    printf ':(top,literal)%s' "$1"
+}
+
+# Stable fingerprint of the current staged file set — used to detect whether
+# staging changed between a dry-run preview and a later split-commit execution.
+staged_fingerprint() {
+    agit diff --staged -z --name-only | shasum -a 256 | awk '{print $1}'
+}
+
+# Split a TAB-delimited "scope<TAB>file<TAB>file..." line into
+# `_aicommit_split_scope` (scalar) and `_aicommit_split_files` (array), without
+# declaring either local here (so the assignment lands on the caller's scope via
+# ordinary dynamic scoping — verified to work identically in bash and zsh).
+#
+# This exists because aicommit.sh is `source`d directly into the caller's
+# interactive shell (see its file header), so it must work under both bash and
+# zsh, and two incompatibilities rule out the obvious approaches:
+#   - `read -a` (bash's "read into array" flag) vs `read -A` (zsh's) — no
+#     spelling is valid in both interpreters, so plain `read -r line` is used
+#     and splitting is done separately, in this helper.
+#   - zsh arrays are 1-indexed by default; bash arrays are 0-indexed. Code that
+#     reads `${arr[0]}` for "the first field" and `${arr[@]:1}` for "the rest"
+#     silently gets nothing under zsh (index 0 doesn't exist there) instead of
+#     an error — this is what broke `aiccx`/`aicc` group parsing under zsh even
+#     after the read -a/-A fix. Returning the scope and the files as two
+#     separate variables sidesteps numeric indexing entirely, so there is no
+#     0-vs-1 convention to get wrong.
+_aicommit_split_tab_line() {
+    local line="$1"
+    _aicommit_split_scope=""
+    _aicommit_split_files=()
+    [ -z "$line" ] && return 0
+    local rest="$line" field more=true is_first=true
+    while $more; do
+        if [[ "$rest" == *$'\t'* ]]; then
+            field="${rest%%$'\t'*}"
+            rest="${rest#*$'\t'}"
+        else
+            field="$rest"
+            more=false
+        fi
+        if $is_first; then
+            _aicommit_split_scope="$field"
+            is_first=false
+        else
+            _aicommit_split_files+=("$field")
+        fi
+    done
+}
+
+# Count non-empty lines from stdin. Deliberately NOT `grep -c ... || echo "0"`:
+# on zero matches, `grep -c` still prints "0" to stdout AND exits 1, so a
+# `|| echo "0"` fallback appends a second "0" line and callers that expect a
+# single integer (e.g. `[ "$n" -ge 2 ]`) blow up with "integer expression expected".
+count_lines() {
+    awk '$0 != "" { c++ } END { print c + 0 }'
+}
+
 # Build file context — writes FILE_CONTEXT, CHANGE_STATS, and FILE_COUNT to temp dir
 # Args: $1=staged_files, $2=numstat_data
 # Writes count to ${tmp_dir}/FILE_COUNT (avoids stdout pollution from zsh xtrace)
@@ -99,7 +169,14 @@ filter_and_truncate_diff() {
     /^diff --git/ {
         if (file_lines > max_lines && max_lines > 0)
             printf "    ... (%d lines truncated)\n", (file_lines - max_lines)
-        file = $NF; sub(/^b\//, "", file)
+        # Filenames containing spaces break a naive $NF split (it grabs only
+        # the last word). Match the " b/<path>" suffix instead — reliable for
+        # any path except one that literally contains the substring " b/".
+        if (match($0, / b\/.*$/)) {
+            file = substr($0, RSTART + 3)
+        } else {
+            file = $NF; sub(/^b\//, "", file)
+        }
         file_lines = 0
 
         # Skip sensitive files entirely
@@ -566,15 +643,16 @@ process_commit() {
 
 # Execute an atomic git commit for a specific subset of staged files
 # using git plumbing so unstaged modifications and other staged files are preserved.
-# Args: $1=commit_msg, $2=files_to_commit (comma-separated list of relative paths)
+# Args: $1=commit_msg, $2..=files_to_commit (repo-root-relative paths, one per arg)
 commit_staged_subset() {
     local commit_msg="$1"
-    local files_to_commit="$2"
+    shift
+    local commit_files=("$@")
 
-    local commit_files=() item=""
-    while IFS= read -r item; do
-        [ -n "$item" ] && commit_files+=("$item")
-    done <<< "$(echo "$files_to_commit" | tr ',' '\n')"
+    if [ ${#commit_files[@]} -eq 0 ]; then
+        display_error "commit_staged_subset called with no files" "This is a bug — refusing to create an empty commit"
+        return 1
+    fi
 
     local git_dir
     git_dir=$(git rev-parse --git-dir)
@@ -586,29 +664,37 @@ commit_staged_subset() {
         has_head=true
     fi
 
-    # Find all staged files in real index
+    # Find all staged files in real index (root-relative, raw UTF-8 — never quoted)
     local staged_files f="" cf="" is_target=false
-    staged_files=$(git diff --staged --name-only)
+    staged_files=$(agit diff --staged -z --name-only | tr '\0' '\n')
 
     # For files staged in real index that are NOT in commit_files:
-    # revert them in tmp_index to match HEAD (or remove if new file)
+    # revert them in tmp_index to match HEAD (or remove if new file).
+    # Every step here must succeed — a step that silently no-ops leaves a
+    # foreign file in tmp_index, and the commit below would then include
+    # changes outside its declared scope with no error raised (see RC5).
     while IFS= read -r f; do
         [ -z "$f" ] && continue
         is_target=false
         for cf in "${commit_files[@]}"; do
-            # Trim whitespace
-            cf="${cf#"${cf%%[![:space:]]*}"}"
-            cf="${cf%"${cf##*[![:space:]]}"}"
             if [ "$f" = "$cf" ]; then
                 is_target=true
                 break
             fi
         done
         if [ "$is_target" = false ]; then
-            if [ "$has_head" = true ] && git ls-tree HEAD -- "$f" 2>/dev/null | grep -q .; then
-                GIT_INDEX_FILE="$tmp_index" git restore --staged --source=HEAD -- "$f" >/dev/null 2>&1 || true
+            if [ "$has_head" = true ] && agit ls-tree HEAD -- "$(to_pathspec "$f")" 2>/dev/null | grep -q .; then
+                if ! GIT_INDEX_FILE="$tmp_index" agit restore --staged --source=HEAD -- "$(to_pathspec "$f")" >/dev/null 2>&1; then
+                    rm -f "$tmp_index"
+                    display_error "Failed to exclude '$f' from subset commit" "git restore --staged failed"
+                    return 1
+                fi
             else
-                GIT_INDEX_FILE="$tmp_index" git rm --cached -q -- "$f" 2>/dev/null || true
+                if ! GIT_INDEX_FILE="$tmp_index" agit rm --cached -q -- "$(to_pathspec "$f")" >/dev/null 2>&1; then
+                    rm -f "$tmp_index"
+                    display_error "Failed to exclude '$f' from subset commit" "git rm --cached failed"
+                    return 1
+                fi
             fi
         fi
     done <<< "$staged_files"
@@ -636,7 +722,10 @@ commit_staged_subset() {
 
     local current_ref
     current_ref=$(git symbolic-ref HEAD 2>/dev/null || git rev-parse HEAD)
-    git update-ref "$current_ref" "$commit_sha"
+    if ! git update-ref "$current_ref" "$commit_sha"; then
+        display_error "Failed to update $current_ref to $commit_sha" "The commit object was created but the branch was not advanced"
+        return 1
+    fi
 
     # Invoke post-commit hook if present
     if [ -x "${git_dir}/hooks/post-commit" ]; then
@@ -657,10 +746,15 @@ cleanup_aicommit_ephemeral() {
           "${tmp_dir}/OLLAMA_ERROR" > /dev/null 2>&1
 }
 
-# Cleanup everything including the prompt
+# Cleanup everything including the prompt and the persisted scope-grouping decision.
+# SCOPE_GROUPS/STAGED_FINGERPRINT are deliberately NOT in cleanup_aicommit_ephemeral:
+# that runs on every invocation's EXIT trap, including the dry-run that just wrote
+# them — cleaning them there would erase the preview before aicc could reuse it.
 cleanup_aicommit_all() {
     cleanup_aicommit_ephemeral
     local tmp_dir
     tmp_dir=$(get_aicommit_tmp_dir)
-    rm -f "${tmp_dir}/FULL_PROMPT" > /dev/null 2>&1
+    rm -f "${tmp_dir}/FULL_PROMPT" \
+          "${tmp_dir}/SCOPE_GROUPS" \
+          "${tmp_dir}/STAGED_FINGERPRINT" > /dev/null 2>&1
 }

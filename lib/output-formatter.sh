@@ -8,11 +8,11 @@ display_staged_files() {
     local staged_files="$1" numstat_data="$2"
     local name_status=""
     if command -v git &>/dev/null; then
-        name_status=$(git diff --staged --name-status 2>/dev/null)
+        name_status=$(agit diff --staged --name-status 2>/dev/null)
     fi
     [ -z "$name_status" ] && return 0
 
-    local file_count adds dels plural status file rest
+    local file_count adds dels plural git_status file rest
     file_count=$(printf '%s\n' "$staged_files" | grep -c '.')
     adds=$(printf '%s\n' "$numstat_data" | awk '{a += $1} END {print a + 0}')
     dels=$(printf '%s\n' "$numstat_data" | awk '{d += $2} END {print d + 0}')
@@ -21,15 +21,21 @@ display_staged_files() {
 
     echo ""
     printf 'Staged changes (%s file%s, +%s -%s):\n' "$file_count" "$plural" "$adds" "$dels"
-    printf '%s\n' "$name_status" | while IFS=$'\t' read -r status file rest; do
-        case "$status" in
+    # Variable deliberately NOT named `status`: aicommit.sh is sourced directly into
+    # the user's interactive shell (per the file header), and some zsh setups (e.g. a
+    # prompt theme caching git state) declare a global `readonly status=...`. zsh,
+    # unlike bash, refuses to `local`-shadow a readonly global, so `local status`
+    # aborts this function with "read-only variable: status" in exactly that setup —
+    # this is what broke `aicx`/`aiccx` for a user whose shell does that.
+    printf '%s\n' "$name_status" | while IFS=$'\t' read -r git_status file rest; do
+        case "$git_status" in
             M*)  printf '        modified:   %s\n' "$file" ;;
             A*)  printf '        new file:   %s\n' "$file" ;;
             D*)  printf '        deleted:    %s\n' "$file" ;;
             R*)  printf '        renamed:    %s -> %s\n' "$file" "$rest" ;;
             C*)  printf '        copied:     %s -> %s\n' "$file" "$rest" ;;
             T*)  printf '        typechange: %s\n' "$file" ;;
-            *)   printf '        %s: %s\n' "$status" "$file" ;;
+            *)   printf '        %s: %s\n' "$git_status" "$file" ;;
         esac
     done
     echo ""
@@ -96,24 +102,24 @@ display_split_confirmation() {
     local group_line="" grp_scope="" grp_files="" file_count=0 count_str=""
     local f="" s=""
 
-    # Filter and validate scope groups
-    # Only keep lines with '|', non-empty scope and files, and no variable assignments ('=')
+    # Filter and validate scope groups (TAB-delimited: scope<TAB>file<TAB>file...)
+    # Only keep lines with a scope and at least one file, no variable assignments ('=')
     local -a valid_groups=()
     local -a valid_scopes=()
     if [ -n "$scope_groups" ]; then
         while IFS= read -r group_line; do
             [ -z "$group_line" ] && continue
-            echo "$group_line" | grep -q '|' || continue
+            [[ "$group_line" == *$'\t'* ]] || continue
 
-            grp_scope=$(echo "$group_line" | cut -d'|' -f1 | sed -E 's/^[[:space:]*#-]+//; s/[[:space:]]+$//; s/`//g; s/\*\*//g')
-            grp_files=$(echo "$group_line" | cut -d'|' -f2- | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')
+            grp_scope=$(cut -f1 <<< "$group_line" | sed -E 's/^[[:space:]*#-]+//; s/[[:space:]]+$//; s/`//g; s/\*\*//g')
+            grp_files=$(cut -f2- <<< "$group_line")
 
             [ -z "$grp_scope" ] && continue
             [ -z "$grp_files" ] && continue
             echo "$grp_scope" | grep -q '=' && continue
             echo "$grp_scope" | grep -qiE '^(joined_files|staged_files|files|local |export )' && continue
 
-            valid_groups+=("${grp_scope}|${grp_files}")
+            valid_groups+=("$(printf '%s\t%s' "$grp_scope" "$grp_files")")
             valid_scopes+=("$grp_scope")
         done <<< "$scope_groups"
     fi
@@ -135,10 +141,10 @@ display_split_confirmation() {
         local total=${#valid_groups[@]}
         local idx=1
         for group_line in "${valid_groups[@]}"; do
-            grp_scope=$(echo "$group_line" | cut -d'|' -f1)
-            grp_files=$(echo "$group_line" | cut -d'|' -f2-)
+            grp_scope=$(cut -f1 <<< "$group_line")
+            grp_files=$(cut -f2- <<< "$group_line")
 
-            file_count=$(echo "$grp_files" | tr ',' '\n' | grep -c '.' || echo "0")
+            file_count=$(printf '%s' "$grp_files" | tr '\t' '\n' | count_lines)
             count_str="($file_count files):"
             [ "$file_count" -eq 1 ] && count_str="($file_count file):"
 
@@ -146,7 +152,6 @@ display_split_confirmation() {
             echo "  📁 Category $idx of $total: $grp_scope $count_str"
             local shown=0
             while IFS= read -r f; do
-                f=$(echo "$f" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')
                 [ -z "$f" ] && continue
                 if [ "$shown" -ge 5 ]; then
                     echo "      … and $((file_count - shown)) more"
@@ -154,7 +159,7 @@ display_split_confirmation() {
                 fi
                 echo "      - $f"
                 shown=$((shown + 1))
-            done <<< "$(echo "$grp_files" | tr ',' '\n')"
+            done <<< "$(printf '%s' "$grp_files" | tr '\t' '\n')"
             idx=$((idx + 1))
         done
         echo ""

@@ -53,7 +53,7 @@ detect_new_files_ratio() {
     local total_files
     total_files=$(echo "$staged_files" | grep -c '.')
     local new_files
-    new_files=$(git diff --staged --diff-filter=A --name-only 2>/dev/null | wc -l | tr -d ' ')
+    new_files=$(agit diff --staged --diff-filter=A --name-only 2>/dev/null | wc -l | tr -d ' ')
 
     if [ "$total_files" -gt 0 ]; then
         local new_ratio=$((new_files * 100 / total_files))
@@ -370,8 +370,10 @@ group_staged_files_heuristically() {
     for scope_file in "$tmp_scope_dir"/*; do
         [ -e "$scope_file" ] || continue
         s=$(basename "$scope_file")
-        files=$(tr '\n' ',' < "$scope_file" | sed 's/,$//')
-        [ -n "$s" ] && [ -n "$files" ] && echo "${s}|${files}"
+        # TAB-delimited record: scope<TAB>file<TAB>file... — a comma-joined list
+        # (the prior format) breaks silently on any staged filename containing a comma.
+        files=$(tr '\n' '\t' < "$scope_file" | sed $'s/\t$//')
+        [ -n "$s" ] && [ -n "$files" ] && printf '%s\t%s\n' "$s" "$files"
     done
     rm -rf "$tmp_scope_dir"
 }
@@ -450,6 +452,7 @@ validate_and_reconcile_contexts() {
         # Reject malformed scope names (e.g. variable assignments like joined_files=..., comma-separated lists, overly long text, or code tokens)
         echo "$ctx" | grep -q '=' && continue
         echo "$ctx" | grep -q ',' && continue
+        [[ "$ctx" == *$'\t'* ]] && continue
         echo "$ctx" | grep -qE '^<(context[ _]name|scope|name)>' && continue
         echo "$ctx" | grep -qiE '^(joined_files|staged_files|files|local |export )' && continue
         [ "${#ctx}" -gt 60 ] && continue
@@ -483,9 +486,14 @@ validate_and_reconcile_contexts() {
         done <<< "$(echo "$file_csv" | tr ',' '\n')"
 
         if [ ${#valid_files_in_ctx[@]} -gt 0 ]; then
+            # TAB-delimited record on output — a comma-joined list would silently
+            # mis-split on any staged filename that itself contains a comma. The
+            # LLM's own output (parsed above) still uses commas; only our record
+            # format changes.
             local joined_files
-            joined_files=$(IFS=','; echo "${valid_files_in_ctx[*]}")
-            valid_lines+=("${ctx}|${joined_files}")
+            joined_files=$(printf '%s\t' "${valid_files_in_ctx[@]}")
+            joined_files="${joined_files%$'\t'}"
+            valid_lines+=("$(printf '%s\t%s' "$ctx" "$joined_files")")
         fi
     done <<< "$cleaned"
 
@@ -506,8 +514,9 @@ validate_and_reconcile_contexts() {
 
     if [ ${#missed_files[@]} -gt 0 ]; then
         local joined_missed
-        joined_missed=$(IFS=','; echo "${missed_files[*]}")
-        valid_lines+=("additional changes|${joined_missed}")
+        joined_missed=$(printf '%s\t' "${missed_files[@]}")
+        joined_missed="${joined_missed%$'\t'}"
+        valid_lines+=("$(printf 'additional changes\t%s' "$joined_missed")")
     fi
 
     for vl in "${valid_lines[@]}"; do
@@ -577,7 +586,7 @@ cluster_staged_files_with_ai() {
 
 # Group staged files into logical contexts.
 # Uses AI context grouping if LLM backend is available, falling back to semantic heuristic analysis.
-# Outputs lines in format: "<scope>|<file1>,<file2>,..."
+# Outputs TAB-delimited records: "<scope>\t<file1>\t<file2>\t..."
 group_staged_files_logically() {
     local staged_files="$1"
     local changes="${2:-}"
@@ -586,14 +595,18 @@ group_staged_files_logically() {
     [ -z "$staged_files" ] && return 0
 
     local file_count
-    file_count=$(echo "$staged_files" | grep -c '.' || echo "0")
+    file_count=$(printf '%s\n' "$staged_files" | count_lines)
     if [ "$file_count" -le 1 ]; then
-        local single_file
-        single_file=$(echo "$staged_files" | tr -d '[:space:]')
+        local single_file="$staged_files"
+        # Trim only leading/trailing whitespace — `tr -d '[:space:]'` (the prior
+        # approach) strips ALL whitespace, corrupting any filename containing a
+        # space, which is common in this vault ("Enterprise Architecture.md").
+        single_file="${single_file#"${single_file%%[![:space:]]*}"}"
+        single_file="${single_file%"${single_file##*[![:space:]]}"}"
         if [ -n "$single_file" ]; then
             local single_scope
             single_scope=$(infer_logical_file_context "$single_file" "$staged_files")
-            echo "${single_scope}|${single_file}"
+            printf '%s\t%s\n' "$single_scope" "$single_file"
         fi
         return 0
     fi
@@ -631,5 +644,5 @@ count_staged_scopes() {
     local changes="${2:-}"
     local numstat_data="${3:-}"
 
-    group_staged_files_logically "$staged_files" "$changes" "$numstat_data" | grep -c '|' || echo "0"
+    group_staged_files_logically "$staged_files" "$changes" "$numstat_data" | count_lines
 }
