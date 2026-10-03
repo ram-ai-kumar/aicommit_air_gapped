@@ -481,3 +481,61 @@ unit test behavior"
     remaining_staged=$(git diff --staged --name-only)
     [ "$remaining_staged" = "file2.txt" ]
 }
+
+# ─── suggest_semver_bump ─────────────────────────────────────────────────────
+
+@test "suggest_semver_bump returns major for bang-marked header" {
+    run suggest_semver_bump "feat!: drop legacy config format"
+    [ "$status" -eq 0 ]
+    [ "$output" = "major" ]
+}
+
+@test "suggest_semver_bump returns major for scoped bang-marked header" {
+    run suggest_semver_bump "fix(api)!: remove deprecated endpoint"
+    [ "$status" -eq 0 ]
+    [ "$output" = "major" ]
+}
+
+@test "suggest_semver_bump returns major for BREAKING CHANGE footer" {
+    local msg
+    msg=$(printf 'feat: add new config loader\n\nBREAKING CHANGE: old config keys are no longer read')
+    run suggest_semver_bump "$msg"
+    [ "$status" -eq 0 ]
+    [ "$output" = "major" ]
+}
+
+@test "suggest_semver_bump returns minor for feat header" {
+    run suggest_semver_bump "feat(auth): add OAuth login"
+    [ "$status" -eq 0 ]
+    [ "$output" = "minor" ]
+}
+
+@test "suggest_semver_bump returns patch for fix header" {
+    run suggest_semver_bump "fix: correct off-by-one in pagination"
+    [ "$status" -eq 0 ]
+    [ "$output" = "patch" ]
+}
+
+@test "suggest_semver_bump returns patch for perf header" {
+    run suggest_semver_bump "perf: cache parsed templates"
+    [ "$status" -eq 0 ]
+    [ "$output" = "patch" ]
+}
+
+@test "suggest_semver_bump returns none for chore header" {
+    run suggest_semver_bump "chore: bump dependency versions"
+    [ "$status" -eq 0 ]
+    [ "$output" = "none" ]
+}
+
+@test "suggest_semver_bump returns none for docs header" {
+    run suggest_semver_bump "docs: clarify install steps"
+    [ "$status" -eq 0 ]
+    [ "$output" = "none" ]
+}
+
+@test "suggest_semver_bump returns none for test header" {
+    run suggest_semver_bump "test: add coverage for edge case"
+    [ "$status" -eq 0 ]
+    [ "$output" = "none" ]
+}

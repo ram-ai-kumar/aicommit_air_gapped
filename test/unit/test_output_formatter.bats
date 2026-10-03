@@ -248,6 +248,32 @@ teardown() {
     assert_output_contains "Committed! ($sha)"
 }
 
+# ─── display_semver_hint ──────────────────────────────────────────────────────
+
+@test "display_semver_hint major shows MAJOR label" {
+    run display_semver_hint "major"
+    [ "$status" -eq 0 ]
+    assert_output_contains "MAJOR"
+}
+
+@test "display_semver_hint minor shows MINOR label" {
+    run display_semver_hint "minor"
+    [ "$status" -eq 0 ]
+    assert_output_contains "MINOR"
+}
+
+@test "display_semver_hint patch shows PATCH label" {
+    run display_semver_hint "patch"
+    [ "$status" -eq 0 ]
+    assert_output_contains "PATCH"
+}
+
+@test "display_semver_hint none prints nothing" {
+    run display_semver_hint "none"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
 # ─── display_commit_confirmation ─────────────────────────────────────────────
 
 @test "display_commit_confirmation exits 0" {

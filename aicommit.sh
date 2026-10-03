@@ -121,8 +121,10 @@ aicommit() {
             response=${response:-y}
         fi
         case $response in
-            y|Y) process_commit "$commit_msg" && display_success; cleanup_aicommit_all ;;
-            e|E) git commit -e -m "$commit_msg"; cleanup_aicommit_all ;;
+            y|Y) process_commit "$commit_msg" && display_success \
+                     && display_semver_hint "$(suggest_semver_bump "$commit_msg")"; cleanup_aicommit_all ;;
+            e|E) git commit -e -m "$commit_msg" \
+                     && display_semver_hint "$(suggest_semver_bump "$(git log -1 --pretty=%B)")"; cleanup_aicommit_all ;;
             *)   echo "❌ Commit cancelled." ;;
         esac
         return 0
@@ -297,6 +299,7 @@ aicommit() {
                 y|Y)
                     if commit_staged_subset "$grp_commit_msg" "${grp_file_array[@]}"; then
                         display_scope_success "$grp_scope"
+                        display_semver_hint "$(suggest_semver_bump "$grp_commit_msg")"
                         committed_count=$((committed_count + 1))
                     else
                         display_error "Commit failed for scope: $grp_scope"
@@ -316,6 +319,7 @@ aicommit() {
                     if [ -n "$edited_msg" ]; then
                         if commit_staged_subset "$edited_msg" "${grp_file_array[@]}"; then
                             display_scope_success "$grp_scope"
+                            display_semver_hint "$(suggest_semver_bump "$edited_msg")"
                             committed_count=$((committed_count + 1))
                         else
                             display_error "Commit failed for scope: $grp_scope"
@@ -391,8 +395,10 @@ aicommit() {
     fi
 
     case $response in
-        y|Y) process_commit "$commit_msg" && display_success; cleanup_aicommit_all ;;
-        e|E) git commit -e -m "$commit_msg"; cleanup_aicommit_all ;;
+        y|Y) process_commit "$commit_msg" && display_success \
+                 && display_semver_hint "$(suggest_semver_bump "$commit_msg")"; cleanup_aicommit_all ;;
+        e|E) git commit -e -m "$commit_msg" \
+                 && display_semver_hint "$(suggest_semver_bump "$(git log -1 --pretty=%B)")"; cleanup_aicommit_all ;;
         *)   echo "❌ Commit cancelled." ;;
     esac
 }

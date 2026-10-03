@@ -192,6 +192,18 @@ display_success() {
     fi
 }
 
+# One-line semver bump suggestion, shown after a successful commit.
+# Args: $1=bump ("major"|"minor"|"patch"|"none")
+display_semver_hint() {
+    local bump="$1"
+    case "$bump" in
+        major) echo "🔺 Suggested version bump: MAJOR (breaking change)" ;;
+        minor) echo "🔼 Suggested version bump: MINOR (new feature)" ;;
+        patch) echo "🔧 Suggested version bump: PATCH (fix/perf)" ;;
+        *) ;;
+    esac
+}
+
 # Success line for one atomic commit in --split mode
 display_scope_success() {
     local scope="$1" sha

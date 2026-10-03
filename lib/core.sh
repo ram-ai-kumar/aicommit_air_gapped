@@ -577,6 +577,28 @@ extract_conventional_commit() {
     '
 }
 
+# Classify a Conventional Commit message into a semver bump suggestion.
+# Args: $1=commit_msg (full message, header + body/footers)
+# Echoes one of: major | minor | patch | none
+suggest_semver_bump() {
+    local commit_msg="$1"
+    local header
+    header=$(printf '%s\n' "$commit_msg" | head -n1)
+
+    if printf '%s\n' "$commit_msg" | grep -qE '^BREAKING CHANGE:'; then
+        echo "major"; return
+    fi
+    if printf '%s\n' "$header" | grep -qE '^[[:space:]]*[a-z]+(\([^)]+\))?!:'; then
+        echo "major"; return
+    fi
+
+    case "$header" in
+        feat*) echo "minor" ;;
+        fix*|perf*) echo "patch" ;;
+        *) echo "none" ;;
+    esac
+}
+
 # Generate commit message — assembles prompt and calls Ollama
 # Args: --dry-run (optional)
 generate_commit_message() {
