@@ -63,6 +63,35 @@ teardown() {
     [ "$output" = "rails/ruby" ]
 }
 
+@test "detect_project_type returns dotnet when .csproj or .fsproj present" {
+    touch myapp.csproj
+    run detect_project_type ""
+    [ "$status" -eq 0 ]
+    [ "$output" = "dotnet" ]
+    rm myapp.csproj
+
+    touch myapp.fsproj
+    run detect_project_type ""
+    [ "$status" -eq 0 ]
+    [ "$output" = "dotnet" ]
+}
+
+@test "detect_project_type returns rails/ruby when .gemspec present" {
+    touch mygem.gemspec
+    run detect_project_type ""
+    [ "$status" -eq 0 ]
+    [ "$output" = "rails/ruby" ]
+}
+
+@test "detect_project_type produces no glob or nomatch errors in empty directory" {
+    run detect_project_type "generic_file.txt"
+    [ "$status" -eq 0 ]
+    [ "$output" = "unknown" ]
+    refute_output_contains "no matches found"
+    refute_output_contains "csproj"
+    refute_output_contains "gemspec"
+}
+
 # ─── analyze_change_concentration ────────────────────────────────────────────
 
 @test "analyze_change_concentration returns |0|0 for empty input" {

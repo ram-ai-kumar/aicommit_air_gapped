@@ -22,9 +22,9 @@ detect_project_type() {
         echo "dart/flutter"
     elif [ -f "composer.json" ] || echo "$staged_files" | grep -q "composer.json"; then
         echo "php"
-    elif ls *.csproj >/dev/null 2>&1 || ls *.fsproj >/dev/null 2>&1 || echo "$staged_files" | grep -qE "\.(csproj|fsproj)"; then
+    elif find . -maxdepth 1 \( -name "*.csproj" -o -name "*.fsproj" \) 2>/dev/null | grep -q . || echo "$staged_files" | grep -qE "\.(csproj|fsproj)"; then
         echo "dotnet"
-    elif ls *.gemspec >/dev/null 2>&1 || echo "$staged_files" | grep -q "\.gemspec"; then
+    elif find . -maxdepth 1 -name "*.gemspec" 2>/dev/null | grep -q . || echo "$staged_files" | grep -q "\.gemspec"; then
         echo "rails/ruby"
     else
         echo "unknown"
