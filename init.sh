@@ -11,7 +11,7 @@ if [ -d "$AICOMMIT_DIR/bin" ]; then
     esac
 fi
 
-# Load the live shell functions (aicommit, aic, aicc, aicx, aiccx) from the single
+# Load the live shell functions (aicommit, aic, aicc, aicx, aiccx, aics, aiccs, aicsx, aiccsx) from the single
 # source of truth in aicommit.sh. Do NOT redefine them here: a second definition
 # with different flags (e.g. missing --shortcut) shadows the canonical one and
 # silently changes behavior — that drift is exactly what made `aic` prompt

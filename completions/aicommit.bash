@@ -5,4 +5,4 @@ _aicommit_completions() {
     COMPREPLY=($(compgen -W "$opts" -- "$cur"))
 }
 
-complete -F _aicommit_completions aicommit
+complete -F _aicommit_completions aicommit aic aicc aicx aiccx aics aiccs aicsx aiccsx
