@@ -18,6 +18,14 @@ detect_project_type() {
         echo "rust"
     elif [ -f "pom.xml" ] || [ -f "build.gradle" ] || echo "$staged_files" | grep -qE "(pom\.xml|build\.gradle)"; then
         echo "java"
+    elif [ -f "pubspec.yaml" ] || echo "$staged_files" | grep -q "pubspec.yaml"; then
+        echo "dart/flutter"
+    elif [ -f "composer.json" ] || echo "$staged_files" | grep -q "composer.json"; then
+        echo "php"
+    elif ls *.csproj >/dev/null 2>&1 || ls *.fsproj >/dev/null 2>&1 || echo "$staged_files" | grep -qE "\.(csproj|fsproj)"; then
+        echo "dotnet"
+    elif ls *.gemspec >/dev/null 2>&1 || echo "$staged_files" | grep -q "\.gemspec"; then
+        echo "rails/ruby"
     else
         echo "unknown"
     fi
@@ -72,7 +80,7 @@ detect_upgrade_pattern() {
         case "$file" in
             *.lock|*lock.json|*-lock.yaml)
                 has_lockfile=true ;;
-            Gemfile|package.json|requirements.txt|go.mod|Cargo.toml|pyproject.toml)
+            Gemfile|package.json|requirements.txt|go.mod|Cargo.toml|pyproject.toml|composer.json|pubspec.yaml|pom.xml|build.gradle|*.csproj|*.fsproj)
                 has_dep_file=true ;;
             config/*|*.yml|*.yaml|*.toml|*.cfg)
                 has_config_changes=true ;;

@@ -20,6 +20,7 @@ This document covers the complete technical architecture, system design, and imp
 │   ├── core.sh              # LLM integration + prompt assembly
 │   ├── context-analyzer.sh  # Project type + change analysis
 │   ├── backends.sh          # AI backend integration
+│   ├── semver.sh            # Semantic versioning engine & manifest updaters
 │   └── output-formatter.sh  # Display helpers
 ├── config/
 │   └── defaults.sh          # Default configuration
@@ -112,6 +113,19 @@ load_configuration() {
   - `build_context()` - Build AI context
   - `filter_sensitive_data()` - Remove sensitive information
 
+#### semver.sh
+
+- **Purpose**: Semantic versioning evaluation, manifest manipulation, and Git tagging
+- **Functions**:
+  - `get_current_version()` - Detect current SemVer across 10+ ecosystems (Node, Rust, Python, Dart/Flutter, Ruby/Rails, PHP Composer, .NET, Java Maven/Gradle, Go, `VERSION` file, git tags)
+  - `calculate_next_semver()` - Calculate incremented SemVer for `major`, `minor`, `patch` (handles `v` prefix, prereleases, and Flutter/Dart build numbers)
+  - `detect_version_files()` - Detect version-bearing files present in repository
+  - `update_version_in_file()` - Perform safe portable in-place version string replacement
+  - `apply_semver_file_updates()` - Update all matching manifests in working tree and stage them
+  - `create_version_tag()` - Create lightweight or annotated Git tag for the release
+  - `evaluate_commit_semver()` - Infer bump level from conventional commit message
+  - `suggest_semver_bump()` - Extract conventional bump recommendation
+
 #### output-formatter.sh
 
 - **Purpose**: Result formatting and display
@@ -119,6 +133,8 @@ load_configuration() {
   - `format_commit_message()` - Format conventional commits
   - `display_preview()` - Show commit message preview
   - `colorize_output()` - Add color formatting
+  - `display_semver_plan()` - Format SemVer release plan preview
+  - `display_tag_success()` - Format release tag and updated manifest summary
 
 ### 3. Configuration Management (`config/`)
 
@@ -129,6 +145,7 @@ load_configuration() {
   - Default AI model preferences
   - Output formatting options
   - Security and privacy settings
+  - SemVer settings (`AI_SEMVER_BUMP`, `AI_SEMVER_TAG`, `AI_SEMVER_TAG_PREFIX`, `AI_SEMVER_DEFAULT_BUMP`, `DEFAULT_INITIAL_VERSION`)
 
 #### User Configuration
 
@@ -213,6 +230,61 @@ ai_context[changes]="feature: user authentication"
 ai_context[files_modified]="auth.js auth.test.js"
 ai_context[sensitive_files]=".env config.json"
 ```
+
+### SemVer Lifecycle & Tagging Pipeline
+
+When `--bump`, `--semver`, or `AI_SEMVER_BUMP=true` is enabled:
+
+```
+Commit Staged Changes
+         │
+         ▼
+Evaluate Commit Message (major / minor / patch / override)
+         │
+         ▼
+Detect Version Files across 10+ Language Manifests
+         │
+         ▼
+Calculate Next SemVer & Preview Release Plan
+         │
+         ▼
+User Confirms Commit (or --yes auto-accepts)
+         │
+         ▼
+Apply Version Updates in Manifest Files & Stage Files
+         │
+         ▼
+Execute Commit (atomic subset in split mode or full tree in single mode)
+         │
+         ▼
+Create Annotated Git Tag (`v${VERSION}`)
+         │
+         ▼
+Display Tag & Updated File Summary
+```
+
+#### Multi-Language Manifest Support Matrix
+
+| Ecosystem / Language  | Manifest / Version File                         | Version Pattern / Quirks                                      |
+| :-------------------- | :---------------------------------------------- | :------------------------------------------------------------ |
+| **Node.js / JS / TS** | `package.json`, `package-lock.json`             | `"version": "x.y.z"`                                          |
+| **Rust**              | `Cargo.toml`                                    | `version = "x.y.z"` (package section)                         |
+| **Python**            | `pyproject.toml`                                | `version = "x.y.z"` (project or poetry section)               |
+| **Dart / Flutter**    | `pubspec.yaml`                                  | `version: x.y.z+build` (preserves & increments build numbers) |
+| **Ruby / Rails**      | `*.gemspec`, `lib/**/version.rb`                | `spec.version = "x.y.z"`, `VERSION = "x.y.z"`                 |
+| **PHP (Composer)**    | `composer.json`                                 | `"version": "x.y.z"`                                          |
+| **.NET (C# / F#)**    | `*.csproj`, `*.fsproj`, `Directory.Build.props` | `<Version>x.y.z</Version>`, `<PackageVersion>`                |
+| **Java / JVM**        | `pom.xml`, `build.gradle`, `build.gradle.kts`   | `<version>x.y.z</version>`, `version = 'x.y.z'`               |
+| **Go**                | `version.go` / pure Git tags (`vX.Y.Z`)         | Minimal Version Selection (MVS) convention                    |
+| **Generic**           | `VERSION`                                       | Plaintext SemVer                                              |
+
+#### Atomic Split Mode (`--split --bump`)
+
+When splitting staged changes into multiple atomic scope commits, SemVer is evaluated and a Git tag is created **for each individual atomic commit**:
+1. Current version is read before each scope commit.
+2. The scope's specific commit message determines that commit's bump (`feat` -> minor, `fix` -> patch, etc.).
+3. Version manifests are updated and included in the atomic subset commit.
+4. An annotated tag (e.g. `v1.1.0`, `v1.1.1`) is created pointing directly to that atomic commit.
 
 ## 🤖 Backend Architecture
 

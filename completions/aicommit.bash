@@ -1,7 +1,7 @@
 # Bash completion for aicommit
 _aicommit_completions() {
     local cur="${COMP_WORDS[COMP_CWORD]}"
-    local opts="--help --dry-run --verbose --regenerate -h -d -v -r"
+    local opts="--help --dry-run --verbose --regenerate --yes --split --no-split --all --bump --semver --tag --no-tag -h -d -v -r -y -s -b"
     COMPREPLY=($(compgen -W "$opts" -- "$cur"))
 }
 

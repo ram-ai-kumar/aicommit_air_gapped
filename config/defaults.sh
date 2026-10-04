@@ -39,3 +39,21 @@ AI_CIRCUIT_RESET_TIME="${AI_CIRCUIT_RESET_TIME:-300}"
 # Circuit Breaker Behavior
 AI_ENABLE_CIRCUIT_BREAKERS="${AI_ENABLE_CIRCUIT_BREAKERS:-true}"
 AI_GRACEFUL_DEGRADATION="${AI_GRACEFUL_DEGRADATION:-true}"
+
+# Semantic Versioning & Git Tagging
+# Enable automatic semver bump evaluation and application (false by default)
+AI_SEMVER_BUMP="${AI_SEMVER_BUMP:-false}"
+# Create Git tag when semver bump is applied (true by default)
+AI_SEMVER_TAG="${AI_SEMVER_TAG:-true}"
+# Git tag prefix (e.g. "v" produces v1.2.3, "" produces 1.2.3)
+AI_SEMVER_TAG_PREFIX="${AI_SEMVER_TAG_PREFIX:-v}"
+# Fallback bump level for chore/docs/refactor when bump is opted in (patch)
+AI_SEMVER_DEFAULT_BUMP="${AI_SEMVER_DEFAULT_BUMP:-patch}"
+# Default initial version when repo has no existing version files or tags
+DEFAULT_INITIAL_VERSION="${DEFAULT_INITIAL_VERSION:-0.1.0}"
+# Path to prompt template for AI-driven SemVer evaluation
+AI_SEMVER_PROMPT_FILE="${AI_SEMVER_PROMPT_FILE:-$AICOMMIT_DIR/templates/semver-prompt.txt}"
+# Use AI/LLM to evaluate SemVer if needed (when conventional commit is ambiguous or on request)
+AI_SEMVER_USE_AI="${AI_SEMVER_USE_AI:-true}"
+
+

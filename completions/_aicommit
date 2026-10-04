@@ -1,9 +1,18 @@
-#compdef aicommit
+#compdef aicommit aic aicc aicx aiccx aics aiccs aicsx aiccsx
 
 # Zsh completion for aicommit
 _aicommit() {
     _arguments \
         '(-h --help)'{-h,--help}'[Show help message]' \
+        '(-y --yes)'{-y,--yes}'[Accept generated commit messages automatically]' \
+        '(-s --split)'{-s,--split}'[Split staged changes into atomic commits]' \
+        '(--no-split --all)'{--no-split,--all}'[Keep all changes in single commit]' \
+        '(-b --bump)'{-b,--bump}'[Evaluate and bump SemVer version]' \
+        '--bump=[Explicit SemVer bump level]:level:(major minor patch auto)' \
+        '--semver[Synonym for --bump]' \
+        '--semver=[Synonym for --bump=]:level:(major minor patch auto)' \
+        '--tag[Create Git tag for bumped version]' \
+        '--no-tag[Do not create Git tag]' \
         '(-d --dry-run)'{-d,--dry-run}'[Build context without calling LLM]' \
         '(-v --verbose)'{-v,--verbose}'[Show temp file paths and enhanced context]' \
         '(-r --regenerate)'{-r,--regenerate}'[Re-run LLM on cached prompt]'

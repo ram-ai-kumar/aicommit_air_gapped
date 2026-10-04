@@ -17,6 +17,7 @@ source "$AICOMMIT_DIR/lib/output-formatter.sh"
 source "$AICOMMIT_DIR/lib/context-analyzer.sh"
 source "$AICOMMIT_DIR/lib/backends.sh"
 source "$AICOMMIT_DIR/lib/core.sh"
+source "$AICOMMIT_DIR/lib/semver.sh"
 
 # Load completions
 if [ -n "$ZSH_VERSION" ] && [ -d "$AICOMMIT_DIR/completions" ]; then
@@ -30,6 +31,9 @@ aicommit() {
     local dry_run=false verbose=false regenerate=false split_mode=false auto_yes=false
     local explicit_split=false explicit_all=false
     local is_aic="${AIC_SHORTCUT:-false}"
+    local bump_opt="${AI_SEMVER_BUMP:-false}"
+    local bump_level=""
+    local tag_opt="${AI_SEMVER_TAG:-true}"
 
     while [ $# -gt 0 ]; do
         case "$1" in
@@ -44,20 +48,36 @@ aicommit() {
                 echo "  --yes, -y          Automatically accept generated commit messages without interactive prompts"
                 echo "  --split, -s        Split staged changes into atomic commits by logical scope"
                 echo "  --no-split, --all  Keep all staged changes in a single all-in-one commit"
+                echo "  --bump, -b         Evaluate and bump SemVer version based on commit changes"
+                echo "  --bump=*           Explicitly bump SemVer version (--bump=major|minor|patch)"
+                echo "  --semver           Synonym for --bump"
+                echo "  --semver=*         Synonym for --bump=*"
+                echo "  --tag              Create Git tag for bumped version (default: true)"
+                echo "  --no-tag           Do not create Git tag when version is bumped"
                 echo "  --dry-run, -d      Build context and show prompt without calling LLM"
                 echo "  --verbose, -v      Show diagnostics: staged file list, backend/model, temp paths"
                 echo "  --regenerate, -r   Re-run LLM on cached prompt without re-analyzing"
+                echo "Quick Shell Shims (non-interactive, CI/CD friendly):"
+                echo "  aic                Fast all-in-one commit without SemVer"
+                echo "  aicc               Fast atomic split commits without SemVer"
+                echo "  aics               Fast all-in-one commit WITH SemVer bump & tag"
+                echo "  aiccs              Fast atomic split commits WITH SemVer bump & tag"
+                echo "  aicx               Verbose dry-run preview (0 changes made)"
+                echo "  aiccx              Verbose dry-run split preview (0 changes made)"
+                echo "  aicsx              Verbose dry-run preview with SemVer (0 changes made)"
+                echo "  aiccsx             Verbose dry-run split preview with SemVer (0 changes made)"
                 echo ""
-                echo "Quick Shell Shims:"
-                echo "  aic                Fast all-in-one commit (shorthand for: aicommit --yes --no-split)"
-                echo "  aicc               Fast atomic split commits (shorthand for: aicommit --yes --split)"
-                echo "  aicx               Verbose dry-run preview (shorthand for: aicommit --dry-run --verbose --no-split)"
-                echo "  aiccx              Verbose dry-run split preview (shorthand for: aicommit --dry-run --verbose --split)"
+                echo "Interactive Session:"
+                echo "  aicommit           Fully interactive commit with scope and SemVer decisions"
                 echo ""
                 echo "Examples:"
-                echo "  git add -p && aicommit        Stage changes, then generate commit"
-                echo "  aic                           Fast all-in-one commit"
-                echo "  aicc                          Split and auto-commit each atomic scope"
+                echo "  git add -p && aicommit        Interactive session: review message, scopes & SemVer"
+                echo "  aicommit --bump               Interactive session with SemVer bump pre-selected"
+                echo "  aicommit --bump=minor         Interactive session with explicit minor bump"
+                echo "  aic                           Fast all-in-one commit (CI/CD / non-interactive)"
+                echo "  aicc                          Fast atomic split commits (CI/CD / non-interactive)"
+                echo "  aics                          Fast all-in-one commit + SemVer (CI/CD / non-interactive)"
+                echo "  aiccs                         Fast atomic split commits + SemVer (CI/CD / non-interactive)"
                 echo "  aicx                          Preview prompt and staged files (0 changes made)"
                 echo "  aiccx                         Preview atomic scope groups (0 changes made)"
                 echo "  aicommit --dry-run            Preview the prompt sent to LLM"
@@ -67,6 +87,12 @@ aicommit() {
             --yes|-y)        auto_yes=true ;;
             --split|-s)      split_mode=true; explicit_split=true ;;
             --no-split|--all) split_mode=false; explicit_all=true ;;
+            --bump|-b)       bump_opt=true ;;
+            --bump=*)        bump_opt=true; bump_level="${1#--bump=}" ;;
+            --semver)        bump_opt=true ;;
+            --semver=*)      bump_opt=true; bump_level="${1#--semver=}" ;;
+            --tag)           tag_opt=true ;;
+            --no-tag)        tag_opt=false ;;
             --shortcut)      is_aic=true ;;
             --dry-run|-d)    dry_run=true ;;
             --verbose|-v)    verbose=true ;;
@@ -105,14 +131,25 @@ aicommit() {
             return 1
         fi
         display_commit_message "$commit_msg"
+
+        local cur_ver="" evaluated_bump="" next_ver="" tag_name="" v_files="" rec_summary=""
+        cur_ver=$(get_current_version)
+        if [ "$bump_opt" = "true" ]; then
+            evaluated_bump=$(evaluate_commit_semver "$commit_msg" "$bump_level")
+            next_ver=$(calculate_next_semver "$cur_ver" "$evaluated_bump")
+            tag_name="${AI_SEMVER_TAG_PREFIX:-v}${next_ver}"
+            v_files=$(detect_version_files)
+            display_semver_plan "$cur_ver" "$evaluated_bump" "$next_ver" "$tag_name" "$v_files"
+        else
+            local rec_bump rec_next
+            rec_bump=$(evaluate_commit_semver "$commit_msg")
+            rec_next=$(calculate_next_semver "$cur_ver" "$rec_bump")
+            rec_summary="${rec_bump}: ${cur_ver} -> ${rec_next}"
+        fi
+
         local response="y"
         if [ "$auto_yes" != "true" ]; then
-            display_commit_confirmation
-            # `read` returning non-zero here means stdin hit EOF with nothing to
-            # read (e.g. invoked from a hook with stdin on /dev/null) — NOT the
-            # same as piped input ("echo y | aicommit"), which still succeeds.
-            # Without this check, `response=${response:-y}` would silently treat
-            # "no input at all" as if the user had confirmed.
+            display_commit_confirmation "$bump_opt" "$rec_summary"
             if ! read -r response; then
                 display_error "No input available to confirm the commit (stdin closed)" \
                     "Re-run with --yes to accept generated messages automatically"
@@ -120,11 +157,124 @@ aicommit() {
             fi
             response=${response:-y}
         fi
+
+        case "$response" in
+            a|A|ai|AI|s=ai|b=ai)
+                printf "🤖 Asking AI to analyze changes and calculate SemVer...\n"
+                local ai_level
+                ai_level=$(ai_evaluate_semver "$commit_msg" "${tmp_dir}/CHANGES_CONTEXT")
+                if [ -n "$ai_level" ] && [[ "$ai_level" =~ ^(major|minor|patch)$ ]]; then
+                    bump_opt=true
+                    evaluated_bump="$ai_level"
+                    next_ver=$(calculate_next_semver "$cur_ver" "$evaluated_bump")
+                    tag_name="${AI_SEMVER_TAG_PREFIX:-v}${next_ver}"
+                    v_files=$(detect_version_files)
+                    printf "🤖 AI calculated SemVer: %s -> %s\n" "$(echo "$evaluated_bump" | tr '[:lower:]' '[:upper:]')" "$next_ver"
+                    display_semver_plan "$cur_ver" "$evaluated_bump" "$next_ver" "$tag_name" "$v_files"
+                else
+                    echo "⚠️  AI evaluation unavailable — using standard recommendation."
+                fi
+                response="y"
+                ;;
+            s=*|b=*)
+                local inline_level="${response#*=}"
+                bump_opt=true
+                evaluated_bump="$inline_level"
+                next_ver=$(calculate_next_semver "$cur_ver" "$evaluated_bump")
+                tag_name="${AI_SEMVER_TAG_PREFIX:-v}${next_ver}"
+                v_files=$(detect_version_files)
+                display_semver_plan "$cur_ver" "$evaluated_bump" "$next_ver" "$tag_name" "$v_files"
+                response="y"
+                ;;
+            s\ *|b\ *)
+                local inline_level="${response#* }"
+                bump_opt=true
+                evaluated_bump="$inline_level"
+                next_ver=$(calculate_next_semver "$cur_ver" "$evaluated_bump")
+                tag_name="${AI_SEMVER_TAG_PREFIX:-v}${next_ver}"
+                v_files=$(detect_version_files)
+                display_semver_plan "$cur_ver" "$evaluated_bump" "$next_ver" "$tag_name" "$v_files"
+                response="y"
+                ;;
+            s|S|b|B|semver|bump|c|C)
+                local chosen_decision
+                chosen_decision=$(prompt_semver_decision "$commit_msg" "$cur_ver" "$bump_level")
+                if [ "$chosen_decision" = "skip" ]; then
+                    bump_opt=false
+                    echo "⏩ Skipping SemVer bump for this commit."
+                elif [[ "$chosen_decision" == custom:* ]]; then
+                    bump_opt=true
+                    next_ver="${chosen_decision#custom:}"
+                    evaluated_bump="custom"
+                    tag_name="${AI_SEMVER_TAG_PREFIX:-v}${next_ver}"
+                    v_files=$(detect_version_files)
+                    display_semver_plan "$cur_ver" "$evaluated_bump" "$next_ver" "$tag_name" "$v_files"
+                else
+                    bump_opt=true
+                    evaluated_bump="$chosen_decision"
+                    next_ver=$(calculate_next_semver "$cur_ver" "$evaluated_bump")
+                    tag_name="${AI_SEMVER_TAG_PREFIX:-v}${next_ver}"
+                    v_files=$(detect_version_files)
+                    display_semver_plan "$cur_ver" "$evaluated_bump" "$next_ver" "$tag_name" "$v_files"
+                fi
+                response="y"
+                ;;
+        esac
         case $response in
-            y|Y) process_commit "$commit_msg" && display_success \
-                     && display_semver_hint "$(suggest_semver_bump "$commit_msg")"; cleanup_aicommit_all ;;
-            e|E) git commit -e -m "$commit_msg" \
-                     && display_semver_hint "$(suggest_semver_bump "$(git log -1 --pretty=%B)")"; cleanup_aicommit_all ;;
+            y|Y)
+                local updated_files=""
+                if [ "$bump_opt" = "true" ]; then
+                    updated_files=$(apply_semver_file_updates "$cur_ver" "$next_ver")
+                fi
+                if process_commit "$commit_msg"; then
+                    display_success
+                    if [ "$bump_opt" = "true" ]; then
+                        local applied_tag=""
+                        if [ "$tag_opt" = "true" ]; then
+                            create_version_tag "$next_ver" "$commit_msg"
+                            applied_tag="$tag_name"
+                        fi
+                        display_tag_success "$applied_tag" "$updated_files"
+                    else
+                        display_semver_hint "$(suggest_semver_bump "$commit_msg")"
+                    fi
+                    cleanup_aicommit_all
+                else
+                    if [ "$bump_opt" = "true" ] && [ -n "$updated_files" ]; then
+                        git restore --staged --worktree -- $updated_files 2>/dev/null || true
+                    fi
+                    cleanup_aicommit_all
+                    return 1
+                fi
+                ;;
+            e|E)
+                local updated_files=""
+                if [ "$bump_opt" = "true" ]; then
+                    updated_files=$(apply_semver_file_updates "$cur_ver" "$next_ver")
+                fi
+                if git commit -e -m "$commit_msg"; then
+                    display_success
+                    local final_msg
+                    final_msg=$(git log -1 --pretty=%B)
+                    if [ "$bump_opt" = "true" ]; then
+                        local applied_tag=""
+                        if [ "$tag_opt" = "true" ]; then
+                            create_version_tag "$next_ver" "$final_msg"
+                            applied_tag="$tag_name"
+                        fi
+                        display_tag_success "$applied_tag" "$updated_files"
+                    else
+                        display_semver_hint "$(suggest_semver_bump "$final_msg")"
+                    fi
+                    cleanup_aicommit_all
+                else
+                    if [ "$bump_opt" = "true" ] && [ -n "$updated_files" ]; then
+                        git restore --staged --worktree -- $updated_files 2>/dev/null || true
+                    fi
+                    cleanup_aicommit_all
+                    return 1
+                fi
+                ;;
             *)   echo "❌ Commit cancelled." ;;
         esac
         return 0
@@ -230,6 +380,16 @@ aicommit() {
                 grp_files=$(printf ', %s' "${_aicommit_split_files[@]}"); grp_files="${grp_files#, }"
                 echo "  • Scope: $grp_scope -> $grp_files"
             done <<< "$scope_groups"
+            if [ "$bump_opt" = "true" ]; then
+                echo ""
+                local s_cur_ver s_eval_bump s_next_ver s_tag s_files
+                s_cur_ver=$(get_current_version)
+                s_eval_bump=$(evaluate_commit_semver "feat: preview" "$bump_level")
+                s_next_ver=$(calculate_next_semver "$s_cur_ver" "$s_eval_bump")
+                s_tag="${AI_SEMVER_TAG_PREFIX:-v}${s_next_ver}"
+                s_files=$(detect_version_files)
+                display_semver_plan "$s_cur_ver" "$s_eval_bump" "$s_next_ver" "$s_tag" "$s_files"
+            fi
             return 0
         fi
 
@@ -285,9 +445,25 @@ aicommit() {
             fi
 
             display_commit_message "$grp_commit_msg" "Suggested Commit ($idx/$num_scopes - scope: $grp_scope):"
+
+            local grp_cur_ver="" grp_eval_bump="" grp_next_ver="" grp_tag="" grp_v_files="" grp_rec_summary=""
+            grp_cur_ver=$(get_current_version)
+            if [ "$bump_opt" = "true" ]; then
+                grp_eval_bump=$(evaluate_commit_semver "$grp_commit_msg" "$bump_level")
+                grp_next_ver=$(calculate_next_semver "$grp_cur_ver" "$grp_eval_bump")
+                grp_tag="${AI_SEMVER_TAG_PREFIX:-v}${grp_next_ver}"
+                grp_v_files=$(detect_version_files)
+                display_semver_plan "$grp_cur_ver" "$grp_eval_bump" "$grp_next_ver" "$grp_tag" "$grp_v_files"
+            else
+                local grp_rec_bump grp_rec_next
+                grp_rec_bump=$(evaluate_commit_semver "$grp_commit_msg")
+                grp_rec_next=$(calculate_next_semver "$grp_cur_ver" "$grp_rec_bump")
+                grp_rec_summary="${grp_rec_bump}: ${grp_cur_ver} -> ${grp_rec_next}"
+            fi
+
             grp_resp="y"
             if [ "$auto_yes" != "true" ]; then
-                display_commit_confirmation
+                display_commit_confirmation "$bump_opt" "$grp_rec_summary"
                 if ! read -r grp_resp; then
                     display_error "No input available to confirm scope '$grp_scope' (stdin closed)" \
                         "Re-run with --yes to accept generated messages automatically"
@@ -295,13 +471,99 @@ aicommit() {
                 fi
                 grp_resp=${grp_resp:-y}
             fi
+
+            local grp_bump_active="$bump_opt"
+            case "$grp_resp" in
+                a|A|ai|AI|s=ai|b=ai)
+                    printf "🤖 Asking AI to analyze scope '%s' and calculate SemVer...\n" "$grp_scope"
+                    local ai_level
+                    ai_level=$(ai_evaluate_semver "$grp_commit_msg" "$subset_changes")
+                    if [ -n "$ai_level" ] && [[ "$ai_level" =~ ^(major|minor|patch)$ ]]; then
+                        grp_bump_active=true
+                        grp_eval_bump="$ai_level"
+                        grp_next_ver=$(calculate_next_semver "$grp_cur_ver" "$grp_eval_bump")
+                        grp_tag="${AI_SEMVER_TAG_PREFIX:-v}${grp_next_ver}"
+                        grp_v_files=$(detect_version_files)
+                        printf "🤖 AI calculated SemVer: %s -> %s\n" "$(echo "$grp_eval_bump" | tr '[:lower:]' '[:upper:]')" "$grp_next_ver"
+                        display_semver_plan "$grp_cur_ver" "$grp_eval_bump" "$grp_next_ver" "$grp_tag" "$grp_v_files"
+                    else
+                        echo "⚠️  AI evaluation unavailable — using standard recommendation."
+                    fi
+                    grp_resp="y"
+                    ;;
+                s=*|b=*)
+                    local inline_level="${grp_resp#*=}"
+                    grp_bump_active=true
+                    grp_eval_bump="$inline_level"
+                    grp_next_ver=$(calculate_next_semver "$grp_cur_ver" "$grp_eval_bump")
+                    grp_tag="${AI_SEMVER_TAG_PREFIX:-v}${grp_next_ver}"
+                    grp_v_files=$(detect_version_files)
+                    display_semver_plan "$grp_cur_ver" "$grp_eval_bump" "$grp_next_ver" "$grp_tag" "$grp_v_files"
+                    grp_resp="y"
+                    ;;
+                s\ *|b\ *)
+                    local inline_level="${grp_resp#* }"
+                    grp_bump_active=true
+                    grp_eval_bump="$inline_level"
+                    grp_next_ver=$(calculate_next_semver "$grp_cur_ver" "$grp_eval_bump")
+                    grp_tag="${AI_SEMVER_TAG_PREFIX:-v}${grp_next_ver}"
+                    grp_v_files=$(detect_version_files)
+                    display_semver_plan "$grp_cur_ver" "$grp_eval_bump" "$grp_next_ver" "$grp_tag" "$grp_v_files"
+                    grp_resp="y"
+                    ;;
+                s|S|b|B|semver|bump|c|C)
+                    local chosen_decision
+                    chosen_decision=$(prompt_semver_decision "$grp_commit_msg" "$grp_cur_ver" "$bump_level")
+                    if [ "$chosen_decision" = "skip" ]; then
+                        grp_bump_active=false
+                        echo "⏩ Skipping SemVer bump for scope '$grp_scope'."
+                    elif [[ "$chosen_decision" == custom:* ]]; then
+                        grp_bump_active=true
+                        grp_next_ver="${chosen_decision#custom:}"
+                        grp_eval_bump="custom"
+                        grp_tag="${AI_SEMVER_TAG_PREFIX:-v}${grp_next_ver}"
+                        grp_v_files=$(detect_version_files)
+                        display_semver_plan "$grp_cur_ver" "$grp_eval_bump" "$grp_next_ver" "$grp_tag" "$grp_v_files"
+                    else
+                        grp_bump_active=true
+                        grp_eval_bump="$chosen_decision"
+                        grp_next_ver=$(calculate_next_semver "$grp_cur_ver" "$grp_eval_bump")
+                        grp_tag="${AI_SEMVER_TAG_PREFIX:-v}${grp_next_ver}"
+                        grp_v_files=$(detect_version_files)
+                        display_semver_plan "$grp_cur_ver" "$grp_eval_bump" "$grp_next_ver" "$grp_tag" "$grp_v_files"
+                    fi
+                    grp_resp="y"
+                    ;;
+            esac
+
             case "$grp_resp" in
                 y|Y)
+                    local grp_updated_files=""
+                    if [ "$grp_bump_active" = "true" ]; then
+                        grp_updated_files=$(apply_semver_file_updates "$grp_cur_ver" "$grp_next_ver")
+                        if [ -n "$grp_updated_files" ]; then
+                            while IFS= read -r uf; do
+                                [ -n "$uf" ] && grp_file_array+=("$uf")
+                            done <<< "$grp_updated_files"
+                        fi
+                    fi
                     if commit_staged_subset "$grp_commit_msg" "${grp_file_array[@]}"; then
                         display_scope_success "$grp_scope"
-                        display_semver_hint "$(suggest_semver_bump "$grp_commit_msg")"
+                        if [ "$grp_bump_active" = "true" ]; then
+                            local applied_tag=""
+                            if [ "$tag_opt" = "true" ]; then
+                                create_version_tag "$grp_next_ver" "$grp_commit_msg"
+                                applied_tag="$grp_tag"
+                            fi
+                            display_tag_success "$applied_tag" "$grp_updated_files"
+                        else
+                            display_semver_hint "$(suggest_semver_bump "$grp_commit_msg")"
+                        fi
                         committed_count=$((committed_count + 1))
                     else
+                        if [ "$grp_bump_active" = "true" ] && [ -n "$grp_updated_files" ]; then
+                            git restore --staged --worktree -- $grp_updated_files 2>/dev/null || true
+                        fi
                         display_error "Commit failed for scope: $grp_scope"
                         return 1
                     fi
@@ -317,11 +579,35 @@ aicommit() {
                     edited_msg=$(cat "$edit_file" 2>/dev/null || true)
                     rm -f "$edit_file"
                     if [ -n "$edited_msg" ]; then
+                        local grp_updated_files=""
+                        if [ "$bump_opt" = "true" ]; then
+                            grp_eval_bump=$(evaluate_commit_semver "$edited_msg" "$bump_level")
+                            grp_next_ver=$(calculate_next_semver "$grp_cur_ver" "$grp_eval_bump")
+                            grp_tag="${AI_SEMVER_TAG_PREFIX:-v}${grp_next_ver}"
+                            grp_updated_files=$(apply_semver_file_updates "$grp_cur_ver" "$grp_next_ver")
+                            if [ -n "$grp_updated_files" ]; then
+                                while IFS= read -r uf; do
+                                    [ -n "$uf" ] && grp_file_array+=("$uf")
+                                done <<< "$grp_updated_files"
+                            fi
+                        fi
                         if commit_staged_subset "$edited_msg" "${grp_file_array[@]}"; then
                             display_scope_success "$grp_scope"
-                            display_semver_hint "$(suggest_semver_bump "$edited_msg")"
+                            if [ "$bump_opt" = "true" ]; then
+                                local applied_tag=""
+                                if [ "$tag_opt" = "true" ]; then
+                                    create_version_tag "$grp_next_ver" "$edited_msg"
+                                    applied_tag="$grp_tag"
+                                fi
+                                display_tag_success "$applied_tag" "$grp_updated_files"
+                            else
+                                display_semver_hint "$(suggest_semver_bump "$edited_msg")"
+                            fi
                             committed_count=$((committed_count + 1))
                         else
+                            if [ "$bump_opt" = "true" ] && [ -n "$grp_updated_files" ]; then
+                                git restore --staged --worktree -- $grp_updated_files 2>/dev/null || true
+                            fi
                             display_error "Commit failed for scope: $grp_scope"
                             return 1
                         fi
@@ -373,6 +659,16 @@ aicommit() {
         echo ""
         echo "🔍 Dry run — prompt written to: ${tmp_dir}/FULL_PROMPT"
         echo "   cat ${tmp_dir}/FULL_PROMPT"
+        if [ "$bump_opt" = "true" ]; then
+            echo ""
+            local cur_ver evaluated_bump next_ver tag_preview files_preview
+            cur_ver=$(get_current_version)
+            evaluated_bump=$(evaluate_commit_semver "feat: preview" "$bump_level")
+            next_ver=$(calculate_next_semver "$cur_ver" "$evaluated_bump")
+            tag_preview="${AI_SEMVER_TAG_PREFIX:-v}${next_ver}"
+            files_preview=$(detect_version_files)
+            display_semver_plan "$cur_ver" "$evaluated_bump" "$next_ver" "$tag_preview" "$files_preview"
+        fi
         return 0
     fi
 
@@ -383,9 +679,25 @@ aicommit() {
     fi
 
     display_commit_message "$commit_msg"
+
+    local cur_ver="" evaluated_bump="" next_ver="" tag_name="" v_files="" rec_summary=""
+    cur_ver=$(get_current_version)
+    if [ "$bump_opt" = "true" ]; then
+        evaluated_bump=$(evaluate_commit_semver "$commit_msg" "$bump_level")
+        next_ver=$(calculate_next_semver "$cur_ver" "$evaluated_bump")
+        tag_name="${AI_SEMVER_TAG_PREFIX:-v}${next_ver}"
+        v_files=$(detect_version_files)
+        display_semver_plan "$cur_ver" "$evaluated_bump" "$next_ver" "$tag_name" "$v_files"
+    else
+        local rec_bump rec_next
+        rec_bump=$(evaluate_commit_semver "$commit_msg")
+        rec_next=$(calculate_next_semver "$cur_ver" "$rec_bump")
+        rec_summary="${rec_bump}: ${cur_ver} -> ${rec_next}"
+    fi
+
     local response="y"
     if [ "$auto_yes" != "true" ]; then
-        display_commit_confirmation
+        display_commit_confirmation "$bump_opt" "$rec_summary"
         if ! read -r response; then
             display_error "No input available to confirm the commit (stdin closed)" \
                 "Re-run with --yes to accept generated messages automatically"
@@ -394,11 +706,124 @@ aicommit() {
         response=${response:-y}
     fi
 
+    case "$response" in
+        a|A|ai|AI|s=ai|b=ai)
+            printf "🤖 Asking AI to analyze changes and calculate SemVer...\n"
+            local ai_level
+            ai_level=$(ai_evaluate_semver "$commit_msg" "${tmp_dir}/CHANGES_CONTEXT")
+            if [ -n "$ai_level" ] && [[ "$ai_level" =~ ^(major|minor|patch)$ ]]; then
+                bump_opt=true
+                evaluated_bump="$ai_level"
+                next_ver=$(calculate_next_semver "$cur_ver" "$evaluated_bump")
+                tag_name="${AI_SEMVER_TAG_PREFIX:-v}${next_ver}"
+                v_files=$(detect_version_files)
+                printf "🤖 AI calculated SemVer: %s -> %s\n" "$(echo "$evaluated_bump" | tr '[:lower:]' '[:upper:]')" "$next_ver"
+                display_semver_plan "$cur_ver" "$evaluated_bump" "$next_ver" "$tag_name" "$v_files"
+            else
+                echo "⚠️  AI evaluation unavailable — using standard recommendation."
+            fi
+            response="y"
+            ;;
+        s=*|b=*)
+            local inline_level="${response#*=}"
+            bump_opt=true
+            evaluated_bump="$inline_level"
+            next_ver=$(calculate_next_semver "$cur_ver" "$evaluated_bump")
+            tag_name="${AI_SEMVER_TAG_PREFIX:-v}${next_ver}"
+            v_files=$(detect_version_files)
+            display_semver_plan "$cur_ver" "$evaluated_bump" "$next_ver" "$tag_name" "$v_files"
+            response="y"
+            ;;
+        s\ *|b\ *)
+            local inline_level="${response#* }"
+            bump_opt=true
+            evaluated_bump="$inline_level"
+            next_ver=$(calculate_next_semver "$cur_ver" "$evaluated_bump")
+            tag_name="${AI_SEMVER_TAG_PREFIX:-v}${next_ver}"
+            v_files=$(detect_version_files)
+            display_semver_plan "$cur_ver" "$evaluated_bump" "$next_ver" "$tag_name" "$v_files"
+            response="y"
+            ;;
+        s|S|b|B|semver|bump|c|C)
+            local chosen_decision
+            chosen_decision=$(prompt_semver_decision "$commit_msg" "$cur_ver" "$bump_level")
+            if [ "$chosen_decision" = "skip" ]; then
+                bump_opt=false
+                echo "⏩ Skipping SemVer bump for this commit."
+            elif [[ "$chosen_decision" == custom:* ]]; then
+                bump_opt=true
+                next_ver="${chosen_decision#custom:}"
+                evaluated_bump="custom"
+                tag_name="${AI_SEMVER_TAG_PREFIX:-v}${next_ver}"
+                v_files=$(detect_version_files)
+                display_semver_plan "$cur_ver" "$evaluated_bump" "$next_ver" "$tag_name" "$v_files"
+            else
+                bump_opt=true
+                evaluated_bump="$chosen_decision"
+                next_ver=$(calculate_next_semver "$cur_ver" "$evaluated_bump")
+                tag_name="${AI_SEMVER_TAG_PREFIX:-v}${next_ver}"
+                v_files=$(detect_version_files)
+                display_semver_plan "$cur_ver" "$evaluated_bump" "$next_ver" "$tag_name" "$v_files"
+            fi
+            response="y"
+            ;;
+    esac
+
     case $response in
-        y|Y) process_commit "$commit_msg" && display_success \
-                 && display_semver_hint "$(suggest_semver_bump "$commit_msg")"; cleanup_aicommit_all ;;
-        e|E) git commit -e -m "$commit_msg" \
-                 && display_semver_hint "$(suggest_semver_bump "$(git log -1 --pretty=%B)")"; cleanup_aicommit_all ;;
+        y|Y)
+            local updated_files=""
+            if [ "$bump_opt" = "true" ]; then
+                updated_files=$(apply_semver_file_updates "$cur_ver" "$next_ver")
+            fi
+            if process_commit "$commit_msg"; then
+                display_success
+                if [ "$bump_opt" = "true" ]; then
+                    local applied_tag=""
+                    if [ "$tag_opt" = "true" ]; then
+                        create_version_tag "$next_ver" "$commit_msg"
+                        applied_tag="$tag_name"
+                    fi
+                    display_tag_success "$applied_tag" "$updated_files"
+                else
+                    display_semver_hint "$(suggest_semver_bump "$commit_msg")"
+                fi
+                cleanup_aicommit_all
+            else
+                if [ "$bump_opt" = "true" ] && [ -n "$updated_files" ]; then
+                    git restore --staged --worktree -- $updated_files 2>/dev/null || true
+                fi
+                cleanup_aicommit_all
+                return 1
+            fi
+            ;;
+        e|E)
+            local updated_files=""
+            if [ "$bump_opt" = "true" ]; then
+                updated_files=$(apply_semver_file_updates "$cur_ver" "$next_ver")
+            fi
+            if git commit -e -m "$commit_msg"; then
+                display_success
+                local final_msg
+                final_msg=$(git log -1 --pretty=%B)
+                if [ "$bump_opt" = "true" ]; then
+                    local applied_tag=""
+                    if [ "$tag_opt" = "true" ]; then
+                        create_version_tag "$next_ver" "$final_msg"
+                        applied_tag="$tag_name"
+                    fi
+                    display_tag_success "$applied_tag" "$updated_files"
+                else
+                    display_semver_hint "$(suggest_semver_bump "$final_msg")"
+                fi
+                cleanup_aicommit_all
+            else
+                if [ "$bump_opt" = "true" ] && [ -n "$updated_files" ]; then
+                    git restore --staged --worktree -- $updated_files 2>/dev/null || true
+                fi
+                cleanup_aicommit_all
+                return 1
+            fi
+            ;;
         *)   echo "❌ Commit cancelled." ;;
     esac
 }
@@ -446,3 +871,37 @@ aiccx() {
     _aicommit_has_split_flag "$@" || args=(--split "${args[@]}")
     AIC_SHORTCUT=true aicommit --dry-run --verbose --shortcut "${args[@]}"
 }
+
+# Quick AI commit with SemVer — auto-commits all-in-one with SemVer bump & tag (non-interactive, CI/CD friendly)
+aics() {
+    local -a args=("$@")
+    _aicommit_has_split_flag "$@" || args=(--no-split "${args[@]}")
+    AIC_SHORTCUT=true aicommit --yes --bump --shortcut "${args[@]}"
+}
+
+# Quick AI commit categorized with SemVer — auto-commits each atomic scope with SemVer bump & tag (non-interactive, CI/CD friendly)
+aiccs() {
+    local -a args=("$@")
+    _aicommit_has_split_flag "$@" || args=(--split "${args[@]}")
+    AIC_SHORTCUT=true aicommit --yes --bump --shortcut "${args[@]}"
+}
+
+# Verbose dry-run inspection for single commit with SemVer preview (0 changes made)
+aicsx() {
+    local -a args=("$@")
+    _aicommit_has_split_flag "$@" || args=(--no-split "${args[@]}")
+    AIC_SHORTCUT=true aicommit --dry-run --verbose --bump --shortcut "${args[@]}"
+}
+
+# Verbose dry-run inspection for atomic split commits with SemVer preview (0 changes made)
+aiccsx() {
+    local -a args=("$@")
+    _aicommit_has_split_flag "$@" || args=(--split "${args[@]}")
+    AIC_SHORTCUT=true aicommit --dry-run --verbose --bump --shortcut "${args[@]}"
+}
+
+# Export functions for subshells if running in bash
+if [ -n "$BASH_VERSION" ]; then
+    export -f aicommit aic aicc aicx aiccx aics aiccs aicsx aiccsx 2>/dev/null || true
+fi
+

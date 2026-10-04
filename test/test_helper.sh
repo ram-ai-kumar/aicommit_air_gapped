@@ -10,13 +10,16 @@
 TEST_TEMP_DIR=""
 TEST_REPO_DIR=""
 ORIGINAL_DIR=""
+ORIGINAL_HOME=""
 
 # ─── Environment Setup ───────────────────────────────────────────────────────
 
 setup_test_env() {
     ORIGINAL_DIR="$(cd "$(pwd)" && pwd)"
+    ORIGINAL_HOME="${HOME:-}"
     TEST_TEMP_DIR="/tmp/aicommit-test-$RANDOM-$$"
     mkdir -p "$TEST_TEMP_DIR"
+    export HOME="$TEST_TEMP_DIR"
     TEST_REPO_DIR="$TEST_TEMP_DIR/test_repo"
 
     mkdir -p "$TEST_REPO_DIR"
@@ -62,7 +65,10 @@ setup_test_env() {
 cleanup_test_env() {
     cd "$ORIGINAL_DIR" 2>/dev/null || true
     rm -rf "$TEST_TEMP_DIR" 2>/dev/null || true
-    unset TEST_TEMP_DIR TEST_REPO_DIR ORIGINAL_DIR _AICOMMIT_REPO_NAME
+    if [ -n "$ORIGINAL_HOME" ]; then
+        export HOME="$ORIGINAL_HOME"
+    fi
+    unset TEST_TEMP_DIR TEST_REPO_DIR ORIGINAL_DIR ORIGINAL_HOME _AICOMMIT_REPO_NAME
 }
 
 # ─── Mock Helpers ────────────────────────────────────────────────────────────

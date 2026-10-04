@@ -215,6 +215,58 @@ display_scope_success() {
     fi
 }
 
+# Display commit confirmation prompt
+# Args: $1=bump_opt ("true" or "false"), $2=rec_summary (optional)
 display_commit_confirmation() {
-    echo "Use this message? ([Y]/n/e to edit)"
+    local bump_opt="${1:-false}"
+    local rec_summary="${2:-}"
+
+    if [ "$bump_opt" = "true" ]; then
+        echo "Use this message with SemVer? ([Y]/n/e to edit, c to change level, a for AI)"
+    elif [ -n "$rec_summary" ]; then
+        echo "Use this message? ([Y]/n/e to edit, s for SemVer bump [$rec_summary], a for AI)"
+    else
+        echo "Use this message? ([Y]/n/e to edit, s for SemVer, a for AI)"
+    fi
 }
+
+# Display SemVer release evaluation summary
+# Args: $1=current_ver, $2=bump, $3=next_ver, $4=tag_name, $5=files (newline-separated)
+display_semver_plan() {
+    local cur="$1" bump="$2" next="$3" tag="$4" files="$5"
+    local bump_label=""
+    case "$bump" in
+        major) bump_label="MAJOR (breaking change)" ;;
+        minor) bump_label="MINOR (new feature)" ;;
+        patch) bump_label="PATCH (fix/perf)" ;;
+        *) bump_label="$bump" ;;
+    esac
+
+    echo "🏷️  SemVer Release Plan:"
+    echo "   Current: $cur"
+    echo "   Bump:    $bump_label"
+    echo "   Target:  $next"
+    [ -n "$tag" ] && echo "   Git tag: $tag"
+    if [ -n "$files" ]; then
+        local files_str
+        files_str=$(printf '%s' "$files" | tr '\n' ',' | sed 's/,$//' | sed 's/,/, /g')
+        echo "   Files:   $files_str"
+    else
+        echo "   Files:   (none — tag only)"
+    fi
+}
+
+# Display Git tag and version update confirmation
+# Args: $1=tag_name, $2=files (newline-separated)
+display_tag_success() {
+    local tag="$1" files="$2"
+    if [ -n "$tag" ]; then
+        echo "🏷️  Tagged release: $tag"
+    fi
+    if [ -n "$files" ]; then
+        local files_str
+        files_str=$(printf '%s' "$files" | tr '\n' ',' | sed 's/,$//' | sed 's/,/, /g')
+        echo "📝 Updated version in: $files_str"
+    fi
+}
+
