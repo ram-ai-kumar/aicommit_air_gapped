@@ -39,6 +39,8 @@ setup_test_env() {
     cp -r "$ORIGINAL_DIR/config"    "$AICOMMIT_DIR/"
     cp -r "$ORIGINAL_DIR/templates" "$AICOMMIT_DIR/"
     cp -r "$ORIGINAL_DIR/bin"       "$AICOMMIT_DIR/"
+    chmod 755 "$AICOMMIT_DIR/bin/"* 2>/dev/null || true
+    export PATH="$AICOMMIT_DIR/bin:$PATH"
     cp    "$ORIGINAL_DIR/aicommit.sh" "$AICOMMIT_DIR/"
 
     # Reset caches that survive between tests (set to empty, not unset — avoids

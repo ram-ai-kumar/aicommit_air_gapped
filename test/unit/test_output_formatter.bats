@@ -285,3 +285,41 @@ teardown() {
     run display_commit_confirmation
     assert_output_contains "[Y]/n/e"
 }
+
+# ─── display_scope_success, display_semver_plan, display_tag_success ────────
+
+@test "display_scope_success prints committed scope and commit SHA" {
+    echo "test" > scope.txt
+    git add scope.txt
+    git commit -qm "scope commit"
+    local sha
+    sha=$(git rev-parse --short HEAD)
+    run display_scope_success "core"
+    [ "$status" -eq 0 ]
+    assert_output_contains "Committed scope 'core' ($sha)"
+}
+
+@test "display_semver_plan formats release plan with bump labels and files" {
+    local files="package.json"$'\n'"package-lock.json"
+    run display_semver_plan "1.0.0" "minor" "1.1.0" "v1.1.0" "$files"
+    [ "$status" -eq 0 ]
+    assert_output_contains "SemVer Release Plan"
+    assert_output_contains "Current: 1.0.0"
+    assert_output_contains "Bump:    MINOR (new feature)"
+    assert_output_contains "Target:  1.1.0"
+    assert_output_contains "Git tag: v1.1.0"
+    assert_output_contains "Files:   package.json, package-lock.json"
+
+    run display_semver_plan "1.0.0" "major" "2.0.0" "v2.0.0" ""
+    assert_output_contains "MAJOR (breaking change)"
+    assert_output_contains "Files:   (none — tag only)"
+}
+
+@test "display_tag_success formats tagged release and updated files" {
+    local files="package.json"$'\n'"Cargo.toml"
+    run display_tag_success "v2.0.0" "$files"
+    [ "$status" -eq 0 ]
+    assert_output_contains "Tagged release: v2.0.0"
+    assert_output_contains "Updated version in: package.json, Cargo.toml"
+}
+

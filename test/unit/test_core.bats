@@ -539,3 +539,145 @@ unit test behavior"
     [ "$status" -eq 0 ]
     [ "$output" = "none" ]
 }
+
+# ─── agit & git helpers ──────────────────────────────────────────────────────
+
+@test "agit runs git commands with quotePath=false" {
+    echo "test" > "file with spaces.txt"
+    agit add "file with spaces.txt"
+    run agit status --short
+    [ "$status" -eq 0 ]
+    assert_output_contains "file with spaces.txt"
+}
+
+@test "to_pathspec formats path with top and literal specifier" {
+    run to_pathspec "src/lib/app.js"
+    [ "$status" -eq 0 ]
+    [ "$output" = ":(top,literal)src/lib/app.js" ]
+}
+
+@test "staged_fingerprint produces deterministic sha256 of staged files" {
+    echo "a" > a.txt
+    echo "b" > b.txt
+    agit add a.txt b.txt
+    local fp1 fp2
+    fp1=$(staged_fingerprint)
+    fp2=$(staged_fingerprint)
+    [ -n "$fp1" ]
+    [ "$fp1" = "$fp2" ]
+    echo "c" > c.txt
+    agit add c.txt
+    local fp3
+    fp3=$(staged_fingerprint)
+    [ "$fp1" != "$fp3" ]
+}
+
+@test "_aicommit_split_tab_line splits tab-delimited scope and files" {
+    local line="core	aicommit.sh	lib/core.sh"
+    _aicommit_split_tab_line "$line"
+    [ "$_aicommit_split_scope" = "core" ]
+    [ "${#_aicommit_split_files[@]}" -eq 2 ]
+    [ "${_aicommit_split_files[0]}" = "aicommit.sh" ]
+    [ "${_aicommit_split_files[1]}" = "lib/core.sh" ]
+}
+
+@test "_aicommit_split_tab_line handles empty and single-field lines" {
+    _aicommit_split_tab_line ""
+    [ "$_aicommit_split_scope" = "" ]
+    [ "${#_aicommit_split_files[@]}" -eq 0 ]
+
+    _aicommit_split_tab_line "docs"
+    [ "$_aicommit_split_scope" = "docs" ]
+    [ "${#_aicommit_split_files[@]}" -eq 0 ]
+}
+
+# ─── _aicommit_has_split_flag & shortcut functions ───────────────────────────
+
+@test "_aicommit_has_split_flag detects split and no-split flags" {
+    run _aicommit_has_split_flag "--split"
+    [ "$status" -eq 0 ]
+
+    run _aicommit_has_split_flag "-s"
+    [ "$status" -eq 0 ]
+
+    run _aicommit_has_split_flag "--no-split"
+    [ "$status" -eq 0 ]
+
+    run _aicommit_has_split_flag "--all"
+    [ "$status" -eq 0 ]
+
+    run _aicommit_has_split_flag "--bump" "--yes"
+    [ "$status" -eq 1 ]
+
+    run _aicommit_has_split_flag
+    [ "$status" -eq 1 ]
+}
+
+@test "aic function executes all-in-one non-interactive dry-run" {
+    echo "foo" > foo.txt
+    git add foo.txt
+    run aic --dry-run
+    [ "$status" -eq 0 ]
+    assert_output_contains "Dry run"
+}
+
+@test "aicc function executes split non-interactive dry-run" {
+    echo "foo" > foo.txt
+    git add foo.txt
+    run aicc --dry-run
+    [ "$status" -eq 0 ]
+    assert_output_contains "Dry run"
+}
+
+@test "aicx function executes verbose dry-run without commit" {
+    echo "foo" > foo.txt
+    git add foo.txt
+    run aicx
+    [ "$status" -eq 0 ]
+    assert_output_contains "Dry run"
+}
+
+@test "aiccx function executes verbose split dry-run" {
+    echo "foo" > foo.txt
+    git add foo.txt
+    run aiccx
+    [ "$status" -eq 0 ]
+    assert_output_contains "Dry run"
+}
+
+@test "aics function executes semver all-in-one dry-run" {
+    printf '{\n  "name": "pkg",\n  "version": "1.0.0"\n}\n' > package.json
+    echo "foo" > foo.txt
+    git add package.json foo.txt
+    run aics --dry-run
+    [ "$status" -eq 0 ]
+    assert_output_contains "SemVer Release Plan"
+}
+
+@test "aiccs function executes semver split dry-run" {
+    printf '{\n  "name": "pkg",\n  "version": "1.0.0"\n}\n' > package.json
+    echo "foo" > foo.txt
+    git add package.json foo.txt
+    run aiccs --dry-run
+    [ "$status" -eq 0 ]
+    assert_output_contains "SemVer Release Plan"
+}
+
+@test "aicsx function executes verbose semver dry-run" {
+    printf '{\n  "name": "pkg",\n  "version": "1.0.0"\n}\n' > package.json
+    echo "foo" > foo.txt
+    git add package.json foo.txt
+    run aicsx
+    [ "$status" -eq 0 ]
+    assert_output_contains "SemVer Release Plan"
+}
+
+@test "aiccsx function executes verbose semver split dry-run" {
+    printf '{\n  "name": "pkg",\n  "version": "1.0.0"\n}\n' > package.json
+    echo "foo" > foo.txt
+    git add package.json foo.txt
+    run aiccsx
+    [ "$status" -eq 0 ]
+    assert_output_contains "SemVer Release Plan"
+}
+

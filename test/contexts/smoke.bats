@@ -13,32 +13,100 @@ teardown() {
 # ─── Loading ─────────────────────────────────────────────────────────────────
 
 @test "aicommit.sh sources without error" {
-    # setup already sourced it; verify the key entry-points exist as functions
+    # setup already sourced it; verify all 9 command entry-points exist as functions
     declare -f aicommit > /dev/null
     declare -f aic      > /dev/null
+    declare -f aicc     > /dev/null
+    declare -f aicx     > /dev/null
+    declare -f aiccx    > /dev/null
+    declare -f aics     > /dev/null
+    declare -f aiccs    > /dev/null
+    declare -f aicsx    > /dev/null
+    declare -f aiccsx   > /dev/null
 }
 
 @test "all library functions are available after source" {
+    # core.sh
     declare -f validate_prerequisites     > /dev/null
     declare -f get_aicommit_tmp_dir       > /dev/null
+    declare -f agit                       > /dev/null
+    declare -f to_pathspec                > /dev/null
+    declare -f staged_fingerprint         > /dev/null
+    declare -f _aicommit_split_tab_line   > /dev/null
+    declare -f count_lines                > /dev/null
     declare -f build_file_context         > /dev/null
     declare -f filter_and_truncate_diff   > /dev/null
     declare -f build_ai_context           > /dev/null
+    declare -f extract_conventional_commit > /dev/null
+    declare -f suggest_semver_bump        > /dev/null
     declare -f generate_commit_message    > /dev/null
     declare -f process_commit             > /dev/null
+    declare -f commit_staged_subset       > /dev/null
     declare -f cleanup_aicommit_ephemeral > /dev/null
     declare -f cleanup_aicommit_all       > /dev/null
-    declare -f display_setup_info         > /dev/null
-    declare -f display_error              > /dev/null
-    declare -f detect_project_type        > /dev/null
-    declare -f categorize_staged_files    > /dev/null
+
+    # backends.sh
     declare -f validate_backend_prerequisites > /dev/null
     declare -f invoke_llm                 > /dev/null
     declare -f get_available_ollama_models > /dev/null
     declare -f test_model_loadability     > /dev/null
-
     declare -f validate_ollama_prerequisites > /dev/null
     declare -f invoke_ollama              > /dev/null
+
+    # context-analyzer.sh
+    declare -f detect_project_type        > /dev/null
+    declare -f analyze_change_concentration > /dev/null
+    declare -f detect_new_files_ratio     > /dev/null
+    declare -f detect_upgrade_pattern     > /dev/null
+    declare -f categorize_staged_files    > /dev/null
+    declare -f build_enhanced_context     > /dev/null
+    declare -f infer_file_scope           > /dev/null
+    declare -f infer_logical_file_context > /dev/null
+    declare -f group_staged_files_heuristically > /dev/null
+    declare -f validate_and_reconcile_contexts > /dev/null
+    declare -f cluster_staged_files_with_ai > /dev/null
+    declare -f group_staged_files_logically > /dev/null
+    declare -f group_staged_files_by_scope > /dev/null
+    declare -f count_staged_scopes        > /dev/null
+
+    # output-formatter.sh
+    declare -f display_staged_files       > /dev/null
+    declare -f display_setup_info         > /dev/null
+    declare -f display_commit_message     > /dev/null
+    declare -f display_split_confirmation > /dev/null
+    declare -f display_split_progress     > /dev/null
+    declare -f display_error              > /dev/null
+    declare -f display_success            > /dev/null
+    declare -f display_semver_hint        > /dev/null
+    declare -f display_scope_success      > /dev/null
+    declare -f display_commit_confirmation > /dev/null
+    declare -f display_semver_plan        > /dev/null
+    declare -f display_tag_success        > /dev/null
+
+    # semver.sh
+    declare -f get_current_version        > /dev/null
+    declare -f calculate_next_semver      > /dev/null
+    declare -f detect_version_files       > /dev/null
+    declare -f update_version_in_file     > /dev/null
+    declare -f apply_semver_file_updates  > /dev/null
+    declare -f create_version_tag         > /dev/null
+    declare -f extract_semver_decision    > /dev/null
+    declare -f ai_evaluate_semver         > /dev/null
+    declare -f evaluate_commit_semver     > /dev/null
+    declare -f prompt_semver_decision     > /dev/null
+
+    # aicommit.sh helper
+    declare -f _aicommit_has_split_flag   > /dev/null
+}
+
+@test "all 9 bin command wrappers exist and are executable in AICOMMIT_DIR/bin" {
+    local commands=("aicommit" "aic" "aicc" "aicx" "aiccx" "aics" "aiccs" "aicsx" "aiccsx")
+    for cmd in "${commands[@]}"; do
+        local bin_path="$AICOMMIT_DIR/bin/$cmd"
+        [ -f "$bin_path" ]
+        [ -s "$bin_path" ]
+        [ -x "$bin_path" ]
+    done
 }
 
 # ─── Configuration ───────────────────────────────────────────────────────────

@@ -337,3 +337,72 @@ core functionality | lib/backends.sh
     assert_output_contains $'core functionality\tlib/backends.sh'
     assert_output_contains $'additional changes\taicommit.sh\tconfig/defaults.sh'
 }
+
+# ─── infer_logical_file_context & grouping heuristics ────────────────────────
+
+@test "infer_logical_file_context identifies multi-tenancy, auth, docs, ci, and models" {
+    run infer_logical_file_context "config/initializers/apartment.rb"
+    [ "$output" = "apartment multi-tenancy config & tests" ]
+
+    run infer_logical_file_context "app/services/oauth_service.rb"
+    [ "$output" = "google oauth & devise authentication" ]
+
+    run infer_logical_file_context "app/models/product.rb"
+    [ "$output" = "product & spare catalog" ]
+
+    run infer_logical_file_context "app/views/layouts/application.html.erb"
+    [ "$output" = "navigation UI updates" ]
+
+    run infer_logical_file_context "db/schema.rb"
+    [ "$output" = "database schema & seeds" ]
+
+    run infer_logical_file_context "docs/index.md"
+    [ "$output" = "documentation & plans" ]
+
+    run infer_logical_file_context ".github/workflows/ci.yml"
+    [ "$output" = "infrastructure & container deployment" ]
+
+    run infer_logical_file_context "scripts/deploy.sh"
+    [ "$output" = "scripts" ]
+
+    run infer_logical_file_context "package.json"
+    [ "$output" = "config" ]
+
+    run infer_logical_file_context "lib/core.sh"
+    [ "$output" = "core" ]
+}
+
+@test "group_staged_files_heuristically groups files by logical context" {
+    local files="app/models/product.rb"$'\n'"app/models/spare.rb"$'\n'"README.md"
+    run group_staged_files_heuristically "$files"
+    [ "$status" -eq 0 ]
+    assert_output_contains $'product & spare catalog\tapp/models/product.rb\tapp/models/spare.rb'
+    assert_output_contains $'documentation & plans\tREADME.md'
+}
+
+@test "group_staged_files_heuristically returns empty for empty input" {
+    run group_staged_files_heuristically ""
+    [ "$status" -eq 0 ]
+    [ "$output" = "" ]
+}
+
+@test "cluster_staged_files_with_ai returns 1 when prompt template missing" {
+    export AI_GROUPING_PROMPT_FILE="/nonexistent/template.txt"
+    run cluster_staged_files_with_ai "app.js" "" ""
+    [ "$status" -eq 1 ]
+}
+
+@test "cluster_staged_files_with_ai clusters with mock LLM" {
+    local template="$AICOMMIT_DIR/templates/context-grouping-prompt.txt"
+    mkdir -p "$(dirname "$template")"
+    echo 'Grouping prompt: ${CHANGES_CONTEXT}' > "$template"
+    export AI_GROUPING_PROMPT_FILE="$template"
+
+    mock_bin "ollama" "
+        printf '@@@\\nui | app.js\\n@@@\\n'
+    "
+    run cluster_staged_files_with_ai "app.js" "1	0	app.js" "console.log('test')"
+    [ "$status" -eq 0 ]
+    assert_output_contains "ui"
+}
+

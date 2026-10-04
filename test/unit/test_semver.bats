@@ -751,3 +751,22 @@ major | incompatible parameter removed
     [ "$(git tag -l 'v1.1.0')" = "v1.1.0" ]
 }
 
+# ─── apply_semver_file_updates ───────────────────────────────────────────────
+
+@test "apply_semver_file_updates updates and stages detected version files" {
+    printf '{\n  "name": "semver-apply-test",\n  "version": "1.0.0"\n}\n' > package.json
+    git add package.json
+    git commit -qm "initial commit"
+
+    run apply_semver_file_updates "1.0.0" "1.1.0"
+    [ "$status" -eq 0 ]
+    assert_output_contains "package.json"
+    grep -q '"version": "1.1.0"' package.json
+
+    # Check git staged status
+    run git diff --staged --name-only
+    [ "$status" -eq 0 ]
+    assert_output_contains "package.json"
+}
+
+
