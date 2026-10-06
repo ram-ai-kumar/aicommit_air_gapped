@@ -122,6 +122,220 @@ get_current_version() {
     echo "$ver"
 }
 
+# Compare two SemVer strings. Returns 0 if v1 > v2, 1 otherwise.
+# Handles v prefix, major.minor.patch, prerelease (-rc.1), and pubspec build numbers (+1).
+semver_gt() {
+    local v1="$1" v2="$2"
+    [ -z "$v1" ] && return 1
+    [ -z "$v2" ] && return 0
+    [ "$v1" = "$v2" ] && return 1
+
+    v1="${v1#v}"; v1="${v1#V}"
+    v2="${v2#v}"; v2="${v2#V}"
+
+    # Extract build metadata (+...)
+    local b1="" b2=""
+    if [[ "$v1" == *"+"* ]]; then
+        b1="${v1#*+}"
+        v1="${v1%%+*}"
+    fi
+    if [[ "$v2" == *"+"* ]]; then
+        b2="${v2#*+}"
+        v2="${v2%%+*}"
+    fi
+
+    # Extract prerelease (-...)
+    local pre1="" pre2=""
+    if [[ "$v1" == *"-"* ]]; then
+        pre1="${v1#*-}"
+        v1="${v1%%-*}"
+    fi
+    if [[ "$v2" == *"-"* ]]; then
+        pre2="${v2#*-}"
+        v2="${v2%%-*}"
+    fi
+
+    local maj1 min1 pat1
+    maj1=$(echo "$v1" | awk -F'.' '{print $1}')
+    min1=$(echo "$v1" | awk -F'.' '{print $2}')
+    pat1=$(echo "$v1" | awk -F'.' '{print $3}')
+    maj1="${maj1:-0}"; min1="${min1:-0}"; pat1="${pat1:-0}"
+
+    local maj2 min2 pat2
+    maj2=$(echo "$v2" | awk -F'.' '{print $1}')
+    min2=$(echo "$v2" | awk -F'.' '{print $2}')
+    pat2=$(echo "$v2" | awk -F'.' '{print $3}')
+    maj2="${maj2:-0}"; min2="${min2:-0}"; pat2="${pat2:-0}"
+
+    if [ "$maj1" -ne "$maj2" ]; then
+        [ "$maj1" -gt "$maj2" ] && return 0 || return 1
+    fi
+    if [ "$min1" -ne "$min2" ]; then
+        [ "$min1" -gt "$min2" ] && return 0 || return 1
+    fi
+    if [ "$pat1" -ne "$pat2" ]; then
+        [ "$pat1" -gt "$pat2" ] && return 0 || return 1
+    fi
+
+    # Core versions are equal. Normal release has higher precedence than prerelease.
+    # e.g., 1.0.0 > 1.0.0-rc.1
+    if [ -z "$pre1" ] && [ -n "$pre2" ]; then
+        return 0
+    fi
+    if [ -n "$pre1" ] && [ -z "$pre2" ]; then
+        return 1
+    fi
+    if [ -n "$pre1" ] && [ -n "$pre2" ]; then
+        if [ "$pre1" != "$pre2" ]; then
+            local higher_pre
+            higher_pre=$(printf '%s\n%s\n' "$pre1" "$pre2" | sort -V 2>/dev/null | tail -n1)
+            [ "$higher_pre" = "$pre1" ] && return 0 || return 1
+        fi
+    fi
+
+    # If core and prerelease are equal, check build numbers if numeric (e.g. pubspec +2 > +1)
+    if [ -n "$b1" ] && [ -n "$b2" ]; then
+        if [[ "$b1" =~ ^[0-9]+$ ]] && [[ "$b2" =~ ^[0-9]+$ ]]; then
+            [ "$b1" -gt "$b2" ] && return 0 || return 1
+        fi
+    fi
+
+    return 1
+}
+
+# Extract committed version manifest directly from git HEAD
+get_version_from_git_head() {
+    if ! git rev-parse --verify HEAD >/dev/null 2>&1; then
+        return 1
+    fi
+
+    local ver=""
+    # 1. package.json
+    if git cat-file -e "HEAD:package.json" 2>/dev/null; then
+        ver=$(git show "HEAD:package.json" 2>/dev/null | grep -m1 '"version"' | sed -E 's/.*"version"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/' || true)
+    fi
+
+    # 2. Cargo.toml
+    if [ -z "$ver" ] && git cat-file -e "HEAD:Cargo.toml" 2>/dev/null; then
+        ver=$(git show "HEAD:Cargo.toml" 2>/dev/null | awk '/^\[package\]/{flag=1;next}/^\[/{flag=0}flag && /^version/{print}' | head -n1 | sed -E 's/.*=[[:space:]]*"([^"]+)".*/\1/' || true)
+    fi
+
+    # 3. pyproject.toml
+    if [ -z "$ver" ] && git cat-file -e "HEAD:pyproject.toml" 2>/dev/null; then
+        ver=$(git show "HEAD:pyproject.toml" 2>/dev/null | grep -E '^[[:space:]]*version[[:space:]]*=' | head -n1 | sed -E 's/.*=[[:space:]]*["'\'']([^"'\'']+)["'\''].*/\1/' || true)
+    fi
+
+    # 4. pubspec.yaml
+    if [ -z "$ver" ] && git cat-file -e "HEAD:pubspec.yaml" 2>/dev/null; then
+        ver=$(git show "HEAD:pubspec.yaml" 2>/dev/null | grep -E '^[[:space:]]*version:' | head -n1 | sed -E 's/^[[:space:]]*version:[[:space:]]*([^[:space:]]+).*/\1/' || true)
+    fi
+
+    # 5. composer.json
+    if [ -z "$ver" ] && git cat-file -e "HEAD:composer.json" 2>/dev/null; then
+        ver=$(git show "HEAD:composer.json" 2>/dev/null | grep -m1 '"version"' | sed -E 's/.*"version"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/' || true)
+    fi
+
+    # 6. VERSION or .version
+    if [ -z "$ver" ]; then
+        if git cat-file -e "HEAD:VERSION" 2>/dev/null; then
+            ver=$(git show "HEAD:VERSION" 2>/dev/null | head -n1 | tr -d '[:space:]' || true)
+        elif git cat-file -e "HEAD:.version" 2>/dev/null; then
+            ver=$(git show "HEAD:.version" 2>/dev/null | head -n1 | tr -d '[:space:]' || true)
+        fi
+    fi
+
+    # 7. Ruby gemspec or version.rb
+    if [ -z "$ver" ]; then
+        local rb_file
+        rb_file=$(git ls-tree -r --name-only HEAD 2>/dev/null | grep -E '\.gemspec$' | head -n1 || true)
+        if [ -n "$rb_file" ]; then
+            ver=$(git show "HEAD:$rb_file" 2>/dev/null | grep -E '\.version[[:space:]]*=' | head -n1 | sed -E 's/.*=[[:space:]]*["'\'']([^"'\'']+)["'\''].*/\1/' || true)
+        fi
+        if [ -z "$ver" ]; then
+            rb_file=$(git ls-tree -r --name-only HEAD 2>/dev/null | grep -E '(^|/)version\.rb$' | head -n1 || true)
+            if [ -n "$rb_file" ]; then
+                ver=$(git show "HEAD:$rb_file" 2>/dev/null | grep -E 'VERSION[[:space:]]*=' | head -n1 | sed -E 's/.*=[[:space:]]*["'\'']([^"'\'']+)["'\''].*/\1/' || true)
+            fi
+        fi
+    fi
+
+    # 8. .NET proj
+    if [ -z "$ver" ]; then
+        local net_file
+        net_file=$(git ls-tree -r --name-only HEAD 2>/dev/null | grep -E '\.(csproj|fsproj)$' | head -n1 || true)
+        if [ -n "$net_file" ]; then
+            ver=$(git show "HEAD:$net_file" 2>/dev/null | grep -E '<(Version|PackageVersion)>' | head -n1 | sed -E 's/.*<(Version|PackageVersion)>([^<]+)<\/(Version|PackageVersion)>.*/\2/' || true)
+        fi
+    fi
+
+    # 9. Java pom.xml or gradle
+    if [ -z "$ver" ] && git cat-file -e "HEAD:pom.xml" 2>/dev/null; then
+        ver=$(git show "HEAD:pom.xml" 2>/dev/null | awk '/<version>/{print; exit}' | sed -E 's/.*<version>([^<]+)<\/version>.*/\1/' || true)
+    fi
+    if [ -z "$ver" ] && git cat-file -e "HEAD:build.gradle" 2>/dev/null; then
+        ver=$(git show "HEAD:build.gradle" 2>/dev/null | grep -E '^[[:space:]]*version[[:space:]]*=' | head -n1 | sed -E 's/.*=[[:space:]]*["'\'']([^"'\'']+)["'\''].*/\1/' || true)
+    fi
+
+    # 10. Go version.go
+    if [ -z "$ver" ]; then
+        local go_file
+        go_file=$(git ls-tree -r --name-only HEAD 2>/dev/null | grep -E '(^|/)version\.go$' | head -n1 || true)
+        if [ -n "$go_file" ]; then
+            ver=$(git show "HEAD:$go_file" 2>/dev/null | grep -E '(var|const)[[:space:]]+(Version|version)[[:space:]]*=' | head -n1 | sed -E 's/.*=[[:space:]]*["'\'']([^"'\'']+)["'\''].*/\1/' || true)
+        fi
+    fi
+
+    if [ -n "$ver" ]; then
+        ver="${ver#v}"; ver="${ver#V}"
+        echo "$ver"
+        return 0
+    fi
+    return 1
+}
+
+# Resolve authoritative baseline ("last") version for SemVer calculation.
+# Hierarchy:
+# 1. Highest Git tag (v* or *.*.*)
+# 2. Committed manifests in HEAD (get_version_from_git_head)
+# 3. Working tree manifests (get_current_version)
+# 4. DEFAULT_INITIAL_VERSION (0.1.0)
+get_last_version() {
+    local highest_tag=""
+    local tag clean_cand
+    local raw_tags
+    raw_tags=$(git tag -l "v*" "*.*.*" 2>/dev/null || true)
+    if [ -n "$raw_tags" ]; then
+        while IFS= read -r tag; do
+            [ -z "$tag" ] && continue
+            clean_cand="${tag#v}"; clean_cand="${clean_cand#V}"
+            [[ "$clean_cand" =~ ^[0-9]+\.[0-9]+ ]] || continue
+            if [ -z "$highest_tag" ]; then
+                highest_tag="$clean_cand"
+            elif semver_gt "$clean_cand" "$highest_tag"; then
+                highest_tag="$clean_cand"
+            fi
+        done <<< "$raw_tags"
+    fi
+
+    if [ -n "$highest_tag" ]; then
+        echo "$highest_tag"
+        return 0
+    fi
+
+    # Fallback to committed HEAD manifests
+    local head_ver
+    if head_ver=$(get_version_from_git_head 2>/dev/null) && [ -n "$head_ver" ]; then
+        echo "$head_ver"
+        return 0
+    fi
+
+    # Fallback to working tree manifests (e.g. before initial commit)
+    local cur_ver
+    cur_ver=$(get_current_version)
+    echo "$cur_ver"
+}
+
+
 # Calculate the next semver given a current version and bump level
 # Args: $1=current_version (e.g. "1.2.3"), $2=bump_level ("major"|"minor"|"patch"|"none")
 calculate_next_semver() {
@@ -820,4 +1034,196 @@ EOF
             ;;
     esac
 }
+
+# Detect existing changelog filename preserving actual filesystem casing
+detect_changelog_file() {
+    local candidates=(
+        "CHANGELOG.md" "CHANGELOG.markdown" "CHANGELOG.txt" "CHANGELOG.rst" "CHANGELOG"
+        "changelog.md" "changelog.markdown" "changelog.txt" "changelog.rst" "changelog"
+        "HISTORY.md" "history.md" "HISTORY.txt" "HISTORY.rst" "HISTORY" "history"
+        "RELEASES.md" "releases.md" "NEWS.md" "news.md"
+    )
+    local existing_files cand
+    existing_files=$(find . -maxdepth 1 -type f 2>/dev/null | sed 's|^\./||')
+    for cand in "${candidates[@]}"; do
+        if printf '%s\n' "$existing_files" | grep -qx "$cand"; then
+            echo "$cand"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# Update or create project changelog idempotently
+# Args: $1=version, $2=commit_msg, $3=date (optional: YYYY-MM-DD)
+# Echoes changelog filename
+update_changelog() {
+    local version="$1"
+    local commit_msg="$2"
+    local rel_date="${3:-$(date +%Y-%m-%d)}"
+
+    if [ "${AI_SEMVER_CHANGELOG:-true}" != "true" ]; then
+        return 0
+    fi
+
+    local clean_ver="${version#v}"; clean_ver="${clean_ver#V}"
+    [ -z "$clean_ver" ] && return 1
+
+    local cl_file
+    if ! cl_file=$(detect_changelog_file 2>/dev/null) || [ -z "$cl_file" ]; then
+        cl_file="${AI_SEMVER_CHANGELOG_FILE:-CHANGELOG.md}"
+    fi
+
+    local first_line
+    first_line=$(printf '%s\n' "$commit_msg" | head -n 1 | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')
+    [ -z "$first_line" ] && first_line="Release v${clean_ver}"
+    local bullet="- ${first_line}"
+
+    if [ ! -f "$cl_file" ]; then
+        cat <<EOF > "$cl_file"
+# Changelog
+
+All notable changes to this project will be documented in this file.
+
+## [${clean_ver}] - ${rel_date}
+
+${bullet}
+EOF
+        agit add "$cl_file" 2>/dev/null || git add "$cl_file" 2>/dev/null || true
+        echo "$cl_file"
+        return 0
+    fi
+
+    local tmp="${cl_file}.tmp.$$"
+    awk -v ver="$clean_ver" -v rel_date="$rel_date" -v bullet="$bullet" -v line_match="$first_line" '
+        BEGIN {
+            target_found = 0
+            in_target_section = 0
+            bullet_found = 0
+            inserted_new = 0
+        }
+        # Detect section header for target version
+        $0 ~ ("^## \\[?v?" ver "(\\]| -|:|[[:space:]]|$)") {
+            target_found = 1
+            in_target_section = 1
+            print $0
+            next
+        }
+        # Transition out of target section when next ## header arrives
+        in_target_section && /^## / {
+            if (!bullet_found) {
+                print bullet
+                print ""
+                bullet_found = 1
+            }
+            in_target_section = 0
+        }
+        in_target_section {
+            if (index($0, line_match) > 0) {
+                bullet_found = 1
+            }
+        }
+        # Prepend new section before the first existing release header if not target_found
+        !target_found && !inserted_new && /^## / {
+            print "## [" ver "] - " rel_date
+            print ""
+            print bullet
+            print ""
+            inserted_new = 1
+        }
+        { print }
+        END {
+            if (target_found && in_target_section && !bullet_found) {
+                print bullet
+            } else if (!target_found && !inserted_new) {
+                print ""
+                print "## [" ver "] - " rel_date
+                print ""
+                print bullet
+            }
+        }
+    ' "$cl_file" > "$tmp" && mv "$tmp" "$cl_file"
+
+    agit add "$cl_file" 2>/dev/null || git add "$cl_file" 2>/dev/null || true
+    echo "$cl_file"
+    return 0
+}
+
+# Revert staged and modified version files and remove untracked changelog on commit failure
+# Args: $1=files (newline- or space-separated list of file paths)
+restore_semver_updates() {
+    local files="$1"
+    [ -z "$files" ] && return 0
+    local f
+    for f in $files; do
+        [ -z "$f" ] && continue
+        if git rev-parse --verify "HEAD:$f" >/dev/null 2>&1; then
+            agit restore --staged --worktree -- "$f" 2>/dev/null || git restore --staged --worktree -- "$f" 2>/dev/null || true
+        else
+            agit rm -f --cached -- "$f" 2>/dev/null || git rm -f --cached -- "$f" 2>/dev/null || true
+            rm -f "$f" 2>/dev/null || true
+        fi
+    done
+}
+
+# Check if working tree has a higher version than the evaluated next version.
+# Returns 0 (success/true) if working tree is strictly higher and echoes working tree version.
+# Returns 1 (false) otherwise and echoes evaluated next version.
+resolve_effective_semver() {
+    local evaluated_next="$1"
+    local file_ver
+    file_ver=$(get_current_version)
+    if semver_gt "$file_ver" "$evaluated_next"; then
+        echo "$file_ver"
+        return 0
+    fi
+    echo "$evaluated_next"
+    return 1
+}
+
+# Prepare and apply SemVer release: version files updates, changelog additions, and git staging.
+# If target_ver is higher than evaluated_next, manifests are left untouched and staged as-is.
+# Otherwise, manifests are updated via apply_semver_file_updates.
+# Changelog is updated for target_ver and staged.
+# Echoes list of updated/staged files.
+apply_semver_release() {
+    local cur_ver="$1" target_ver="$2" commit_msg="$3" evaluated_next="${4:-$target_ver}"
+    local -a files_updated=()
+
+    if ! semver_gt "$target_ver" "$evaluated_next"; then
+        local m_files
+        m_files=$(apply_semver_file_updates "$cur_ver" "$target_ver")
+        if [ -n "$m_files" ]; then
+            while IFS= read -r f; do
+                [ -n "$f" ] && files_updated+=("$f")
+            done <<< "$m_files"
+        fi
+    else
+        # When preserved, ensure modified manifests are staged into the commit
+        local v_files
+        v_files=$(detect_version_files)
+        if [ -n "$v_files" ]; then
+            while IFS= read -r f; do
+                if [ -n "$f" ]; then
+                    agit add "$f" 2>/dev/null || git add "$f" 2>/dev/null || true
+                    files_updated+=("$f")
+                fi
+            done <<< "$v_files"
+        fi
+    fi
+
+    # Update changelog
+    if [ "${AI_SEMVER_CHANGELOG:-true}" = "true" ]; then
+        local cl_file
+        cl_file=$(update_changelog "$target_ver" "$commit_msg")
+        if [ -n "$cl_file" ]; then
+            files_updated+=("$cl_file")
+        fi
+    fi
+
+    if [ ${#files_updated[@]} -gt 0 ]; then
+        printf '%s\n' "${files_updated[@]}" | sort -u
+    fi
+}
+
 

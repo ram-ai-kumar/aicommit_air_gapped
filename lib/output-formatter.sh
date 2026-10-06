@@ -231,16 +231,20 @@ display_commit_confirmation() {
 }
 
 # Display SemVer release evaluation summary
-# Args: $1=current_ver, $2=bump, $3=next_ver, $4=tag_name, $5=files (newline-separated)
+# Args: $1=current_ver, $2=bump, $3=next_ver, $4=tag_name, $5=files (newline-separated), $6=is_higher (optional)
 display_semver_plan() {
-    local cur="$1" bump="$2" next="$3" tag="$4" files="$5"
+    local cur="$1" bump="$2" next="$3" tag="$4" files="$5" is_higher="${6:-false}"
     local bump_label=""
-    case "$bump" in
-        major) bump_label="MAJOR (breaking change)" ;;
-        minor) bump_label="MINOR (new feature)" ;;
-        patch) bump_label="PATCH (fix/perf)" ;;
-        *) bump_label="$bump" ;;
-    esac
+    if [ "$is_higher" = "true" ] || [ "$bump" = "preserved" ]; then
+        bump_label="PRESERVED (higher version in manifests)"
+    else
+        case "$bump" in
+            major) bump_label="MAJOR (breaking change)" ;;
+            minor) bump_label="MINOR (new feature)" ;;
+            patch) bump_label="PATCH (fix/perf)" ;;
+            *) bump_label="$bump" ;;
+        esac
+    fi
 
     echo "🏷️  SemVer Release Plan:"
     echo "   Current: $cur"

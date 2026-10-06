@@ -84,6 +84,9 @@ teardown() {
     declare -f display_tag_success        > /dev/null
 
     # semver.sh
+    declare -f semver_gt                  > /dev/null
+    declare -f get_version_from_git_head  > /dev/null
+    declare -f get_last_version           > /dev/null
     declare -f get_current_version        > /dev/null
     declare -f calculate_next_semver      > /dev/null
     declare -f detect_version_files       > /dev/null
@@ -94,6 +97,11 @@ teardown() {
     declare -f ai_evaluate_semver         > /dev/null
     declare -f evaluate_commit_semver     > /dev/null
     declare -f prompt_semver_decision     > /dev/null
+    declare -f detect_changelog_file      > /dev/null
+    declare -f update_changelog           > /dev/null
+    declare -f restore_semver_updates     > /dev/null
+    declare -f resolve_effective_semver   > /dev/null
+    declare -f apply_semver_release       > /dev/null
 
     # aicommit.sh helper
     declare -f _aicommit_has_split_flag   > /dev/null

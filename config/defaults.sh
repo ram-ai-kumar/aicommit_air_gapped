@@ -55,5 +55,10 @@ DEFAULT_INITIAL_VERSION="${DEFAULT_INITIAL_VERSION:-0.1.0}"
 AI_SEMVER_PROMPT_FILE="${AI_SEMVER_PROMPT_FILE:-$AICOMMIT_DIR/templates/semver-prompt.txt}"
 # Use AI/LLM to evaluate SemVer if needed (when conventional commit is ambiguous or on request)
 AI_SEMVER_USE_AI="${AI_SEMVER_USE_AI:-true}"
+# Automatically update or create changelog on version release (true by default)
+AI_SEMVER_CHANGELOG="${AI_SEMVER_CHANGELOG:-true}"
+# Default changelog filename if no existing changelog is detected
+AI_SEMVER_CHANGELOG_FILE="${AI_SEMVER_CHANGELOG_FILE:-CHANGELOG.md}"
+
 
 

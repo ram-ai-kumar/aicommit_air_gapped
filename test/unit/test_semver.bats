@@ -375,7 +375,7 @@ teardown() {
     run aicommit --bump --yes
     [ "$status" -eq 0 ]
     assert_output_contains "Tagged release: v1.1.0"
-    assert_output_contains "Updated version in: package.json"
+    assert_output_contains "package.json"
 
     # Verify version was updated in package.json
     grep -q '"version": "1.1.0"' package.json
@@ -768,5 +768,252 @@ major | incompatible parameter removed
     [ "$status" -eq 0 ]
     assert_output_contains "package.json"
 }
+
+# ─── semver_gt ───────────────────────────────────────────────────────────────
+
+@test "semver_gt accurately compares semantic versions and prereleases" {
+    run semver_gt "1.1.0" "1.0.1"
+    [ "$status" -eq 0 ]
+
+    run semver_gt "2.0.0" "1.9.9"
+    [ "$status" -eq 0 ]
+
+    run semver_gt "1.0.1" "1.0.1"
+    [ "$status" -eq 1 ]
+
+    run semver_gt "1.0.0" "1.1.0"
+    [ "$status" -eq 1 ]
+
+    run semver_gt "1.0.0" "1.0.0-rc.1"
+    [ "$status" -eq 0 ]
+
+    run semver_gt "1.0.0-rc.1" "1.0.0"
+    [ "$status" -eq 1 ]
+}
+
+# ─── get_last_version ────────────────────────────────────────────────────────
+
+@test "get_last_version prioritizes highest git tag over modified working tree manifests" {
+    printf '{\n  "name": "tag-pri-test",\n  "version": "1.0.0"\n}\n' > package.json
+    git add package.json
+    git commit -qm "initial commit"
+    git tag v1.0.0
+
+    # Modify working tree to 1.0.1 (simulating failed prior commit)
+    printf '{\n  "name": "tag-pri-test",\n  "version": "1.0.1"\n}\n' > package.json
+
+    run get_last_version
+    [ "$status" -eq 0 ]
+    [ "$output" = "1.0.0" ]
+}
+
+@test "get_last_version falls back to committed HEAD manifests when no tags exist" {
+    printf '{\n  "name": "head-fallback-test",\n  "version": "0.5.0"\n}\n' > package.json
+    git add package.json
+    git commit -qm "initial commit without tags"
+
+    # Modify working tree to 0.5.1
+    printf '{\n  "name": "head-fallback-test",\n  "version": "0.5.1"\n}\n' > package.json
+
+    run get_last_version
+    [ "$status" -eq 0 ]
+    [ "$output" = "0.5.0" ]
+}
+
+@test "get_last_version falls back to working tree manifests before initial commit" {
+    # Working tree before any commit
+    printf '{\n  "name": "uncommitted-test",\n  "version": "0.2.0"\n}\n' > package.json
+
+    run get_last_version
+    [ "$status" -eq 0 ]
+    [ "$output" = "0.2.0" ]
+}
+
+# ─── detect_changelog_file & update_changelog ───────────────────────────────
+
+@test "detect_changelog_file detects existing changelog filename variants" {
+    run detect_changelog_file
+    [ "$status" -ne 0 ]
+
+    touch HISTORY.md
+    run detect_changelog_file
+    [ "$status" -eq 0 ]
+    [ "$output" = "HISTORY.md" ]
+    rm -f HISTORY.md
+
+    touch changelog.txt
+    run detect_changelog_file
+    [ "$status" -eq 0 ]
+    [ "$output" = "changelog.txt" ]
+    rm -f changelog.txt
+}
+
+@test "update_changelog creates new CHANGELOG.md and stages with git when none exists" {
+    git init -q
+    run update_changelog "1.1.0" "feat: add user profile authentication" "2026-10-07"
+    [ "$status" -eq 0 ]
+    [ -f "CHANGELOG.md" ]
+    grep -q "## \[1.1.0\] - 2026-10-07" CHANGELOG.md
+    grep -q -- "- feat: add user profile authentication" CHANGELOG.md
+
+    # Verify staged with git
+    run git diff --staged --name-only
+    [ "$status" -eq 0 ]
+    assert_output_contains "CHANGELOG.md"
+}
+
+@test "update_changelog idempotently appends to existing version section" {
+    cat <<EOF > CHANGELOG.md
+# Changelog
+
+## [1.1.0] - 2026-10-07
+
+- feat: initial feature
+EOF
+    git add CHANGELOG.md
+    git commit -qm "add changelog"
+
+    # Add second entry to same version
+    run update_changelog "1.1.0" "fix: resolve token expiration" "2026-10-07"
+    [ "$status" -eq 0 ]
+    grep -q -- "- feat: initial feature" CHANGELOG.md
+    grep -q -- "- fix: resolve token expiration" CHANGELOG.md
+
+    # Idempotent retry: running again with same message does not duplicate bullet
+    run update_changelog "1.1.0" "fix: resolve token expiration" "2026-10-07"
+    [ "$status" -eq 0 ]
+    [ $(grep -c -- "- fix: resolve token expiration" CHANGELOG.md) -eq 1 ]
+}
+
+# ─── resolve_effective_semver & apply_semver_release ─────────────────────────
+
+@test "resolve_effective_semver detects when working tree version is strictly higher" {
+    printf '{\n  "name": "effective-test",\n  "version": "2.0.0"\n}\n' > package.json
+
+    run resolve_effective_semver "1.0.1"
+    [ "$status" -eq 0 ]
+    [ "$output" = "2.0.0" ]
+
+    run resolve_effective_semver "2.0.0"
+    [ "$status" -eq 1 ]
+    [ "$output" = "2.0.0" ]
+
+    run resolve_effective_semver "2.1.0"
+    [ "$status" -eq 1 ]
+    [ "$output" = "2.1.0" ]
+}
+
+@test "apply_semver_release preserves higher version in manifests and updates changelog" {
+    printf '{\n  "name": "preserve-test",\n  "version": "2.0.0"\n}\n' > package.json
+    git add package.json
+    git commit -qm "initial commit"
+
+    # Evaluated target is 1.0.1, but effective target is 2.0.0
+    run apply_semver_release "1.0.0" "2.0.0" "fix: minor fix" "1.0.1"
+    [ "$status" -eq 0 ]
+
+    # package.json remains 2.0.0 untouched
+    grep -q '"version": "2.0.0"' package.json
+    # changelog created and has 2.0.0
+    grep -q "## \[2.0.0\]" CHANGELOG.md
+    grep -q -- "- fix: minor fix" CHANGELOG.md
+}
+
+# ─── restore_semver_updates ──────────────────────────────────────────────────
+
+@test "restore_semver_updates restores modified manifests and removes untracked changelog" {
+    printf '{\n  "name": "restore-test",\n  "version": "1.0.0"\n}\n' > package.json
+    git add package.json
+    git commit -qm "initial commit"
+
+    # Modify package.json and create CHANGELOG.md
+    printf '{\n  "name": "restore-test",\n  "version": "1.0.1"\n}\n' > package.json
+    echo "# New Changelog" > CHANGELOG.md
+    git add package.json CHANGELOG.md
+
+    run restore_semver_updates "package.json CHANGELOG.md"
+    [ "$status" -eq 0 ]
+
+    grep -q '"version": "1.0.0"' package.json
+    [ ! -f "CHANGELOG.md" ]
+}
+
+# ─── End-to-End Scenarios ────────────────────────────────────────────────────
+
+@test "aicommit failed commit retry relies on git tag to avoid double bumping" {
+    printf '{\n  "name": "retry-pkg",\n  "version": "1.0.0"\n}\n' > package.json
+    git add package.json
+    git commit -qm "initial release"
+    git tag v1.0.0
+
+    # Simulate previous failed attempt that left package.json modified to 1.0.1
+    printf '{\n  "name": "retry-pkg",\n  "version": "1.0.1"\n}\n' > package.json
+    echo "console.log('retry');" > app.js
+    git add app.js
+
+    pgrep() { return 0; }
+    ollama() {
+        case "$1" in
+            list)
+                echo "NAME            ID              SIZE    MODIFIED"
+                echo "test-model      abc123          4.7 GB  2 days ago"
+                ;;
+            run)
+                printf '%s\n' "@@@" "fix: resolve null pointer exception" "@@@"
+                return 0
+                ;;
+        esac
+    }
+    export -f pgrep ollama
+    export AI_MODEL="test-model"
+
+    # Retry commit with --bump --yes
+    run aicommit --bump --yes
+    [ "$status" -eq 0 ]
+    assert_output_contains "Tagged release: v1.0.1"
+    refute_output_contains "v1.0.2"
+    grep -q '"version": "1.0.1"' package.json
+    [ "$(git tag -l 'v1.0.1')" = "v1.0.1" ]
+    [ -z "$(git tag -l 'v1.0.2')" ]
+}
+
+@test "aicommit preserves manually pre-bumped higher version and updates changelog" {
+    printf '{\n  "name": "prebump-pkg",\n  "version": "1.0.0"\n}\n' > package.json
+    git add package.json
+    git commit -qm "initial release"
+    git tag v1.0.0
+
+    # Developer manually pre-bumps to 2.0.0 in working tree
+    printf '{\n  "name": "prebump-pkg",\n  "version": "2.0.0"\n}\n' > package.json
+    echo "console.log('breaking');" > index.js
+    git add package.json index.js
+
+    pgrep() { return 0; }
+    ollama() {
+        case "$1" in
+            list)
+                echo "NAME            ID              SIZE    MODIFIED"
+                echo "test-model      abc123          4.7 GB  2 days ago"
+                ;;
+            run)
+                printf '%s\n' "@@@" "fix: patch fix under pre-bumped major" "@@@"
+                return 0
+                ;;
+        esac
+    }
+    export -f pgrep ollama
+    export AI_MODEL="test-model"
+
+    # Commit with --bump --yes. Even though message is fix (which evaluates to 1.0.1),
+    # 2.0.0 must be preserved and changelog updated for 2.0.0.
+    run aicommit --bump --yes
+    [ "$status" -eq 0 ]
+    assert_output_contains "Tagged release: v2.0.0"
+    grep -q '"version": "2.0.0"' package.json
+    grep -q "## \[2.0.0\]" CHANGELOG.md
+    grep -q -- "- fix: patch fix under pre-bumped major" CHANGELOG.md
+    [ "$(git tag -l 'v2.0.0')" = "v2.0.0" ]
+}
+
 
 

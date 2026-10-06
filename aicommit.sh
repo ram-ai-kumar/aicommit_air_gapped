@@ -133,13 +133,26 @@ aicommit() {
         display_commit_message "$commit_msg"
 
         local cur_ver="" evaluated_bump="" next_ver="" tag_name="" v_files="" rec_summary=""
-        cur_ver=$(get_current_version)
+        local evaluated_next="" is_higher=false effective_next=""
+        cur_ver=$(get_last_version)
         if [ "$bump_opt" = "true" ]; then
             evaluated_bump=$(evaluate_commit_semver "$commit_msg" "$bump_level")
-            next_ver=$(calculate_next_semver "$cur_ver" "$evaluated_bump")
+            evaluated_next=$(calculate_next_semver "$cur_ver" "$evaluated_bump")
+            is_higher=false
+            if effective_next=$(resolve_effective_semver "$evaluated_next"); then
+                is_higher=true
+                next_ver="$effective_next"
+            else
+                next_ver="$evaluated_next"
+            fi
             tag_name="${AI_SEMVER_TAG_PREFIX:-v}${next_ver}"
             v_files=$(detect_version_files)
-            display_semver_plan "$cur_ver" "$evaluated_bump" "$next_ver" "$tag_name" "$v_files"
+            if [ "${AI_SEMVER_CHANGELOG:-true}" = "true" ]; then
+                local cl_cand
+                cl_cand=$(detect_changelog_file 2>/dev/null || echo "${AI_SEMVER_CHANGELOG_FILE:-CHANGELOG.md}")
+                [ -n "$v_files" ] && v_files=$(printf '%s\n%s' "$v_files" "$cl_cand") || v_files="$cl_cand"
+            fi
+            display_semver_plan "$cur_ver" "$evaluated_bump" "$next_ver" "$tag_name" "$v_files" "$is_higher"
         else
             local rec_bump rec_next
             rec_bump=$(evaluate_commit_semver "$commit_msg")
@@ -166,11 +179,23 @@ aicommit() {
                 if [ -n "$ai_level" ] && [[ "$ai_level" =~ ^(major|minor|patch)$ ]]; then
                     bump_opt=true
                     evaluated_bump="$ai_level"
-                    next_ver=$(calculate_next_semver "$cur_ver" "$evaluated_bump")
+                    evaluated_next=$(calculate_next_semver "$cur_ver" "$evaluated_bump")
+                    is_higher=false
+                    if effective_next=$(resolve_effective_semver "$evaluated_next"); then
+                        is_higher=true
+                        next_ver="$effective_next"
+                    else
+                        next_ver="$evaluated_next"
+                    fi
                     tag_name="${AI_SEMVER_TAG_PREFIX:-v}${next_ver}"
                     v_files=$(detect_version_files)
+                    if [ "${AI_SEMVER_CHANGELOG:-true}" = "true" ]; then
+                        local cl_cand
+                        cl_cand=$(detect_changelog_file 2>/dev/null || echo "${AI_SEMVER_CHANGELOG_FILE:-CHANGELOG.md}")
+                        [ -n "$v_files" ] && v_files=$(printf '%s\n%s' "$v_files" "$cl_cand") || v_files="$cl_cand"
+                    fi
                     printf "🤖 AI calculated SemVer: %s -> %s\n" "$(echo "$evaluated_bump" | tr '[:lower:]' '[:upper:]')" "$next_ver"
-                    display_semver_plan "$cur_ver" "$evaluated_bump" "$next_ver" "$tag_name" "$v_files"
+                    display_semver_plan "$cur_ver" "$evaluated_bump" "$next_ver" "$tag_name" "$v_files" "$is_higher"
                 else
                     echo "⚠️  AI evaluation unavailable — using standard recommendation."
                 fi
@@ -180,20 +205,44 @@ aicommit() {
                 local inline_level="${response#*=}"
                 bump_opt=true
                 evaluated_bump="$inline_level"
-                next_ver=$(calculate_next_semver "$cur_ver" "$evaluated_bump")
+                evaluated_next=$(calculate_next_semver "$cur_ver" "$evaluated_bump")
+                is_higher=false
+                if effective_next=$(resolve_effective_semver "$evaluated_next"); then
+                    is_higher=true
+                    next_ver="$effective_next"
+                else
+                    next_ver="$evaluated_next"
+                fi
                 tag_name="${AI_SEMVER_TAG_PREFIX:-v}${next_ver}"
                 v_files=$(detect_version_files)
-                display_semver_plan "$cur_ver" "$evaluated_bump" "$next_ver" "$tag_name" "$v_files"
+                if [ "${AI_SEMVER_CHANGELOG:-true}" = "true" ]; then
+                    local cl_cand
+                    cl_cand=$(detect_changelog_file 2>/dev/null || echo "${AI_SEMVER_CHANGELOG_FILE:-CHANGELOG.md}")
+                    [ -n "$v_files" ] && v_files=$(printf '%s\n%s' "$v_files" "$cl_cand") || v_files="$cl_cand"
+                fi
+                display_semver_plan "$cur_ver" "$evaluated_bump" "$next_ver" "$tag_name" "$v_files" "$is_higher"
                 response="y"
                 ;;
             s\ *|b\ *)
                 local inline_level="${response#* }"
                 bump_opt=true
                 evaluated_bump="$inline_level"
-                next_ver=$(calculate_next_semver "$cur_ver" "$evaluated_bump")
+                evaluated_next=$(calculate_next_semver "$cur_ver" "$evaluated_bump")
+                is_higher=false
+                if effective_next=$(resolve_effective_semver "$evaluated_next"); then
+                    is_higher=true
+                    next_ver="$effective_next"
+                else
+                    next_ver="$evaluated_next"
+                fi
                 tag_name="${AI_SEMVER_TAG_PREFIX:-v}${next_ver}"
                 v_files=$(detect_version_files)
-                display_semver_plan "$cur_ver" "$evaluated_bump" "$next_ver" "$tag_name" "$v_files"
+                if [ "${AI_SEMVER_CHANGELOG:-true}" = "true" ]; then
+                    local cl_cand
+                    cl_cand=$(detect_changelog_file 2>/dev/null || echo "${AI_SEMVER_CHANGELOG_FILE:-CHANGELOG.md}")
+                    [ -n "$v_files" ] && v_files=$(printf '%s\n%s' "$v_files" "$cl_cand") || v_files="$cl_cand"
+                fi
+                display_semver_plan "$cur_ver" "$evaluated_bump" "$next_ver" "$tag_name" "$v_files" "$is_higher"
                 response="y"
                 ;;
             s|S|b|B|semver|bump|c|C)
@@ -206,16 +255,34 @@ aicommit() {
                     bump_opt=true
                     next_ver="${chosen_decision#custom:}"
                     evaluated_bump="custom"
+                    evaluated_next="$next_ver"
                     tag_name="${AI_SEMVER_TAG_PREFIX:-v}${next_ver}"
                     v_files=$(detect_version_files)
+                    if [ "${AI_SEMVER_CHANGELOG:-true}" = "true" ]; then
+                        local cl_cand
+                        cl_cand=$(detect_changelog_file 2>/dev/null || echo "${AI_SEMVER_CHANGELOG_FILE:-CHANGELOG.md}")
+                        [ -n "$v_files" ] && v_files=$(printf '%s\n%s' "$v_files" "$cl_cand") || v_files="$cl_cand"
+                    fi
                     display_semver_plan "$cur_ver" "$evaluated_bump" "$next_ver" "$tag_name" "$v_files"
                 else
                     bump_opt=true
                     evaluated_bump="$chosen_decision"
-                    next_ver=$(calculate_next_semver "$cur_ver" "$evaluated_bump")
+                    evaluated_next=$(calculate_next_semver "$cur_ver" "$evaluated_bump")
+                    is_higher=false
+                    if effective_next=$(resolve_effective_semver "$evaluated_next"); then
+                        is_higher=true
+                        next_ver="$effective_next"
+                    else
+                        next_ver="$evaluated_next"
+                    fi
                     tag_name="${AI_SEMVER_TAG_PREFIX:-v}${next_ver}"
                     v_files=$(detect_version_files)
-                    display_semver_plan "$cur_ver" "$evaluated_bump" "$next_ver" "$tag_name" "$v_files"
+                    if [ "${AI_SEMVER_CHANGELOG:-true}" = "true" ]; then
+                        local cl_cand
+                        cl_cand=$(detect_changelog_file 2>/dev/null || echo "${AI_SEMVER_CHANGELOG_FILE:-CHANGELOG.md}")
+                        [ -n "$v_files" ] && v_files=$(printf '%s\n%s' "$v_files" "$cl_cand") || v_files="$cl_cand"
+                    fi
+                    display_semver_plan "$cur_ver" "$evaluated_bump" "$next_ver" "$tag_name" "$v_files" "$is_higher"
                 fi
                 response="y"
                 ;;
@@ -224,7 +291,7 @@ aicommit() {
             y|Y)
                 local updated_files=""
                 if [ "$bump_opt" = "true" ]; then
-                    updated_files=$(apply_semver_file_updates "$cur_ver" "$next_ver")
+                    updated_files=$(apply_semver_release "$cur_ver" "$next_ver" "$commit_msg" "$evaluated_next")
                 fi
                 if process_commit "$commit_msg"; then
                     display_success
@@ -241,7 +308,7 @@ aicommit() {
                     cleanup_aicommit_all
                 else
                     if [ "$bump_opt" = "true" ] && [ -n "$updated_files" ]; then
-                        git restore --staged --worktree -- $updated_files 2>/dev/null || true
+                        restore_semver_updates "$updated_files"
                     fi
                     cleanup_aicommit_all
                     return 1
@@ -250,7 +317,7 @@ aicommit() {
             e|E)
                 local updated_files=""
                 if [ "$bump_opt" = "true" ]; then
-                    updated_files=$(apply_semver_file_updates "$cur_ver" "$next_ver")
+                    updated_files=$(apply_semver_release "$cur_ver" "$next_ver" "$commit_msg" "$evaluated_next")
                 fi
                 if git commit -e -m "$commit_msg"; then
                     display_success
@@ -269,7 +336,7 @@ aicommit() {
                     cleanup_aicommit_all
                 else
                     if [ "$bump_opt" = "true" ] && [ -n "$updated_files" ]; then
-                        git restore --staged --worktree -- $updated_files 2>/dev/null || true
+                        restore_semver_updates "$updated_files"
                     fi
                     cleanup_aicommit_all
                     return 1
@@ -382,13 +449,24 @@ aicommit() {
             done <<< "$scope_groups"
             if [ "$bump_opt" = "true" ]; then
                 echo ""
-                local s_cur_ver s_eval_bump s_next_ver s_tag s_files
-                s_cur_ver=$(get_current_version)
+                local s_cur_ver s_eval_bump s_eval_next s_next_ver s_is_higher=false s_tag s_files
+                s_cur_ver=$(get_last_version)
                 s_eval_bump=$(evaluate_commit_semver "feat: preview" "$bump_level")
-                s_next_ver=$(calculate_next_semver "$s_cur_ver" "$s_eval_bump")
+                s_eval_next=$(calculate_next_semver "$s_cur_ver" "$s_eval_bump")
+                if s_effective=$(resolve_effective_semver "$s_eval_next"); then
+                    s_is_higher=true
+                    s_next_ver="$s_effective"
+                else
+                    s_next_ver="$s_eval_next"
+                fi
                 s_tag="${AI_SEMVER_TAG_PREFIX:-v}${s_next_ver}"
                 s_files=$(detect_version_files)
-                display_semver_plan "$s_cur_ver" "$s_eval_bump" "$s_next_ver" "$s_tag" "$s_files"
+                if [ "${AI_SEMVER_CHANGELOG:-true}" = "true" ]; then
+                    local s_cl_cand
+                    s_cl_cand=$(detect_changelog_file 2>/dev/null || echo "${AI_SEMVER_CHANGELOG_FILE:-CHANGELOG.md}")
+                    [ -n "$s_files" ] && s_files=$(printf '%s\n%s' "$s_files" "$s_cl_cand") || s_files="$s_cl_cand"
+                fi
+                display_semver_plan "$s_cur_ver" "$s_eval_bump" "$s_next_ver" "$s_tag" "$s_files" "$s_is_higher"
             fi
             return 0
         fi
@@ -446,14 +524,26 @@ aicommit() {
 
             display_commit_message "$grp_commit_msg" "Suggested Commit ($idx/$num_scopes - scope: $grp_scope):"
 
-            local grp_cur_ver="" grp_eval_bump="" grp_next_ver="" grp_tag="" grp_v_files="" grp_rec_summary=""
-            grp_cur_ver=$(get_current_version)
+            local grp_cur_ver="" grp_eval_bump="" grp_eval_next="" grp_next_ver="" grp_is_higher=false grp_tag="" grp_v_files="" grp_rec_summary=""
+            grp_cur_ver=$(get_last_version)
             if [ "$bump_opt" = "true" ]; then
                 grp_eval_bump=$(evaluate_commit_semver "$grp_commit_msg" "$bump_level")
-                grp_next_ver=$(calculate_next_semver "$grp_cur_ver" "$grp_eval_bump")
+                grp_eval_next=$(calculate_next_semver "$grp_cur_ver" "$grp_eval_bump")
+                grp_is_higher=false
+                if grp_effective=$(resolve_effective_semver "$grp_eval_next"); then
+                    grp_is_higher=true
+                    grp_next_ver="$grp_effective"
+                else
+                    grp_next_ver="$grp_eval_next"
+                fi
                 grp_tag="${AI_SEMVER_TAG_PREFIX:-v}${grp_next_ver}"
                 grp_v_files=$(detect_version_files)
-                display_semver_plan "$grp_cur_ver" "$grp_eval_bump" "$grp_next_ver" "$grp_tag" "$grp_v_files"
+                if [ "${AI_SEMVER_CHANGELOG:-true}" = "true" ]; then
+                    local cl_cand
+                    cl_cand=$(detect_changelog_file 2>/dev/null || echo "${AI_SEMVER_CHANGELOG_FILE:-CHANGELOG.md}")
+                    [ -n "$grp_v_files" ] && grp_v_files=$(printf '%s\n%s' "$grp_v_files" "$cl_cand") || grp_v_files="$cl_cand"
+                fi
+                display_semver_plan "$grp_cur_ver" "$grp_eval_bump" "$grp_next_ver" "$grp_tag" "$grp_v_files" "$grp_is_higher"
             else
                 local grp_rec_bump grp_rec_next
                 grp_rec_bump=$(evaluate_commit_semver "$grp_commit_msg")
@@ -481,11 +571,23 @@ aicommit() {
                     if [ -n "$ai_level" ] && [[ "$ai_level" =~ ^(major|minor|patch)$ ]]; then
                         grp_bump_active=true
                         grp_eval_bump="$ai_level"
-                        grp_next_ver=$(calculate_next_semver "$grp_cur_ver" "$grp_eval_bump")
+                        grp_eval_next=$(calculate_next_semver "$grp_cur_ver" "$grp_eval_bump")
+                        grp_is_higher=false
+                        if grp_effective=$(resolve_effective_semver "$grp_eval_next"); then
+                            grp_is_higher=true
+                            grp_next_ver="$grp_effective"
+                        else
+                            grp_next_ver="$grp_eval_next"
+                        fi
                         grp_tag="${AI_SEMVER_TAG_PREFIX:-v}${grp_next_ver}"
                         grp_v_files=$(detect_version_files)
+                        if [ "${AI_SEMVER_CHANGELOG:-true}" = "true" ]; then
+                            local cl_cand
+                            cl_cand=$(detect_changelog_file 2>/dev/null || echo "${AI_SEMVER_CHANGELOG_FILE:-CHANGELOG.md}")
+                            [ -n "$grp_v_files" ] && grp_v_files=$(printf '%s\n%s' "$grp_v_files" "$cl_cand") || grp_v_files="$cl_cand"
+                        fi
                         printf "🤖 AI calculated SemVer: %s -> %s\n" "$(echo "$grp_eval_bump" | tr '[:lower:]' '[:upper:]')" "$grp_next_ver"
-                        display_semver_plan "$grp_cur_ver" "$grp_eval_bump" "$grp_next_ver" "$grp_tag" "$grp_v_files"
+                        display_semver_plan "$grp_cur_ver" "$grp_eval_bump" "$grp_next_ver" "$grp_tag" "$grp_v_files" "$grp_is_higher"
                     else
                         echo "⚠️  AI evaluation unavailable — using standard recommendation."
                     fi
@@ -495,20 +597,44 @@ aicommit() {
                     local inline_level="${grp_resp#*=}"
                     grp_bump_active=true
                     grp_eval_bump="$inline_level"
-                    grp_next_ver=$(calculate_next_semver "$grp_cur_ver" "$grp_eval_bump")
+                    grp_eval_next=$(calculate_next_semver "$grp_cur_ver" "$grp_eval_bump")
+                    grp_is_higher=false
+                    if grp_effective=$(resolve_effective_semver "$grp_eval_next"); then
+                        grp_is_higher=true
+                        grp_next_ver="$grp_effective"
+                    else
+                        grp_next_ver="$grp_eval_next"
+                    fi
                     grp_tag="${AI_SEMVER_TAG_PREFIX:-v}${grp_next_ver}"
                     grp_v_files=$(detect_version_files)
-                    display_semver_plan "$grp_cur_ver" "$grp_eval_bump" "$grp_next_ver" "$grp_tag" "$grp_v_files"
+                    if [ "${AI_SEMVER_CHANGELOG:-true}" = "true" ]; then
+                        local cl_cand
+                        cl_cand=$(detect_changelog_file 2>/dev/null || echo "${AI_SEMVER_CHANGELOG_FILE:-CHANGELOG.md}")
+                        [ -n "$grp_v_files" ] && grp_v_files=$(printf '%s\n%s' "$grp_v_files" "$cl_cand") || grp_v_files="$cl_cand"
+                    fi
+                    display_semver_plan "$grp_cur_ver" "$grp_eval_bump" "$grp_next_ver" "$grp_tag" "$grp_v_files" "$grp_is_higher"
                     grp_resp="y"
                     ;;
                 s\ *|b\ *)
                     local inline_level="${grp_resp#* }"
                     grp_bump_active=true
                     grp_eval_bump="$inline_level"
-                    grp_next_ver=$(calculate_next_semver "$grp_cur_ver" "$grp_eval_bump")
+                    grp_eval_next=$(calculate_next_semver "$grp_cur_ver" "$grp_eval_bump")
+                    grp_is_higher=false
+                    if grp_effective=$(resolve_effective_semver "$grp_eval_next"); then
+                        grp_is_higher=true
+                        grp_next_ver="$grp_effective"
+                    else
+                        grp_next_ver="$grp_eval_next"
+                    fi
                     grp_tag="${AI_SEMVER_TAG_PREFIX:-v}${grp_next_ver}"
                     grp_v_files=$(detect_version_files)
-                    display_semver_plan "$grp_cur_ver" "$grp_eval_bump" "$grp_next_ver" "$grp_tag" "$grp_v_files"
+                    if [ "${AI_SEMVER_CHANGELOG:-true}" = "true" ]; then
+                        local cl_cand
+                        cl_cand=$(detect_changelog_file 2>/dev/null || echo "${AI_SEMVER_CHANGELOG_FILE:-CHANGELOG.md}")
+                        [ -n "$grp_v_files" ] && grp_v_files=$(printf '%s\n%s' "$grp_v_files" "$cl_cand") || grp_v_files="$cl_cand"
+                    fi
+                    display_semver_plan "$grp_cur_ver" "$grp_eval_bump" "$grp_next_ver" "$grp_tag" "$grp_v_files" "$grp_is_higher"
                     grp_resp="y"
                     ;;
                 s|S|b|B|semver|bump|c|C)
@@ -521,16 +647,34 @@ aicommit() {
                         grp_bump_active=true
                         grp_next_ver="${chosen_decision#custom:}"
                         grp_eval_bump="custom"
+                        grp_eval_next="$grp_next_ver"
                         grp_tag="${AI_SEMVER_TAG_PREFIX:-v}${grp_next_ver}"
                         grp_v_files=$(detect_version_files)
+                        if [ "${AI_SEMVER_CHANGELOG:-true}" = "true" ]; then
+                            local cl_cand
+                            cl_cand=$(detect_changelog_file 2>/dev/null || echo "${AI_SEMVER_CHANGELOG_FILE:-CHANGELOG.md}")
+                            [ -n "$grp_v_files" ] && grp_v_files=$(printf '%s\n%s' "$grp_v_files" "$cl_cand") || grp_v_files="$cl_cand"
+                        fi
                         display_semver_plan "$grp_cur_ver" "$grp_eval_bump" "$grp_next_ver" "$grp_tag" "$grp_v_files"
                     else
                         grp_bump_active=true
                         grp_eval_bump="$chosen_decision"
-                        grp_next_ver=$(calculate_next_semver "$grp_cur_ver" "$grp_eval_bump")
+                        grp_eval_next=$(calculate_next_semver "$grp_cur_ver" "$grp_eval_bump")
+                        grp_is_higher=false
+                        if grp_effective=$(resolve_effective_semver "$grp_eval_next"); then
+                            grp_is_higher=true
+                            grp_next_ver="$grp_effective"
+                        else
+                            grp_next_ver="$grp_eval_next"
+                        fi
                         grp_tag="${AI_SEMVER_TAG_PREFIX:-v}${grp_next_ver}"
                         grp_v_files=$(detect_version_files)
-                        display_semver_plan "$grp_cur_ver" "$grp_eval_bump" "$grp_next_ver" "$grp_tag" "$grp_v_files"
+                        if [ "${AI_SEMVER_CHANGELOG:-true}" = "true" ]; then
+                            local cl_cand
+                            cl_cand=$(detect_changelog_file 2>/dev/null || echo "${AI_SEMVER_CHANGELOG_FILE:-CHANGELOG.md}")
+                            [ -n "$grp_v_files" ] && grp_v_files=$(printf '%s\n%s' "$grp_v_files" "$cl_cand") || grp_v_files="$cl_cand"
+                        fi
+                        display_semver_plan "$grp_cur_ver" "$grp_eval_bump" "$grp_next_ver" "$grp_tag" "$grp_v_files" "$grp_is_higher"
                     fi
                     grp_resp="y"
                     ;;
@@ -540,7 +684,7 @@ aicommit() {
                 y|Y)
                     local grp_updated_files=""
                     if [ "$grp_bump_active" = "true" ]; then
-                        grp_updated_files=$(apply_semver_file_updates "$grp_cur_ver" "$grp_next_ver")
+                        grp_updated_files=$(apply_semver_release "$grp_cur_ver" "$grp_next_ver" "$grp_commit_msg" "$grp_eval_next")
                         if [ -n "$grp_updated_files" ]; then
                             while IFS= read -r uf; do
                                 [ -n "$uf" ] && grp_file_array+=("$uf")
@@ -562,7 +706,7 @@ aicommit() {
                         committed_count=$((committed_count + 1))
                     else
                         if [ "$grp_bump_active" = "true" ] && [ -n "$grp_updated_files" ]; then
-                            git restore --staged --worktree -- $grp_updated_files 2>/dev/null || true
+                            restore_semver_updates "$grp_updated_files"
                         fi
                         display_error "Commit failed for scope: $grp_scope"
                         return 1
@@ -582,9 +726,16 @@ aicommit() {
                         local grp_updated_files=""
                         if [ "$bump_opt" = "true" ]; then
                             grp_eval_bump=$(evaluate_commit_semver "$edited_msg" "$bump_level")
-                            grp_next_ver=$(calculate_next_semver "$grp_cur_ver" "$grp_eval_bump")
+                            grp_eval_next=$(calculate_next_semver "$grp_cur_ver" "$grp_eval_bump")
+                            grp_is_higher=false
+                            if grp_effective=$(resolve_effective_semver "$grp_eval_next"); then
+                                grp_is_higher=true
+                                grp_next_ver="$grp_effective"
+                            else
+                                grp_next_ver="$grp_eval_next"
+                            fi
                             grp_tag="${AI_SEMVER_TAG_PREFIX:-v}${grp_next_ver}"
-                            grp_updated_files=$(apply_semver_file_updates "$grp_cur_ver" "$grp_next_ver")
+                            grp_updated_files=$(apply_semver_release "$grp_cur_ver" "$grp_next_ver" "$edited_msg" "$grp_eval_next")
                             if [ -n "$grp_updated_files" ]; then
                                 while IFS= read -r uf; do
                                     [ -n "$uf" ] && grp_file_array+=("$uf")
@@ -606,7 +757,7 @@ aicommit() {
                             committed_count=$((committed_count + 1))
                         else
                             if [ "$bump_opt" = "true" ] && [ -n "$grp_updated_files" ]; then
-                                git restore --staged --worktree -- $grp_updated_files 2>/dev/null || true
+                                restore_semver_updates "$grp_updated_files"
                             fi
                             display_error "Commit failed for scope: $grp_scope"
                             return 1
@@ -661,13 +812,24 @@ aicommit() {
         echo "   cat ${tmp_dir}/FULL_PROMPT"
         if [ "$bump_opt" = "true" ]; then
             echo ""
-            local cur_ver evaluated_bump next_ver tag_preview files_preview
-            cur_ver=$(get_current_version)
+            local cur_ver evaluated_bump evaluated_next next_ver is_higher=false tag_preview files_preview
+            cur_ver=$(get_last_version)
             evaluated_bump=$(evaluate_commit_semver "feat: preview" "$bump_level")
-            next_ver=$(calculate_next_semver "$cur_ver" "$evaluated_bump")
+            evaluated_next=$(calculate_next_semver "$cur_ver" "$evaluated_bump")
+            if effective_next=$(resolve_effective_semver "$evaluated_next"); then
+                is_higher=true
+                next_ver="$effective_next"
+            else
+                next_ver="$evaluated_next"
+            fi
             tag_preview="${AI_SEMVER_TAG_PREFIX:-v}${next_ver}"
             files_preview=$(detect_version_files)
-            display_semver_plan "$cur_ver" "$evaluated_bump" "$next_ver" "$tag_preview" "$files_preview"
+            if [ "${AI_SEMVER_CHANGELOG:-true}" = "true" ]; then
+                local cl_cand
+                cl_cand=$(detect_changelog_file 2>/dev/null || echo "${AI_SEMVER_CHANGELOG_FILE:-CHANGELOG.md}")
+                [ -n "$files_preview" ] && files_preview=$(printf '%s\n%s' "$files_preview" "$cl_cand") || files_preview="$cl_cand"
+            fi
+            display_semver_plan "$cur_ver" "$evaluated_bump" "$next_ver" "$tag_preview" "$files_preview" "$is_higher"
         fi
         return 0
     fi
@@ -680,14 +842,26 @@ aicommit() {
 
     display_commit_message "$commit_msg"
 
-    local cur_ver="" evaluated_bump="" next_ver="" tag_name="" v_files="" rec_summary=""
-    cur_ver=$(get_current_version)
+    local cur_ver="" evaluated_bump="" evaluated_next="" next_ver="" is_higher=false tag_name="" v_files="" rec_summary=""
+    cur_ver=$(get_last_version)
     if [ "$bump_opt" = "true" ]; then
         evaluated_bump=$(evaluate_commit_semver "$commit_msg" "$bump_level")
-        next_ver=$(calculate_next_semver "$cur_ver" "$evaluated_bump")
+        evaluated_next=$(calculate_next_semver "$cur_ver" "$evaluated_bump")
+        is_higher=false
+        if effective_next=$(resolve_effective_semver "$evaluated_next"); then
+            is_higher=true
+            next_ver="$effective_next"
+        else
+            next_ver="$evaluated_next"
+        fi
         tag_name="${AI_SEMVER_TAG_PREFIX:-v}${next_ver}"
         v_files=$(detect_version_files)
-        display_semver_plan "$cur_ver" "$evaluated_bump" "$next_ver" "$tag_name" "$v_files"
+        if [ "${AI_SEMVER_CHANGELOG:-true}" = "true" ]; then
+            local cl_cand
+            cl_cand=$(detect_changelog_file 2>/dev/null || echo "${AI_SEMVER_CHANGELOG_FILE:-CHANGELOG.md}")
+            [ -n "$v_files" ] && v_files=$(printf '%s\n%s' "$v_files" "$cl_cand") || v_files="$cl_cand"
+        fi
+        display_semver_plan "$cur_ver" "$evaluated_bump" "$next_ver" "$tag_name" "$v_files" "$is_higher"
     else
         local rec_bump rec_next
         rec_bump=$(evaluate_commit_semver "$commit_msg")
@@ -714,11 +888,23 @@ aicommit() {
             if [ -n "$ai_level" ] && [[ "$ai_level" =~ ^(major|minor|patch)$ ]]; then
                 bump_opt=true
                 evaluated_bump="$ai_level"
-                next_ver=$(calculate_next_semver "$cur_ver" "$evaluated_bump")
+                evaluated_next=$(calculate_next_semver "$cur_ver" "$evaluated_bump")
+                is_higher=false
+                if effective_next=$(resolve_effective_semver "$evaluated_next"); then
+                    is_higher=true
+                    next_ver="$effective_next"
+                else
+                    next_ver="$evaluated_next"
+                fi
                 tag_name="${AI_SEMVER_TAG_PREFIX:-v}${next_ver}"
                 v_files=$(detect_version_files)
+                if [ "${AI_SEMVER_CHANGELOG:-true}" = "true" ]; then
+                    local cl_cand
+                    cl_cand=$(detect_changelog_file 2>/dev/null || echo "${AI_SEMVER_CHANGELOG_FILE:-CHANGELOG.md}")
+                    [ -n "$v_files" ] && v_files=$(printf '%s\n%s' "$v_files" "$cl_cand") || v_files="$cl_cand"
+                fi
                 printf "🤖 AI calculated SemVer: %s -> %s\n" "$(echo "$evaluated_bump" | tr '[:lower:]' '[:upper:]')" "$next_ver"
-                display_semver_plan "$cur_ver" "$evaluated_bump" "$next_ver" "$tag_name" "$v_files"
+                display_semver_plan "$cur_ver" "$evaluated_bump" "$next_ver" "$tag_name" "$v_files" "$is_higher"
             else
                 echo "⚠️  AI evaluation unavailable — using standard recommendation."
             fi
@@ -728,20 +914,44 @@ aicommit() {
             local inline_level="${response#*=}"
             bump_opt=true
             evaluated_bump="$inline_level"
-            next_ver=$(calculate_next_semver "$cur_ver" "$evaluated_bump")
+            evaluated_next=$(calculate_next_semver "$cur_ver" "$evaluated_bump")
+            is_higher=false
+            if effective_next=$(resolve_effective_semver "$evaluated_next"); then
+                is_higher=true
+                next_ver="$effective_next"
+            else
+                next_ver="$evaluated_next"
+            fi
             tag_name="${AI_SEMVER_TAG_PREFIX:-v}${next_ver}"
             v_files=$(detect_version_files)
-            display_semver_plan "$cur_ver" "$evaluated_bump" "$next_ver" "$tag_name" "$v_files"
+            if [ "${AI_SEMVER_CHANGELOG:-true}" = "true" ]; then
+                local cl_cand
+                cl_cand=$(detect_changelog_file 2>/dev/null || echo "${AI_SEMVER_CHANGELOG_FILE:-CHANGELOG.md}")
+                [ -n "$v_files" ] && v_files=$(printf '%s\n%s' "$v_files" "$cl_cand") || v_files="$cl_cand"
+            fi
+            display_semver_plan "$cur_ver" "$evaluated_bump" "$next_ver" "$tag_name" "$v_files" "$is_higher"
             response="y"
             ;;
         s\ *|b\ *)
             local inline_level="${response#* }"
             bump_opt=true
             evaluated_bump="$inline_level"
-            next_ver=$(calculate_next_semver "$cur_ver" "$evaluated_bump")
+            evaluated_next=$(calculate_next_semver "$cur_ver" "$evaluated_bump")
+            is_higher=false
+            if effective_next=$(resolve_effective_semver "$evaluated_next"); then
+                is_higher=true
+                next_ver="$effective_next"
+            else
+                next_ver="$evaluated_next"
+            fi
             tag_name="${AI_SEMVER_TAG_PREFIX:-v}${next_ver}"
             v_files=$(detect_version_files)
-            display_semver_plan "$cur_ver" "$evaluated_bump" "$next_ver" "$tag_name" "$v_files"
+            if [ "${AI_SEMVER_CHANGELOG:-true}" = "true" ]; then
+                local cl_cand
+                cl_cand=$(detect_changelog_file 2>/dev/null || echo "${AI_SEMVER_CHANGELOG_FILE:-CHANGELOG.md}")
+                [ -n "$v_files" ] && v_files=$(printf '%s\n%s' "$v_files" "$cl_cand") || v_files="$cl_cand"
+            fi
+            display_semver_plan "$cur_ver" "$evaluated_bump" "$next_ver" "$tag_name" "$v_files" "$is_higher"
             response="y"
             ;;
         s|S|b|B|semver|bump|c|C)
@@ -754,16 +964,34 @@ aicommit() {
                 bump_opt=true
                 next_ver="${chosen_decision#custom:}"
                 evaluated_bump="custom"
+                evaluated_next="$next_ver"
                 tag_name="${AI_SEMVER_TAG_PREFIX:-v}${next_ver}"
                 v_files=$(detect_version_files)
+                if [ "${AI_SEMVER_CHANGELOG:-true}" = "true" ]; then
+                    local cl_cand
+                    cl_cand=$(detect_changelog_file 2>/dev/null || echo "${AI_SEMVER_CHANGELOG_FILE:-CHANGELOG.md}")
+                    [ -n "$v_files" ] && v_files=$(printf '%s\n%s' "$v_files" "$cl_cand") || v_files="$cl_cand"
+                fi
                 display_semver_plan "$cur_ver" "$evaluated_bump" "$next_ver" "$tag_name" "$v_files"
             else
                 bump_opt=true
                 evaluated_bump="$chosen_decision"
-                next_ver=$(calculate_next_semver "$cur_ver" "$evaluated_bump")
+                evaluated_next=$(calculate_next_semver "$cur_ver" "$evaluated_bump")
+                is_higher=false
+                if effective_next=$(resolve_effective_semver "$evaluated_next"); then
+                    is_higher=true
+                    next_ver="$effective_next"
+                else
+                    next_ver="$evaluated_next"
+                fi
                 tag_name="${AI_SEMVER_TAG_PREFIX:-v}${next_ver}"
                 v_files=$(detect_version_files)
-                display_semver_plan "$cur_ver" "$evaluated_bump" "$next_ver" "$tag_name" "$v_files"
+                if [ "${AI_SEMVER_CHANGELOG:-true}" = "true" ]; then
+                    local cl_cand
+                    cl_cand=$(detect_changelog_file 2>/dev/null || echo "${AI_SEMVER_CHANGELOG_FILE:-CHANGELOG.md}")
+                    [ -n "$v_files" ] && v_files=$(printf '%s\n%s' "$v_files" "$cl_cand") || v_files="$cl_cand"
+                fi
+                display_semver_plan "$cur_ver" "$evaluated_bump" "$next_ver" "$tag_name" "$v_files" "$is_higher"
             fi
             response="y"
             ;;
@@ -773,7 +1001,7 @@ aicommit() {
         y|Y)
             local updated_files=""
             if [ "$bump_opt" = "true" ]; then
-                updated_files=$(apply_semver_file_updates "$cur_ver" "$next_ver")
+                updated_files=$(apply_semver_release "$cur_ver" "$next_ver" "$commit_msg" "$evaluated_next")
             fi
             if process_commit "$commit_msg"; then
                 display_success
@@ -790,7 +1018,7 @@ aicommit() {
                 cleanup_aicommit_all
             else
                 if [ "$bump_opt" = "true" ] && [ -n "$updated_files" ]; then
-                    git restore --staged --worktree -- $updated_files 2>/dev/null || true
+                    restore_semver_updates "$updated_files"
                 fi
                 cleanup_aicommit_all
                 return 1
@@ -799,7 +1027,7 @@ aicommit() {
         e|E)
             local updated_files=""
             if [ "$bump_opt" = "true" ]; then
-                updated_files=$(apply_semver_file_updates "$cur_ver" "$next_ver")
+                updated_files=$(apply_semver_release "$cur_ver" "$next_ver" "$commit_msg" "$evaluated_next")
             fi
             if git commit -e -m "$commit_msg"; then
                 display_success
@@ -818,7 +1046,7 @@ aicommit() {
                 cleanup_aicommit_all
             else
                 if [ "$bump_opt" = "true" ] && [ -n "$updated_files" ]; then
-                    git restore --staged --worktree -- $updated_files 2>/dev/null || true
+                    restore_semver_updates "$updated_files"
                 fi
                 cleanup_aicommit_all
                 return 1
