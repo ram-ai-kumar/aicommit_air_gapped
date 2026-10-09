@@ -18,6 +18,7 @@ setup_test_env() {
     ORIGINAL_DIR="$(cd "$(pwd)" && pwd)"
     ORIGINAL_HOME="${HOME:-}"
     TEST_TEMP_DIR="/tmp/aicommit-test-$RANDOM-$$"
+    export TEST_TEMP_DIR
     mkdir -p "$TEST_TEMP_DIR"
     export HOME="$TEST_TEMP_DIR"
     TEST_REPO_DIR="$TEST_TEMP_DIR/test_repo"
@@ -47,6 +48,10 @@ setup_test_env() {
     # "unbound variable" errors when the lib is sourced under set -u contexts)
     export _AICOMMIT_REPO_NAME=""
     export _AICOMMIT_PREREQS_CHECKED_MODEL=""
+    export _AICOMMIT_RUN_DIR=""
+    export _AICOMMIT_BASE_DIR=""
+    export _AICOMMIT_BASE_DIR_PWD=""
+    export _AICOMMIT_LOCK_DIR=""
 
     # aicommit.sh references $ZSH_VERSION; guard against set -u failures in bash
     export ZSH_VERSION="${ZSH_VERSION:-}"
@@ -70,7 +75,8 @@ cleanup_test_env() {
     if [ -n "$ORIGINAL_HOME" ]; then
         export HOME="$ORIGINAL_HOME"
     fi
-    unset TEST_TEMP_DIR TEST_REPO_DIR ORIGINAL_DIR ORIGINAL_HOME _AICOMMIT_REPO_NAME
+    unset TEST_TEMP_DIR TEST_REPO_DIR ORIGINAL_DIR ORIGINAL_HOME _AICOMMIT_REPO_NAME \
+        _AICOMMIT_RUN_DIR _AICOMMIT_BASE_DIR _AICOMMIT_BASE_DIR_PWD _AICOMMIT_LOCK_DIR
 }
 
 # ─── Mock Helpers ────────────────────────────────────────────────────────────
@@ -83,6 +89,44 @@ mock_bin() {
     mkdir -p "$TEST_TEMP_DIR/bin"
     printf '#!/usr/bin/env bash\n%s\n' "$body" > "$TEST_TEMP_DIR/bin/$name"
     chmod +x "$TEST_TEMP_DIR/bin/$name"
+    export PATH="$TEST_TEMP_DIR/bin:$PATH"
+}
+
+# Install a mock `curl` that emulates the Ollama HTTP API endpoints the backend
+# uses: /api/version, /api/tags, /api/show, /api/generate (warm-up), /api/chat.
+# Usage: mock_ollama_api '<chat content string>' ['<raw chat response json>']
+# The model name served by /api/tags is
+# ${MOCK_OLLAMA_MODEL:-${AI_MODEL:-${DEFAULT_AI_MODEL:-test-model}}}, read at
+# request time — so export AI_MODEL before OR after this call. Set
+# MOCK_OLLAMA_MODEL explicitly to pin a name (e.g. the /api/tags list tests).
+# To simulate an API-level error, pass raw='{"error":"..."}'.
+mock_ollama_api() {
+    local content="${1:-}" raw="${2:-}"
+    [ -z "$content" ] && content='{"type":"chore","scope":"none","scope_other":"","breaking":false,"subject":"mock commit","body":[]}'
+    mkdir -p "$TEST_TEMP_DIR/bin"
+    printf '%s' "$content" > "$TEST_TEMP_DIR/mock_content.txt"
+    if [ -n "$raw" ]; then
+        printf '%s' "$raw" > "$TEST_TEMP_DIR/mock_chat.json"
+    else
+        jq -n --rawfile c "$TEST_TEMP_DIR/mock_content.txt" \
+            '{message:{role:"assistant",content:$c}}' > "$TEST_TEMP_DIR/mock_chat.json"
+    fi
+    cat > "$TEST_TEMP_DIR/bin/curl" <<'MOCK_EOF'
+#!/usr/bin/env bash
+url=""
+for a in "$@"; do
+    case "$a" in */api/*) url="$a" ;; esac
+done
+case "$url" in
+    */api/version)   echo '{"version":"0.40.1"}' ;;
+    */api/tags)      printf '{"models":[{"name":"%s"}]}' "${MOCK_OLLAMA_MODEL:-${AI_MODEL:-${DEFAULT_AI_MODEL:-test-model}}}" ;;
+    */api/show)      echo '{}' ;;
+    */api/generate)  echo '{}' ;;
+    */api/chat)      cat "$TEST_TEMP_DIR/mock_chat.json" ;;
+    *) echo "mock curl: unexpected url '$url'" >&2; exit 1 ;;
+esac
+MOCK_EOF
+    chmod +x "$TEST_TEMP_DIR/bin/curl"
     export PATH="$TEST_TEMP_DIR/bin:$PATH"
 }
 
@@ -166,7 +210,7 @@ get_default_ai_model() {
 # ─── Exports (when sourced from BATS) ────────────────────────────────────────
 
 if [ "${BASH_SOURCE[0]}" != "${0}" ]; then
-    export -f setup_test_env cleanup_test_env mock_bin
+    export -f setup_test_env cleanup_test_env mock_bin mock_ollama_api
     export -f create_test_files
     export -f assert_output_contains refute_output_contains
     export -f verify_conventional_commit

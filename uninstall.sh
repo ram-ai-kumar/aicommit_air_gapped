@@ -59,10 +59,17 @@ if [ -f "${ZSHRC}.aicommit-backup" ]; then
 fi
 
 # ─── Clean temp files ─────────────────────────────────────────────────────────
+# Legacy shared /tmp dir plus the current repo's .git/aicommit working data.
 
 if [ -d "/tmp/.aicommit" ]; then
     rm -rf "/tmp/.aicommit"
-    echo -e "  ${GREEN}✓${RESET} Cleaned temp files"
+    echo -e "  ${GREEN}✓${RESET} Cleaned legacy temp files"
+fi
+
+_git_dir=$(git rev-parse --absolute-git-dir 2>/dev/null || true)
+if [ -n "$_git_dir" ] && [ -d "${_git_dir}/aicommit" ]; then
+    rm -rf "${_git_dir}/aicommit"
+    echo -e "  ${GREEN}✓${RESET} Cleaned .git/aicommit working data"
 fi
 
 echo ""

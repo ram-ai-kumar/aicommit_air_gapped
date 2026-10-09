@@ -135,13 +135,7 @@ teardown() {
 # ─── Direct CLI Execution: Non-Interactive Commits via Mock LLM ──────────────
 
 @test "bin/aic executes non-interactive all-in-one commit" {
-    mock_bin "ollama" "
-        if [ \"\$1\" = \"list\" ]; then
-            printf 'NAME\\tID\\tSIZE\\n%s\\tabc123\\t4.7GB\\n' \"\${AI_MODEL:-$(get_default_ai_model)}\"
-            exit 0
-        fi
-        printf '%s\\n' '@@@' 'feat: bin aic commit' '@@@'
-    "
+    mock_ollama_api 'feat: bin aic commit'
     echo "console.log('aic test');" > app.js
     git add app.js
     run "$AICOMMIT_DIR/bin/aic"
@@ -152,13 +146,7 @@ teardown() {
 }
 
 @test "bin/aicc executes non-interactive split commit" {
-    mock_bin "ollama" "
-        if [ \"\$1\" = \"list\" ]; then
-            printf 'NAME\\tID\\tSIZE\\n%s\\tabc123\\t4.7GB\\n' \"\${AI_MODEL:-$(get_default_ai_model)}\"
-            exit 0
-        fi
-        printf '%s\\n' '@@@' 'docs: update readme' '@@@'
-    "
+    mock_ollama_api 'docs: update readme'
     echo "# Readme" > README.md
     git add README.md
     run "$AICOMMIT_DIR/bin/aicc"
@@ -167,13 +155,7 @@ teardown() {
 }
 
 @test "bin/aics executes non-interactive commit with SemVer bump and git tag" {
-    mock_bin "ollama" "
-        if [ \"\$1\" = \"list\" ]; then
-            printf 'NAME\\tID\\tSIZE\\n%s\\tabc123\\t4.7GB\\n' \"\${AI_MODEL:-$(get_default_ai_model)}\"
-            exit 0
-        fi
-        printf '%s\\n' '@@@' 'feat: bin aics test' '@@@'
-    "
+    mock_ollama_api 'feat: bin aics test'
     printf '{\n  "name": "aics-bin-pkg",\n  "version": "1.0.0"\n}\n' > package.json
     echo "console.log('aics bin');" > app.js
     git add package.json app.js
@@ -185,13 +167,7 @@ teardown() {
 }
 
 @test "bin/aiccs executes non-interactive split commit with SemVer bump" {
-    mock_bin "ollama" "
-        if [ \"\$1\" = \"list\" ]; then
-            printf 'NAME\\tID\\tSIZE\\n%s\\tabc123\\t4.7GB\\n' \"\${AI_MODEL:-$(get_default_ai_model)}\"
-            exit 0
-        fi
-        printf '%s\\n' '@@@' 'fix: bin aiccs bug' '@@@'
-    "
+    mock_ollama_api 'fix: bin aiccs bug'
     printf '{\n  "name": "aiccs-bin-pkg",\n  "version": "2.0.0"\n}\n' > package.json
     echo "fix content" > app.js
     git add package.json app.js

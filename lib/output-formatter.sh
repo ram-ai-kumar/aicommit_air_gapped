@@ -274,3 +274,120 @@ display_tag_success() {
     fi
 }
 
+# Summarize a list of files by type/extension in human-readable compact form.
+# Outputs one summary row per category:
+#   single file:    <file>
+#   multiple files: <first_file> +<N-1> <type> files
+# Args: files as positional arguments or newline-separated via stdin
+format_group_files_compact() {
+    local input=""
+    if [ $# -gt 0 ]; then
+        input=$(printf '%s\n' "$@")
+    else
+        input=$(cat)
+    fi
+    [ -z "$input" ] && return 0
+
+    printf '%s\n' "$input" | awk '
+function get_type(file,   base, ext) {
+    base = file; sub(/^.*\//, "", base)
+    if (base ~ /^\./ && base !~ /^[.][^.]+[.]/) {
+        return "config file:config files"
+    }
+    if (base ~ /\./) {
+        ext = base; sub(/^.*\./, "", ext); ext = tolower(ext)
+        if (ext ~ /^(md|markdown)$/) return "markdown file:markdown files"
+        if (ext ~ /^(sh|bash|zsh)$/) return "shell script:shell scripts"
+        if (ext == "bats") return "test file:test files"
+        if (ext ~ /^(js|mjs|cjs)$/) return "JavaScript file:JavaScript files"
+        if (ext ~ /^(ts|tsx)$/) return "TypeScript file:TypeScript files"
+        if (ext == "jsx") return "React file:React files"
+        if (ext == "py") return "Python file:Python files"
+        if (ext == "rb") return "Ruby file:Ruby files"
+        if (ext == "go") return "Go file:Go files"
+        if (ext == "rs") return "Rust file:Rust files"
+        if (ext ~ /^(yaml|yml)$/) return "YAML file:YAML files"
+        if (ext == "json") return "JSON file:JSON files"
+        if (ext == "toml") return "TOML file:TOML files"
+        if (ext == "txt") return "text file:text files"
+        if (ext ~ /^(css|scss|sass|less)$/) return "CSS file:CSS files"
+        if (ext ~ /^(html|htm)$/) return "HTML file:HTML files"
+        if (ext == "sql") return "SQL file:SQL files"
+        if (ext == "dart") return "Dart file:Dart files"
+        return ext " file:" ext " files"
+    }
+    if (base ~ /^Dockerfile/) return "Dockerfile:Dockerfiles"
+    if (base == "Makefile") return "Makefile:Makefiles"
+    return "file:files"
+}
+NF {
+    t_pair = get_type($0)
+    split(t_pair, parts, ":")
+    sing = parts[1]; plur = parts[2]
+    cat_key = sing
+    if (!(cat_key in seen)) {
+        seen[cat_key] = 1
+        order[n_cats++] = cat_key
+        first_file[cat_key] = $0
+        singular_name[cat_key] = sing
+        plural_name[cat_key] = plur
+    }
+    count[cat_key]++
+}
+END {
+    for (i = 0; i < n_cats; i++) {
+        k = order[i]
+        c = count[k]
+        if (c == 1) {
+            print first_file[k]
+        } else if (c == 2) {
+            print first_file[k] " +1 " singular_name[k]
+        } else {
+            print first_file[k] " +" (c - 1) " " plural_name[k]
+        }
+    }
+}
+'
+}
+
+# Display resolved or previewed atomic commit groups in clean, human-readable format.
+# Single-item groups are printed on one row (`  • <scope> -> <summary>`).
+# Multi-item groups are printed as indented bullet items (`  • <scope>:` followed by `      - <item>`).
+# Args: $1=scope_groups, $2=bullet_char (default "•")
+display_resolved_atomic_groups() {
+    local scope_groups="$1"
+    local bullet="${2:-•}"
+    [ -z "$scope_groups" ] && return 0
+
+    local group_line grp_scope summary_lines line_count item
+    while IFS= read -r group_line; do
+        [ -z "$group_line" ] && continue
+        if command -v _aicommit_split_tab_line >/dev/null 2>&1; then
+            _aicommit_split_tab_line "$group_line"
+            [ -z "$_aicommit_split_scope" ] && continue
+            grp_scope="$_aicommit_split_scope"
+            [ ${#_aicommit_split_files[@]} -eq 0 ] && continue
+            summary_lines=$(format_group_files_compact "${_aicommit_split_files[@]}")
+        else
+            grp_scope=$(cut -f1 <<< "$group_line")
+            [ -z "$grp_scope" ] && continue
+            local grp_raw_files
+            grp_raw_files=$(cut -f2- <<< "$group_line" | tr '\t' '\n')
+            [ -z "$grp_raw_files" ] && continue
+            summary_lines=$(format_group_files_compact <<< "$grp_raw_files")
+        fi
+
+        line_count=$(printf '%s\n' "$summary_lines" | awk 'NF { c++ } END { print c + 0 }')
+
+        if [ "$line_count" -le 1 ]; then
+            echo "  $bullet $grp_scope -> $summary_lines"
+        else
+            echo "  $bullet $grp_scope:"
+            while IFS= read -r item; do
+                [ -z "$item" ] && continue
+                echo "      - $item"
+            done <<< "$summary_lines"
+        fi
+    done <<< "$scope_groups"
+}
+

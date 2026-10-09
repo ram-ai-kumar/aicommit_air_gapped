@@ -129,9 +129,9 @@ teardown() {
     git add app.sh
     run aicommit --dry-run
     [ "$status" -eq 0 ]
-    local d
-    d=$(get_aicommit_tmp_dir)
-    [ -f "${d}/FULL_PROMPT" ]
+    local s
+    s=$(get_aicommit_state_dir)
+    [ -f "${s}/FULL_PROMPT" ]
 }
 
 @test "FULL_PROMPT contains the changes context section" {
@@ -139,7 +139,7 @@ teardown() {
     git add app.sh
     run aicommit --dry-run
     [ "$status" -eq 0 ]
-    local d
-    d=$(get_aicommit_tmp_dir)
-    grep -q "REPOSITORY\|CHANGES\|FILE CATEGORIES" "${d}/FULL_PROMPT"
+    local s
+    s=$(get_aicommit_state_dir)
+    grep -q "USER CONTEXT\|CHANGES" "${s}/FULL_PROMPT"
 }

@@ -26,10 +26,13 @@ fi
 
 # ─── Main Commands ────────────────────────────────────────────────────────────
 
-# Interactive AI-powered conventional commit
-aicommit() {
+# Interactive AI-powered conventional commit (implementation — the public
+# `aicommit` wrapper at the bottom guarantees run-dir cleanup on every path,
+# including the early returns below).
+_aicommit_main() {
+    [ -n "$ZSH_VERSION" ] && setopt localoptions localtraps shwordsplit nonomatch nomonitor nonotify
     local dry_run=false verbose=false regenerate=false split_mode=false auto_yes=false
-    local explicit_split=false explicit_all=false
+    local explicit_split=false explicit_all=false clean_cache=false
     local is_aic="${AIC_SHORTCUT:-false}"
     local bump_opt="${AI_SEMVER_BUMP:-false}"
     local bump_level=""
@@ -57,6 +60,7 @@ aicommit() {
                 echo "  --dry-run, -d      Build context and show prompt without calling LLM"
                 echo "  --verbose, -v      Show diagnostics: staged file list, backend/model, temp paths"
                 echo "  --regenerate, -r   Re-run LLM on cached prompt without re-analyzing"
+                echo "  --clean-cache      Remove the .git/aicommit working directory and exit"
                 echo "Quick Shell Shims (non-interactive, CI/CD friendly):"
                 echo "  aic                Fast all-in-one commit without SemVer"
                 echo "  aicc               Fast atomic split commits without SemVer"
@@ -97,6 +101,7 @@ aicommit() {
             --dry-run|-d)    dry_run=true ;;
             --verbose|-v)    verbose=true ;;
             --regenerate|-r) regenerate=true ;;
+            --clean-cache)   clean_cache=true ;;
             *) echo "Unknown option: $1. Use --help for usage."; return 1 ;;
         esac
         shift
@@ -108,26 +113,42 @@ aicommit() {
     fi
 
     export AICOMMIT_MODE=true
-    local tmp_dir
-    tmp_dir=$(get_aicommit_tmp_dir)
 
-    # Clean up ephemeral files on exit (keeps FULL_PROMPT if it exists)
-    trap cleanup_aicommit_ephemeral EXIT
+    if [ "$clean_cache" = "true" ]; then
+        aicommit_clean_cache
+        return $?
+    fi
 
-    # --regenerate: skip context building, re-run LLM on cached prompt
+    # Fresh per-invocation run dir under .git/aicommit/runs/, plus stale-run
+    # purge. All context artifacts land there; preview/handoff artifacts live
+    # in .git/aicommit/state/.
+    if ! init_aicommit_run; then
+        return 1
+    fi
+    local tmp_dir="$_AICOMMIT_RUN_DIR"
+    local state_dir
+    state_dir=$(get_aicommit_state_dir) || return 1
+
+    # Remove the run dir on exit and on interrupt — runs/ must be empty after
+    # a finished session.
+    trap aicommit_cleanup_run_dir EXIT
+    trap 'aicommit_cleanup_run_dir; trap - INT; kill -INT ${BASHPID:-$$}' INT
+    trap 'aicommit_cleanup_run_dir; trap - TERM; kill -TERM ${BASHPID:-$$}' TERM
+
+    # --regenerate: skip context building, re-run LLM on cached request
     if [ "$regenerate" = "true" ]; then
-        if [ ! -f "${tmp_dir}/FULL_PROMPT" ]; then
-            display_error "No cached prompt found in $tmp_dir" "Run aicommit first to build context"
+        if [ ! -f "${state_dir}/MSG_REQUEST" ]; then
+            display_error "No cached prompt found in $state_dir" "Run aicommit first to build context"
             return 1
         fi
         if ! validate_prerequisites; then
             return 1
         fi
         echo "♻️  Regenerating from cached prompt..."
-        [ "$verbose" = "true" ] && echo "📂 Prompt: ${tmp_dir}/FULL_PROMPT"
+        [ "$verbose" = "true" ] && echo "📂 Request: ${state_dir}/MSG_REQUEST"
 
         local commit_msg
-        if ! commit_msg=$(generate_commit_message) || [ -z "$commit_msg" ]; then
+        if ! commit_msg=$(regenerate_commit_message) || [ -z "$commit_msg" ]; then
             return 1
         fi
         display_commit_message "$commit_msg"
@@ -319,7 +340,14 @@ aicommit() {
                 if [ "$bump_opt" = "true" ]; then
                     updated_files=$(apply_semver_release "$cur_ver" "$next_ver" "$commit_msg" "$evaluated_next")
                 fi
-                if git commit -e -m "$commit_msg"; then
+                local edit_rc=0
+                if aicommit_acquire_lock; then
+                    git commit -e -m "$commit_msg" || edit_rc=$?
+                    aicommit_release_lock
+                else
+                    return 1
+                fi
+                if [ "$edit_rc" -eq 0 ]; then
                     display_success
                     local final_msg
                     final_msg=$(git log -1 --pretty=%B)
@@ -347,13 +375,23 @@ aicommit() {
         return 0
     fi
 
-    # Capture staged changes. core.quotePath=false (via agit) keeps non-ASCII
-    # filenames as raw UTF-8 instead of octal-escaped "quoted\342\204\242strings"
-    # that never match anything downstream (pathspecs, case patterns, grep).
+    # Capture staged changes once per variant — every consumer reads the run
+    # files instead of re-running git. core.quotePath=false (via agit) keeps
+    # non-ASCII filenames as raw UTF-8 instead of octal-escaped
+    # "quoted\342\204\242strings" that never match anything downstream
+    # (pathspecs, case patterns, grep). The three variants run in parallel.
     local changes staged_files numstat_data
-    changes=$(agit diff --staged)
-    staged_files=$(agit diff --staged -z --name-only | tr '\0' '\n')
-    numstat_data=$(agit diff --staged --numstat)
+    { agit diff --staged -M --diff-algorithm=histogram > "${tmp_dir}/STAGED_DIFF" & } 2>/dev/null
+    local _p_diff=$!
+    { (agit diff --staged -z --name-only | tr '\0' '\n') > "${tmp_dir}/STAGED_NAMES" & } 2>/dev/null
+    local _p_names=$!
+    { agit diff --staged --numstat > "${tmp_dir}/NUMSTAT" & } 2>/dev/null
+    local _p_numstat=$!
+    wait "$_p_diff" "$_p_names" "$_p_numstat"
+
+    changes=$(cat "${tmp_dir}/STAGED_DIFF")
+    staged_files=$(cat "${tmp_dir}/STAGED_NAMES")
+    numstat_data=$(cat "${tmp_dir}/NUMSTAT")
 
     if [ -z "$changes" ] || [ -z "$staged_files" ]; then
         display_error "No staged changes"
@@ -408,14 +446,14 @@ aicommit() {
             # (and possibly LLM-nondeterministic) grouping.
             local fp_now
             fp_now=$(staged_fingerprint)
-            if [ -f "${tmp_dir}/SCOPE_GROUPS" ] && [ -f "${tmp_dir}/STAGED_FINGERPRINT" ] \
-               && [ "$(cat "${tmp_dir}/STAGED_FINGERPRINT" 2>/dev/null)" = "$fp_now" ]; then
-                scope_groups=$(cat "${tmp_dir}/SCOPE_GROUPS")
+            if [ -f "${state_dir}/SCOPE_GROUPS" ] && [ -f "${state_dir}/STAGED_FINGERPRINT" ] \
+               && [ "$(cat "${state_dir}/STAGED_FINGERPRINT" 2>/dev/null)" = "$fp_now" ]; then
+                scope_groups=$(cat "${state_dir}/SCOPE_GROUPS")
                 num_scopes=$(printf '%s\n' "$scope_groups" | count_lines)
                 scope_names=$(printf '%s\n' "$scope_groups" | awk -F'\t' '{printf (NR>1?", ":"") $1} END{print ""}')
                 groups_source="reused"
             else
-                [ -f "${tmp_dir}/SCOPE_GROUPS" ] && echo "⚠️  Staged set changed since preview — regrouping"
+                [ -f "${state_dir}/SCOPE_GROUPS" ] && echo "⚠️  Staged set changed since preview — regrouping"
                 scope_groups=$(group_staged_files_by_scope "$staged_files" "$changes" "$numstat_data")
                 scope_groups=$(printf '%s\n' "$scope_groups" | awk -F'\t' 'NF>=2 && $1!="" && $2!="" && $1 !~ /=/ && $1 !~ /^(joined_files|staged_files|files)/ {print $0}')
                 num_scopes=$(printf '%s\n' "$scope_groups" | count_lines)
@@ -436,17 +474,11 @@ aicommit() {
             # Persist the decision so a subsequent `aicc` on the same staged set
             # executes exactly this grouping instead of recomputing its own.
             umask 077
-            printf '%s\n' "$scope_groups" > "${tmp_dir}/SCOPE_GROUPS"
-            staged_fingerprint > "${tmp_dir}/STAGED_FINGERPRINT"
+            printf '%s\n' "$scope_groups" > "${state_dir}/SCOPE_GROUPS"
+            staged_fingerprint > "${state_dir}/STAGED_FINGERPRINT"
 
             echo "🔍 Dry run — detected $num_scopes atomic commit groups:"
-            while IFS= read -r group_line; do
-                _aicommit_split_tab_line "$group_line"
-                [ -z "$_aicommit_split_scope" ] && continue
-                grp_scope="$_aicommit_split_scope"
-                grp_files=$(printf ', %s' "${_aicommit_split_files[@]}"); grp_files="${grp_files#, }"
-                echo "  • Scope: $grp_scope -> $grp_files"
-            done <<< "$scope_groups"
+            display_resolved_atomic_groups "$scope_groups"
             if [ "$bump_opt" = "true" ]; then
                 echo ""
                 local s_cur_ver s_eval_bump s_eval_next s_next_ver s_is_higher=false s_tag s_files
@@ -479,12 +511,14 @@ aicommit() {
         else
             echo "📋 Resolved $num_scopes atomic commit group(s):"
         fi
-        while IFS= read -r group_line; do
-            _aicommit_split_tab_line "$group_line"
-            [ -z "$_aicommit_split_scope" ] && continue
-            grp_files=$(printf ', %s' "${_aicommit_split_files[@]}"); grp_files="${grp_files#, }"
-            echo "  • $_aicommit_split_scope -> $grp_files"
-        done <<< "$scope_groups"
+        display_resolved_atomic_groups "$scope_groups"
+
+        # Generate every group's commit message before the first commit —
+        # one batched call when enabled, sequential per-group otherwise.
+        # Per-group inputs live under ${tmp_dir}/groups/<i>/.
+        if ! generate_group_messages "$scope_groups" "$tmp_dir"; then
+            return 1
+        fi
 
         idx=1
         local committed_count=0
@@ -495,32 +529,14 @@ aicommit() {
             grp_file_array=("${_aicommit_split_files[@]}")
             [ ${#grp_file_array[@]} -eq 0 ] && continue
 
-            grp_pathspec_array=()
-            for f_item in "${grp_file_array[@]}"; do
-                grp_pathspec_array+=("$(to_pathspec "$f_item")")
-            done
-
-            display_split_progress "$idx" "$num_scopes" "$grp_scope"
-
-            subset_changes=$(agit diff --staged -- "${grp_pathspec_array[@]}")
-            subset_staged=$(printf '%s\n' "${grp_file_array[@]}")
-            subset_numstat=$(agit diff --staged --numstat -- "${grp_pathspec_array[@]}")
-
-            if [ -z "$subset_changes" ]; then
-                # No longer a soft warning: an empty subset here means the group's
-                # files no longer match the staged set (pathspec bug, stale reused
-                # preview, or a file unstaged mid-run) — the run must stop, not
-                # silently skip a scope and still report success (see RC4/RC5).
-                display_error "No staged changes matched for scope '$grp_scope'" \
-                    "Expected files: ${grp_file_array[*]}"
-                return 1
-            fi
-
-            build_ai_context "$subset_changes" "$subset_staged" "$subset_numstat" "$grp_scope"
-            if ! grp_commit_msg=$(generate_commit_message) || [ -z "$grp_commit_msg" ]; then
+            grp_commit_msg="${_AICOMMIT_GRP_MSGS[$idx]:-}"
+            if [ -z "$grp_commit_msg" ]; then
                 display_error "Failed to generate commit message for scope: $grp_scope"
                 return 1
             fi
+            subset_changes=$(cat "${tmp_dir}/groups/${idx}/DIFF" 2>/dev/null)
+
+            display_split_progress "$idx" "$num_scopes" "$grp_scope"
 
             display_commit_message "$grp_commit_msg" "Suggested Commit ($idx/$num_scopes - scope: $grp_scope):"
 
@@ -799,17 +815,17 @@ aicommit() {
 
     if [ "$verbose" = "true" ]; then
         display_setup_info
-        echo "📂 Temp dir: ${tmp_dir}"
+        echo "📂 Run dir:   ${tmp_dir}"
         echo "   CHANGES_CONTEXT: ${tmp_dir}/CHANGES_CONTEXT"
-        echo "   FULL_PROMPT:     ${tmp_dir}/FULL_PROMPT"
+        echo "   FULL_PROMPT:     ${state_dir}/FULL_PROMPT"
     fi
 
     # --dry-run: assemble prompt and exit
     if [ "$dry_run" = "true" ]; then
         generate_commit_message --dry-run > /dev/null 2>&1 || true
         echo ""
-        echo "🔍 Dry run — prompt written to: ${tmp_dir}/FULL_PROMPT"
-        echo "   cat ${tmp_dir}/FULL_PROMPT"
+        echo "🔍 Dry run — prompt written to: ${state_dir}/FULL_PROMPT"
+        echo "   cat ${state_dir}/FULL_PROMPT"
         if [ "$bump_opt" = "true" ]; then
             echo ""
             local cur_ver evaluated_bump evaluated_next next_ver is_higher=false tag_preview files_preview
@@ -1029,7 +1045,14 @@ aicommit() {
             if [ "$bump_opt" = "true" ]; then
                 updated_files=$(apply_semver_release "$cur_ver" "$next_ver" "$commit_msg" "$evaluated_next")
             fi
-            if git commit -e -m "$commit_msg"; then
+            local edit_rc=0
+            if aicommit_acquire_lock; then
+                git commit -e -m "$commit_msg" || edit_rc=$?
+                aicommit_release_lock
+            else
+                return 1
+            fi
+            if [ "$edit_rc" -eq 0 ]; then
                 display_success
                 local final_msg
                 final_msg=$(git log -1 --pretty=%B)
@@ -1056,6 +1079,28 @@ aicommit() {
     esac
 }
 
+# Public entry point — guarantees the per-invocation run dir is removed on
+# every return path (success, early error, abort). The EXIT/INT/TERM traps set
+# inside _aicommit_main additionally cover subshell/script exits.
+aicommit() {
+    [ -n "$ZSH_VERSION" ] && setopt localoptions localtraps shwordsplit nonomatch nomonitor nonotify
+    local _rc _saved_traps="" _saved_monitor=false
+    if [ -n "$BASH_VERSION" ]; then
+        _saved_traps=$(trap -p INT TERM)
+        [[ "$-" =~ m ]] && _saved_monitor=true
+        set +m
+    fi
+    _aicommit_main "$@"
+    _rc=$?
+    aicommit_cleanup_run_dir
+    if [ -n "$BASH_VERSION" ]; then
+        trap - INT TERM EXIT
+        [ -n "$_saved_traps" ] && eval "$_saved_traps"
+        [ "$_saved_monitor" = "true" ] && set -m
+    fi
+    return $_rc
+}
+
 # True if $@ already includes an explicit split-mode flag. The quick shims below
 # each inject a default (--no-split for aic/aicx, --split for aicc/aiccx) — without
 # this check, a caller override (e.g. `aic --split`) collides with that injected
@@ -1074,6 +1119,7 @@ _aicommit_has_split_flag() {
 
 # Quick AI commit — auto-commits all-in-one without confirmation or scope grouping
 aic() {
+    [ -n "$ZSH_VERSION" ] && setopt localoptions localtraps shwordsplit nonomatch nomonitor nonotify
     local -a args=("$@")
     _aicommit_has_split_flag "$@" || args=(--no-split "${args[@]}")
     AIC_SHORTCUT=true aicommit --yes --shortcut "${args[@]}"
@@ -1081,6 +1127,7 @@ aic() {
 
 # Quick AI commit categorized — auto-commits each atomic scope separately
 aicc() {
+    [ -n "$ZSH_VERSION" ] && setopt localoptions localtraps shwordsplit nonomatch nomonitor nonotify
     local -a args=("$@")
     _aicommit_has_split_flag "$@" || args=(--split "${args[@]}")
     AIC_SHORTCUT=true aicommit --yes --shortcut "${args[@]}"
@@ -1088,6 +1135,7 @@ aicc() {
 
 # Verbose dry-run inspection for single all-in-one commit (0 changes made)
 aicx() {
+    [ -n "$ZSH_VERSION" ] && setopt localoptions localtraps shwordsplit nonomatch nomonitor nonotify
     local -a args=("$@")
     _aicommit_has_split_flag "$@" || args=(--no-split "${args[@]}")
     AIC_SHORTCUT=true aicommit --dry-run --verbose --shortcut "${args[@]}"
@@ -1095,6 +1143,7 @@ aicx() {
 
 # Verbose dry-run inspection for atomic split commits (0 changes made)
 aiccx() {
+    [ -n "$ZSH_VERSION" ] && setopt localoptions localtraps shwordsplit nonomatch nomonitor nonotify
     local -a args=("$@")
     _aicommit_has_split_flag "$@" || args=(--split "${args[@]}")
     AIC_SHORTCUT=true aicommit --dry-run --verbose --shortcut "${args[@]}"
@@ -1102,6 +1151,7 @@ aiccx() {
 
 # Quick AI commit with SemVer — auto-commits all-in-one with SemVer bump & tag (non-interactive, CI/CD friendly)
 aics() {
+    [ -n "$ZSH_VERSION" ] && setopt localoptions localtraps shwordsplit nonomatch nomonitor nonotify
     local -a args=("$@")
     _aicommit_has_split_flag "$@" || args=(--no-split "${args[@]}")
     AIC_SHORTCUT=true aicommit --yes --bump --shortcut "${args[@]}"
@@ -1109,6 +1159,7 @@ aics() {
 
 # Quick AI commit categorized with SemVer — auto-commits each atomic scope with SemVer bump & tag (non-interactive, CI/CD friendly)
 aiccs() {
+    [ -n "$ZSH_VERSION" ] && setopt localoptions localtraps shwordsplit nonomatch nomonitor nonotify
     local -a args=("$@")
     _aicommit_has_split_flag "$@" || args=(--split "${args[@]}")
     AIC_SHORTCUT=true aicommit --yes --bump --shortcut "${args[@]}"
@@ -1116,6 +1167,7 @@ aiccs() {
 
 # Verbose dry-run inspection for single commit with SemVer preview (0 changes made)
 aicsx() {
+    [ -n "$ZSH_VERSION" ] && setopt localoptions localtraps shwordsplit nonomatch nomonitor nonotify
     local -a args=("$@")
     _aicommit_has_split_flag "$@" || args=(--no-split "${args[@]}")
     AIC_SHORTCUT=true aicommit --dry-run --verbose --bump --shortcut "${args[@]}"
@@ -1123,6 +1175,7 @@ aicsx() {
 
 # Verbose dry-run inspection for atomic split commits with SemVer preview (0 changes made)
 aiccsx() {
+    [ -n "$ZSH_VERSION" ] && setopt localoptions localtraps shwordsplit nonomatch nomonitor nonotify
     local -a args=("$@")
     _aicommit_has_split_flag "$@" || args=(--split "${args[@]}")
     AIC_SHORTCUT=true aicommit --dry-run --verbose --bump --shortcut "${args[@]}"

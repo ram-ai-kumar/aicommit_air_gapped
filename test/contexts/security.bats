@@ -10,22 +10,52 @@ teardown() {
     cleanup_test_env
 }
 
-# ─── Least Privilege: temp dir permissions ────────────────────────────────────
+# ─── Least Privilege: run dir permissions ────────────────────────────────────
 
-@test "temp directory is created with 700 permissions (owner-only)" {
+@test "run directory is created with 700 permissions (owner-only)" {
     local d perms
     d=$(get_aicommit_tmp_dir)
     perms=$(stat -f %A "$d" 2>/dev/null || stat -c %a "$d" 2>/dev/null)
     [ "$perms" = "700" ]
 }
 
-@test "temp directory is not world-readable" {
+@test "run directory is not world-readable" {
     local d perms last
     d=$(get_aicommit_tmp_dir)
     perms=$(stat -f %A "$d" 2>/dev/null || stat -c %a "$d" 2>/dev/null)
     # Last octet (world bits) must be 0
     last="${perms: -1}"
     [ "$last" = "0" ]
+}
+
+@test "base aicommit directory is 700 and under git metadata" {
+    local base perms
+    get_aicommit_tmp_dir > /dev/null
+    base=$(get_aicommit_base_dir)
+    perms=$(stat -f %A "$base" 2>/dev/null || stat -c %a "$base" 2>/dev/null)
+    [ "$perms" = "700" ]
+    [[ "$base" == "$(git rev-parse --absolute-git-dir)/aicommit" ]]
+}
+
+@test "init_aicommit_run refuses a symlinked base directory" {
+    local base
+    base="$(git rev-parse --absolute-git-dir)/aicommit"
+    rm -rf "$base"
+    mkdir -p "$TEST_TEMP_DIR/evil"
+    ln -s "$TEST_TEMP_DIR/evil" "$base"
+    run init_aicommit_run
+    [ "$status" -eq 1 ]
+    assert_output_contains "symlink"
+}
+
+@test "init_aicommit_run refuses an insecure base directory" {
+    local base
+    base=$(get_aicommit_base_dir)
+    mkdir -m 700 -p "$base"
+    chmod 755 "$base"
+    run init_aicommit_run
+    [ "$status" -eq 1 ]
+    assert_output_contains "insecure"
 }
 
 # ─── Data Leakage: sensitive files excluded ───────────────────────────────────
@@ -44,7 +74,7 @@ teardown() {
 }
 
 @test ".env does not appear in CHANGE_STATS" {
-    echo "TOKEN=abc" > .env
+    echo "TOKEN=abcSECRET_KEY=super_secret_value" > .env
     echo "code" > app.js
     git add .env app.js
     local staged numstat
@@ -93,27 +123,37 @@ teardown() {
     assert_output_contains "Unsupported backend"
 }
 
-# ─── Micro-segmentation: temp dirs are repo-scoped ───────────────────────────
+# ─── Micro-segmentation: state is repo- and worktree-scoped ──────────────────
 
-@test "get_aicommit_tmp_dir path is unique per repo name" {
-    # The tmp dir includes the repo name — verify it doesn't use a global path
-    local d
-    d=$(get_aicommit_tmp_dir)
-    # Path must be deeper than /tmp/.aicommit (must include a repo sub-dir)
-    [[ "$d" != "/tmp/.aicommit" ]]
-    [[ "$d" == /tmp/.aicommit/* ]]
+@test "aicommit base dir is inside git metadata, not shared /tmp" {
+    local base
+    base=$(get_aicommit_base_dir)
+    [[ "$base" == "$(git rev-parse --absolute-git-dir)"* ]]
+    [[ "$base" != /tmp/.aicommit* ]]
+}
+
+@test "base dir differs between a worktree and the main repo" {
+    git commit --allow-empty -qm init
+    local wt="$TEST_TEMP_DIR/worktree2"
+    git worktree add --quiet "$wt" HEAD 2>/dev/null
+    local d_main d_wt
+    d_main=$(get_aicommit_base_dir)
+    ( cd "$wt" && get_aicommit_base_dir ) > "$TEST_TEMP_DIR/wt_dir.txt"
+    d_wt=$(cat "$TEST_TEMP_DIR/wt_dir.txt")
+    [ -n "$d_wt" ]
+    [ "$d_main" != "$d_wt" ]
 }
 
 # ─── dry-run: files created with restricted permissions ──────────────────────
 
-@test "dry-run creates context files with non-world-readable permissions" {
+@test "dry-run creates the audit prompt with non-world-readable permissions" {
     echo "content" > app.js
     git add app.js
     aicommit --dry-run > /dev/null 2>&1 || true
 
-    local d
-    d=$(get_aicommit_tmp_dir)
-    for f in "$d"/FULL_PROMPT "$d"/FILE_CONTEXT "$d"/CHANGE_STATS; do
+    local s f
+    s=$(get_aicommit_state_dir)
+    for f in "$s"/FULL_PROMPT "$s"/MSG_REQUEST; do
         [ -f "$f" ] || continue
         local perms last
         perms=$(stat -f %A "$f" 2>/dev/null || stat -c %a "$f" 2>/dev/null)
@@ -126,42 +166,29 @@ teardown() {
 }
 
 @test "get_available_ollama_models does not expose sensitive data" {
-    mock_bin "ollama" "echo 'NAME            ID              SIZE    MODIFIED'
-echo 'model-with-secret-key:latest    secret123   4.7 GB  2 days ago'
-echo 'model-with-token:latest       token456    2.3 GB  1 week ago'"
+    mock_bin "curl" "printf '{\"models\":[{\"name\":\"model-with-secret-key:latest\"},{\"name\":\"model-with-token:latest\"}]}'"
     run get_available_ollama_models
     [ "$status" -eq 0 ]
-    # Should only return model names, not IDs or other sensitive data
+    # Should only return model names, not other fields
     assert_output_contains "model-with-secret-key:latest"
     assert_output_contains "model-with-token:latest"
-    refute_output_contains "secret123"
-    refute_output_contains "token456"
 }
 
-@test "test_model_loadability does not expose prompt content in logs" {
-    mock_bin "ollama" "echo \"Running model with prompt: 'secret data'\" >&2
-echo \"OK\""
-    mock_bin "timeout" "echo \"OK\""
-    run test_model_loadability "test-model"
+@test "invoke_ollama does not expose prompt content in logs" {
+    mock_ollama_api "feat: generated"
+    printf 'prompt contains SECRET_DATA_ABC123' > "$TEST_TEMP_DIR/user.txt"
+    build_ollama_request "$TEST_TEMP_DIR/request.json" "m" "$TEST_TEMP_DIR/user.txt"
+    run invoke_ollama "test-model" "$TEST_TEMP_DIR/request.json" \
+        "$TEST_TEMP_DIR/r.txt" "$TEST_TEMP_DIR/e.txt" "5"
     [ "$status" -eq 0 ]
-    # Should not expose prompt content
-    refute_output_contains "secret data"
+    refute_output_contains "SECRET_DATA_ABC123"
 }
 
 @test "validate_ollama_prerequisites sanitizes model names" {
-    mock_bin "pgrep" "exit 0"
-    mock_bin "ollama" "echo 'NAME            ID              SIZE    MODIFIED'
-echo 'safe-model:latest           abc123   2.3 GB  1 day ago'
-if [ \"\$1\" = \"run\" ]; then
-    # Check if model name contains dangerous characters
-    if [[ \"\$2\" =~ [|&;<>$\\\`\"'(){}] ]]; then
-        echo \"Dangerous characters detected\" >&2
-        exit 1
-    fi
-    echo \"OK\"
-    exit 0
-fi"
-    # Try with dangerous model name
+    mock_ollama_api
+    export MOCK_OLLAMA_MODEL="safe-model:latest"
+    # A name with shell metacharacters simply never matches a real tag —
+    # it reaches the API via jq --arg JSON encoding, not shell evaluation.
     run validate_ollama_prerequisites "safe-model; rm -rf /"
     [ "$status" -eq 1 ]
     assert_output_contains "Model 'safe-model; rm -rf /' not found"

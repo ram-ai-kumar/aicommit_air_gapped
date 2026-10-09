@@ -101,31 +101,6 @@ teardown() {
     [ "$count" = "2" ]
 }
 
-# ─── detect_project_type ─────────────────────────────────────────────────────
-
-@test "detect_project_type with multiple project files picks first match" {
-    touch Gemfile package.json requirements.txt
-    run detect_project_type ""
-    # Gemfile is checked first in the function
-    [ "$output" = "rails/ruby" ]
-}
-
-# ─── analyze_change_concentration ────────────────────────────────────────────
-
-@test "analyze_change_concentration with one file returns 100 percent" {
-    run analyze_change_concentration "src/main.sh"
-    assert_output_contains "|100"
-}
-
-@test "analyze_change_concentration with files spread across dirs returns lower percent" {
-    local files
-    files="$(printf 'lib/a.sh\nlib/b.sh\nsrc/c.sh\ndoc/d.md')"
-    run analyze_change_concentration "$files"
-    # lib has 2/4 = 50% concentration
-    assert_output_contains "lib"
-    assert_output_contains "50"
-}
-
 # ─── get_aicommit_tmp_dir ────────────────────────────────────────────────────
 
 @test "get_aicommit_tmp_dir path contains no path traversal sequences" {
@@ -150,17 +125,16 @@ teardown() {
     [ -f "${TEST_TEMP_DIR}/ASSET_FILES" ]
 }
 
-@test "test_model_loadability handles timeout" {
-    timeout() {
-        return 124
-    }
-    export -f timeout
-
-    run test_model_loadability "slow-model"
+@test "invoke_ollama handles an API request timeout" {
+    mock_bin "curl" "exit 28"
+    echo '{"model":"m","messages":[]}' > "$TEST_TEMP_DIR/request.json"
+    run invoke_ollama "slow-model" "$TEST_TEMP_DIR/request.json" \
+        "$TEST_TEMP_DIR/r.txt" "$TEST_TEMP_DIR/e.txt" "5"
     [ "$status" -eq 1 ]
 }
 
 @test "get_available_ollama_models handles malformed output" {
+    mock_bin "curl" "echo 'not json'"
     mock_bin "ollama" "echo 'invalid output without proper structure'"
     run get_available_ollama_models
     [ "$status" -eq 0 ]

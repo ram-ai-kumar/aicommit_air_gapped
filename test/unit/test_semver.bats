@@ -356,21 +356,8 @@ teardown() {
     echo "console.log('hello');" > app.js
     git add app.js
 
-    pgrep() { return 0; }
-    ollama() {
-        case "$1" in
-            list)
-                echo "NAME            ID              SIZE    MODIFIED"
-                echo "test-model      abc123          4.7 GB  2 days ago"
-                ;;
-            run)
-                printf '%s\n' "@@@" "feat(core): add greeting feature" "@@@"
-                return 0
-                ;;
-        esac
-    }
-    export -f pgrep ollama
     export AI_MODEL="test-model"
+    mock_ollama_api 'feat(core): add greeting feature'
 
     run aicommit --bump --yes
     [ "$status" -eq 0 ]
@@ -399,21 +386,8 @@ teardown() {
     echo "db code" > src/db/db.js
     git add src/auth/auth.js src/db/db.js
 
-    pgrep() { return 0; }
-    ollama() {
-        case "$1" in
-            list)
-                echo "NAME            ID              SIZE    MODIFIED"
-                echo "test-model      abc123          4.7 GB  2 days ago"
-                ;;
-            run)
-                printf '%s\n' "@@@" "feat(scope): add new functionality" "@@@"
-                return 0
-                ;;
-        esac
-    }
-    export -f pgrep ollama
     export AI_MODEL="test-model"
+    mock_ollama_api 'feat(scope): add new functionality'
 
     run aicommit --split --bump --yes
     [ "$status" -eq 0 ]
@@ -462,21 +436,8 @@ teardown() {
     echo "console.log('aics');" > app.js
     git add app.js
 
-    pgrep() { return 0; }
-    ollama() {
-        case "$1" in
-            list)
-                echo "NAME            ID              SIZE    MODIFIED"
-                echo "test-model      abc123          4.7 GB  2 days ago"
-                ;;
-            run)
-                printf '%s\n' "@@@" "feat: quick aics feature" "@@@"
-                return 0
-                ;;
-        esac
-    }
-    export -f pgrep ollama
     export AI_MODEL="test-model"
+    mock_ollama_api 'feat: quick aics feature'
 
     run aics
     [ "$status" -eq 0 ]
@@ -496,21 +457,8 @@ teardown() {
     echo "# Docs" > docs/README.md
     git add scripts/run.js docs/README.md
 
-    pgrep() { return 0; }
-    ollama() {
-        case "$1" in
-            list)
-                echo "NAME            ID              SIZE    MODIFIED"
-                echo "test-model      abc123          4.7 GB  2 days ago"
-                ;;
-            run)
-                printf '%s\n' "@@@" "feat(scope): test scope" "@@@"
-                return 0
-                ;;
-        esac
-    }
-    export -f pgrep ollama
     export AI_MODEL="test-model"
+    mock_ollama_api 'feat(scope): test scope'
 
     run aiccs
     [ "$status" -eq 0 ]
@@ -531,21 +479,8 @@ teardown() {
     echo "console.log('interactive');" > app.js
     git add app.js
 
-    pgrep() { return 0; }
-    ollama() {
-        case "$1" in
-            list)
-                echo "NAME            ID              SIZE    MODIFIED"
-                echo "test-model      abc123          4.7 GB  2 days ago"
-                ;;
-            run)
-                printf '%s\n' "@@@" "feat: add interactive feature" "@@@"
-                return 0
-                ;;
-        esac
-    }
-    export -f pgrep ollama
     export AI_MODEL="test-model"
+    mock_ollama_api 'feat: add interactive feature'
 
     # Send 's' to choose SemVer, then '1' for recommended bump (minor)
     run aicommit <<< $'s\n1'
@@ -564,21 +499,8 @@ teardown() {
     echo "console.log('interactive2');" > app.js
     git add app.js
 
-    pgrep() { return 0; }
-    ollama() {
-        case "$1" in
-            list)
-                echo "NAME            ID              SIZE    MODIFIED"
-                echo "test-model      abc123          4.7 GB  2 days ago"
-                ;;
-            run)
-                printf '%s\n' "@@@" "fix: small bug fix" "@@@"
-                return 0
-                ;;
-        esac
-    }
-    export -f pgrep ollama
     export AI_MODEL="test-model"
+    mock_ollama_api 'fix: small bug fix'
 
     # Send 's=major' directly at prompt
     run aicommit <<< "s=major"
@@ -622,21 +544,10 @@ major | incompatible parameter removed
 }
 
 @test "ai_evaluate_semver calls invoke_llm and returns extracted decision" {
-    pgrep() { return 0; }
-    ollama() {
-        case "$1" in
-            list)
-                echo "NAME            ID              SIZE    MODIFIED"
-                echo "test-model      abc123          4.7 GB  2 days ago"
-                ;;
-            run)
-                printf '%s\n' "@@@" "minor | new feature added" "@@@"
-                return 0
-                ;;
-        esac
-    }
-    export -f pgrep ollama
     export AI_MODEL="test-model"
+    mock_ollama_api '@@@
+minor | new feature added
+@@@'
 
     run ai_evaluate_semver "chore: update internal modules" ""
     [ "$status" -eq 0 ]
@@ -644,21 +555,10 @@ major | incompatible parameter removed
 }
 
 @test "evaluate_commit_semver invokes AI when conventional commit heuristic is inconclusive" {
-    pgrep() { return 0; }
-    ollama() {
-        case "$1" in
-            list)
-                echo "NAME            ID              SIZE    MODIFIED"
-                echo "test-model      abc123          4.7 GB  2 days ago"
-                ;;
-            run)
-                printf '%s\n' "@@@" "major | breaking refactor" "@@@"
-                return 0
-                ;;
-        esac
-    }
-    export -f pgrep ollama
     export AI_MODEL="test-model"
+    mock_ollama_api '@@@
+major | breaking refactor
+@@@'
     export AI_SEMVER_USE_AI="true"
 
     # Conventional commit 'refactor:' returns 'none' from suggest_semver_bump.
@@ -669,21 +569,10 @@ major | incompatible parameter removed
 }
 
 @test "evaluate_commit_semver honors explicit level 'ai'" {
-    pgrep() { return 0; }
-    ollama() {
-        case "$1" in
-            list)
-                echo "NAME            ID              SIZE    MODIFIED"
-                echo "test-model      abc123          4.7 GB  2 days ago"
-                ;;
-            run)
-                printf '%s\n' "@@@" "patch | minor maintenance" "@@@"
-                return 0
-                ;;
-        esac
-    }
-    export -f pgrep ollama
     export AI_MODEL="test-model"
+    mock_ollama_api '@@@
+patch | minor maintenance
+@@@'
 
     run evaluate_commit_semver "feat: some feature" "ai"
     [ "$status" -eq 0 ]
@@ -691,21 +580,10 @@ major | incompatible parameter removed
 }
 
 @test "prompt_semver_decision asks AI when option 7 is selected" {
-    pgrep() { return 0; }
-    ollama() {
-        case "$1" in
-            list)
-                echo "NAME            ID              SIZE    MODIFIED"
-                echo "test-model      abc123          4.7 GB  2 days ago"
-                ;;
-            run)
-                printf '%s\n' "@@@" "minor | backward compatible addition" "@@@"
-                return 0
-                ;;
-        esac
-    }
-    export -f pgrep ollama
     export AI_MODEL="test-model"
+    mock_ollama_api '@@@
+minor | backward compatible addition
+@@@'
 
     run prompt_semver_decision "refactor: internal changes" "1.0.0" <<< "7"
     [ "$status" -eq 0 ]
@@ -720,26 +598,32 @@ major | incompatible parameter removed
     echo "console.log('ai-semver');" > app.js
     git add app.js
 
-    pgrep() { return 0; }
-    ollama() {
-        case "$1" in
-            list)
-                echo "NAME            ID              SIZE    MODIFIED"
-                echo "test-model      abc123          4.7 GB  2 days ago"
-                ;;
-            run)
-                # First run generates commit message, second run calculates semver bump
-                if [ -f "$TEST_TEMP_DIR/first_run_done" ]; then
-                    printf '%s\n' "@@@" "minor | new feature detected" "@@@"
-                else
-                    touch "$TEST_TEMP_DIR/first_run_done"
-                    printf '%s\n' "@@@" "refactor(core): optimize engine performance" "@@@"
-                fi
-                return 0
-                ;;
-        esac
-    }
-    export -f pgrep ollama
+    mkdir -p "$TEST_TEMP_DIR/bin"
+    cat > "$TEST_TEMP_DIR/bin/curl" <<'EOF'
+#!/usr/bin/env bash
+url=""
+for a in "$@"; do case "$a" in */api/*) url="$a" ;; esac; done
+case "$url" in
+    */api/version)  echo '{"version":"0.40.1"}' ;;
+    */api/tags)     echo '{"models":[{"name":"test-model"}]}' ;;
+    */api/show|*/api/generate) echo '{}' ;;
+    */api/chat)
+        # First call generates the commit message; second calculates the bump
+        if [ -f "$TEST_TEMP_DIR/first_run_done" ]; then
+            jq -n --arg c '@@@
+minor | new feature detected
+@@@' '{message:{role:"assistant",content:$c}}'
+        else
+            touch "$TEST_TEMP_DIR/first_run_done"
+            jq -n --arg c 'refactor(core): optimize engine performance' \
+                '{message:{role:"assistant",content:$c}}'
+        fi
+        ;;
+    *) exit 1 ;;
+esac
+EOF
+    chmod +x "$TEST_TEMP_DIR/bin/curl"
+    export PATH="$TEST_TEMP_DIR/bin:$PATH"
     export AI_MODEL="test-model"
 
     # Send 'a' to calculate SemVer via AI
@@ -931,7 +815,56 @@ EOF
     echo "# New Changelog" > CHANGELOG.md
     git add package.json CHANGELOG.md
 
-    run restore_semver_updates "package.json CHANGELOG.md"
+    local files_to_restore="package.json
+CHANGELOG.md"
+
+    run restore_semver_updates "$files_to_restore"
+    [ "$status" -eq 0 ]
+
+    grep -q '"version": "1.0.0"' package.json
+    [ ! -f "CHANGELOG.md" ]
+}
+
+@test "restore_semver_updates restores newline-separated files in bash" {
+    printf '{\n  "name": "restore-test-nl",\n  "version": "1.0.0"\n}\n' > package.json
+    git add package.json
+    git commit -qm "initial commit"
+
+    # Modify package.json and create CHANGELOG.md
+    printf '{\n  "name": "restore-test-nl",\n  "version": "1.0.1"\n}\n' > package.json
+    echo "# New Changelog" > CHANGELOG.md
+    git add package.json CHANGELOG.md
+
+    local files_list="package.json
+CHANGELOG.md"
+
+    run restore_semver_updates "$files_list"
+    [ "$status" -eq 0 ]
+
+    grep -q '"version": "1.0.0"' package.json
+    [ ! -f "CHANGELOG.md" ]
+}
+
+@test "restore_semver_updates reverts newline-separated files in zsh" {
+    which zsh >/dev/null 2>&1 || skip "zsh not installed"
+    printf '{\n  "name": "restore-test-zsh",\n  "version": "1.0.0"\n}\n' > package.json
+    git add package.json
+    git commit -qm "initial commit"
+
+    # Modify package.json and create CHANGELOG.md
+    printf '{\n  "name": "restore-test-zsh",\n  "version": "1.0.1"\n}\n' > package.json
+    echo "# New Changelog" > CHANGELOG.md
+    git add package.json CHANGELOG.md
+
+    local files_list="package.json
+CHANGELOG.md"
+
+    run zsh -c "
+        export AICOMMIT_DIR='$AICOMMIT_DIR'
+        source '$AICOMMIT_DIR/aicommit.sh'
+        files=\"\$1\"
+        restore_semver_updates \"\$files\"
+    " _ "$files_list"
     [ "$status" -eq 0 ]
 
     grep -q '"version": "1.0.0"' package.json
@@ -951,21 +884,8 @@ EOF
     echo "console.log('retry');" > app.js
     git add app.js
 
-    pgrep() { return 0; }
-    ollama() {
-        case "$1" in
-            list)
-                echo "NAME            ID              SIZE    MODIFIED"
-                echo "test-model      abc123          4.7 GB  2 days ago"
-                ;;
-            run)
-                printf '%s\n' "@@@" "fix: resolve null pointer exception" "@@@"
-                return 0
-                ;;
-        esac
-    }
-    export -f pgrep ollama
     export AI_MODEL="test-model"
+    mock_ollama_api 'fix: resolve null pointer exception'
 
     # Retry commit with --bump --yes
     run aicommit --bump --yes
@@ -988,21 +908,8 @@ EOF
     echo "console.log('breaking');" > index.js
     git add package.json index.js
 
-    pgrep() { return 0; }
-    ollama() {
-        case "$1" in
-            list)
-                echo "NAME            ID              SIZE    MODIFIED"
-                echo "test-model      abc123          4.7 GB  2 days ago"
-                ;;
-            run)
-                printf '%s\n' "@@@" "fix: patch fix under pre-bumped major" "@@@"
-                return 0
-                ;;
-        esac
-    }
-    export -f pgrep ollama
     export AI_MODEL="test-model"
+    mock_ollama_api 'fix: patch fix under pre-bumped major'
 
     # Commit with --bump --yes. Even though message is fix (which evaluates to 1.0.1),
     # 2.0.0 must be preserved and changelog updated for 2.0.0.

@@ -23,9 +23,9 @@ teardown() {
 }
 
 @test "aicommit --regenerate exits 1 when no cached prompt exists" {
-    local d
-    d=$(get_aicommit_tmp_dir)
-    rm -f "${d}/FULL_PROMPT"
+    local s
+    s=$(get_aicommit_state_dir)
+    rm -f "${s}/MSG_REQUEST"
     run aicommit --regenerate
     [ "$status" -eq 1 ]
     assert_output_contains "No cached prompt"
@@ -71,72 +71,74 @@ teardown() {
 
 # ─── backend errors ───────────────────────────────────────────────────────────
 
-@test "invoke_ollama returns 1 when the ollama binary fails" {
-    mock_bin "ollama" "exit 1"
-    local pf="$TEST_TEMP_DIR/prompt.txt"
+@test "invoke_ollama returns 1 when the API is unreachable" {
+    mock_bin "curl" "exit 1"
     local rf="$TEST_TEMP_DIR/response.txt"
     local ef="$TEST_TEMP_DIR/error.txt"
-    echo "prompt" > "$pf"
-    run invoke_ollama "model" "$pf" "$rf" "$ef" "5"
+    echo '{"model":"model","messages":[]}' > "$TEST_TEMP_DIR/request.json"
+    run invoke_ollama "model" "$TEST_TEMP_DIR/request.json" "$rf" "$ef" "5"
     [ "$status" -eq 1 ]
 }
 
 @test "invoke_ollama shows generation failed message on error" {
-    mock_bin "ollama" "exit 2"
-    local pf="$TEST_TEMP_DIR/prompt.txt"
+    mock_bin "curl" "exit 2"
     local rf="$TEST_TEMP_DIR/response.txt"
     local ef="$TEST_TEMP_DIR/error.txt"
-    echo "prompt" > "$pf"
-    run invoke_ollama "model" "$pf" "$rf" "$ef" "5"
+    echo '{"model":"model","messages":[]}' > "$TEST_TEMP_DIR/request.json"
+    run invoke_ollama "model" "$TEST_TEMP_DIR/request.json" "$rf" "$ef" "5"
     assert_output_contains "generation failed"
 }
 
-@test "validate_ollama_prerequisites returns 1 when pgrep finds no process" {
-    mock_bin "pgrep" "exit 1"
+@test "validate_ollama_prerequisites returns 1 when the API is down" {
+    mock_bin "curl" "exit 1"
     run validate_ollama_prerequisites "$(get_default_ai_model)"
     [ "$status" -eq 1 ]
 }
 
 @test "invoke_ollama handles memory-related errors" {
-    mock_bin "ollama" "echo 'Error: out of memory' >&2
+    mock_bin "curl" "echo 'Error: out of memory' >&2
 exit 1"
+    echo '{"model":"memory-hog-model","messages":[]}' > "$TEST_TEMP_DIR/request.json"
+    local response_file="$TEST_TEMP_DIR/response.txt"
+    local error_file="$TEST_TEMP_DIR/error.txt"
 
-    # Create test files
-    local prompt_file="$(mktemp)"
-    local response_file="$(mktemp)"
-    local error_file="$(mktemp)"
-
-    echo "test prompt" > "$prompt_file"
-
-    run invoke_ollama "memory-hog-model" "$prompt_file" "$response_file" "$error_file" 30
+    run invoke_ollama "memory-hog-model" "$TEST_TEMP_DIR/request.json" "$response_file" "$error_file" 30
     [ "$status" -eq 1 ]
     assert_output_contains "insufficient memory"
-
-    # Cleanup
-    rm -f "$prompt_file" "$response_file" "$error_file"
 }
 
 @test "invoke_ollama respects configured AI_MODEL" {
     export AI_MODEL="configured-model"
+    mkdir -p "$TEST_TEMP_DIR/bin"
+    cat > "$TEST_TEMP_DIR/bin/curl" <<'EOF'
+#!/usr/bin/env bash
+url=""; data=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        */api/*) url="$1" ;;
+        --data-binary) shift; data="${1#@}" ;;
+    esac
+    shift
+done
+case "$url" in
+    */api/chat)
+        if grep -q 'configured-model' "$data"; then
+            printf '{"message":{"role":"assistant","content":"Generated commit message"}}'
+        else
+            exit 1
+        fi
+        ;;
+    *) exit 1 ;;
+esac
+EOF
+    chmod +x "$TEST_TEMP_DIR/bin/curl"
+    export PATH="$TEST_TEMP_DIR/bin:$PATH"
 
-    mock_bin "ollama" "if [ \"\$2\" = \"configured-model\" ]; then
-    echo \"Generated commit message\"
-    exit 0
-else
-    exit 1
-fi"
+    echo '{"model":"configured-model","messages":[]}' > "$TEST_TEMP_DIR/request.json"
+    local response_file="$TEST_TEMP_DIR/response.txt"
+    local error_file="$TEST_TEMP_DIR/error.txt"
 
-    # Create test files
-    local prompt_file="$TEST_TEMP_DIR/prompt_$RANDOM.txt"
-    local response_file="$TEST_TEMP_DIR/response_$RANDOM.txt"
-    local error_file="$TEST_TEMP_DIR/error_$RANDOM.txt"
-
-    echo "test prompt" > "$prompt_file"
-
-    run invoke_ollama "original-model" "$prompt_file" "$response_file" "$error_file" 30
+    run invoke_ollama "original-model" "$TEST_TEMP_DIR/request.json" "$response_file" "$error_file" 30
     [ "$status" -eq 0 ]
-
-    # Cleanup
-    rm -f "$prompt_file" "$response_file" "$error_file"
     unset AI_MODEL
 }

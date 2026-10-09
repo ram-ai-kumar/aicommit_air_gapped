@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# Unit Tests — lib/context-analyzer.sh (6 functions)
+# Unit Tests — lib/context-analyzer.sh
 
 setup() {
     source "$(dirname "$BATS_TEST_FILENAME")/../test_helper.sh"
@@ -10,161 +10,19 @@ teardown() {
     cleanup_test_env
 }
 
-# ─── detect_project_type ─────────────────────────────────────────────────────
+# ─── is_sensitive_path ───────────────────────────────────────────────────────
 
-@test "detect_project_type returns rails/ruby when Gemfile is present" {
-    touch Gemfile
-    run detect_project_type ""
+@test "is_sensitive_path flags env, keys, secrets, credentials" {
+    run is_sensitive_path ".env"
     [ "$status" -eq 0 ]
-    [ "$output" = "rails/ruby" ]
-}
-
-@test "detect_project_type returns node/javascript when package.json is present" {
-    touch package.json
-    run detect_project_type ""
+    run is_sensitive_path ".env.production"
     [ "$status" -eq 0 ]
-    [ "$output" = "node/javascript" ]
-}
-
-@test "detect_project_type returns python when requirements.txt is present" {
-    touch requirements.txt
-    run detect_project_type ""
+    run is_sensitive_path "config/settings.key"
     [ "$status" -eq 0 ]
-    [ "$output" = "python" ]
-}
-
-@test "detect_project_type returns go when go.mod staged" {
-    run detect_project_type "go.mod"
+    run is_sensitive_path "mysecrets.txt"
     [ "$status" -eq 0 ]
-    [ "$output" = "go" ]
-}
-
-@test "detect_project_type returns rust when Cargo.toml staged" {
-    run detect_project_type "Cargo.toml"
-    [ "$status" -eq 0 ]
-    [ "$output" = "rust" ]
-}
-
-@test "detect_project_type returns java when pom.xml staged" {
-    run detect_project_type "pom.xml"
-    [ "$status" -eq 0 ]
-    [ "$output" = "java" ]
-}
-
-@test "detect_project_type returns unknown for generic files" {
-    run detect_project_type "src/main.c"
-    [ "$status" -eq 0 ]
-    [ "$output" = "unknown" ]
-}
-
-@test "detect_project_type prefers Gemfile over package.json" {
-    touch Gemfile package.json
-    run detect_project_type ""
-    [ "$output" = "rails/ruby" ]
-}
-
-@test "detect_project_type returns dotnet when .csproj or .fsproj present" {
-    touch myapp.csproj
-    run detect_project_type ""
-    [ "$status" -eq 0 ]
-    [ "$output" = "dotnet" ]
-    rm myapp.csproj
-
-    touch myapp.fsproj
-    run detect_project_type ""
-    [ "$status" -eq 0 ]
-    [ "$output" = "dotnet" ]
-}
-
-@test "detect_project_type returns rails/ruby when .gemspec present" {
-    touch mygem.gemspec
-    run detect_project_type ""
-    [ "$status" -eq 0 ]
-    [ "$output" = "rails/ruby" ]
-}
-
-@test "detect_project_type produces no glob or nomatch errors in empty directory" {
-    run detect_project_type "generic_file.txt"
-    [ "$status" -eq 0 ]
-    [ "$output" = "unknown" ]
-    refute_output_contains "no matches found"
-    refute_output_contains "csproj"
-    refute_output_contains "gemspec"
-}
-
-# ─── analyze_change_concentration ────────────────────────────────────────────
-
-@test "analyze_change_concentration returns |0|0 for empty input" {
-    run analyze_change_concentration ""
-    [ "$status" -eq 0 ]
-    assert_output_contains "|0|0"
-}
-
-@test "analyze_change_concentration returns 100 percent for single file" {
-    run analyze_change_concentration "src/main.sh"
-    [ "$status" -eq 0 ]
-    assert_output_contains "|100"
-}
-
-@test "analyze_change_concentration identifies top directory" {
-    local files
-    files="$(printf 'lib/core.sh\nlib/utils.sh\nlib/helpers.sh\nsrc/main.sh')"
-    run analyze_change_concentration "$files"
-    [ "$status" -eq 0 ]
-    assert_output_contains "lib"
-}
-
-# ─── detect_new_files_ratio ──────────────────────────────────────────────────
-
-@test "detect_new_files_ratio returns zeros when no staged files" {
-    run detect_new_files_ratio ""
-    [ "$status" -eq 0 ]
-    [ "$output" = "0|0|0" ]
-}
-
-@test "detect_new_files_ratio detects newly added file" {
-    echo "content" > new_file.sh
-    git add new_file.sh
-    local staged
-    staged=$(git diff --staged --name-only)
-    run detect_new_files_ratio "$staged"
-    [ "$status" -eq 0 ]
-    # Format: new|total|percent — with 1 new file, should contain "1|"
-    assert_output_contains "1|"
-}
-
-# ─── detect_upgrade_pattern ──────────────────────────────────────────────────
-
-@test "detect_upgrade_pattern returns dependency_upgrade for dep+lockfile" {
-    local files
-    files="$(printf 'package.json\npackage-lock.json')"
-    run detect_upgrade_pattern "$files"
-    [ "$status" -eq 0 ]
-    [ "$output" = "dependency_upgrade" ]
-}
-
-@test "detect_upgrade_pattern returns migration for db/migrate path" {
-    local files
-    files="db/migrate/001_create_users.rb"
-    run detect_upgrade_pattern "$files"
-    [ "$status" -eq 0 ]
-    [ "$output" = "migration" ]
-}
-
-@test "detect_upgrade_pattern returns none for pure source changes" {
-    local files
-    files="$(printf 'src/main.sh\nlib/core.sh')"
-    run detect_upgrade_pattern "$files"
-    [ "$status" -eq 0 ]
-    [ "$output" = "none" ]
-}
-
-@test "detect_upgrade_pattern returns framework_upgrade for dep+config changes" {
-    local files
-    files="$(printf 'package.json\nconfig/app.yml')"
-    run detect_upgrade_pattern "$files"
-    [ "$status" -eq 0 ]
-    [ "$output" = "framework_upgrade" ]
+    run is_sensitive_path "src/app.js"
+    [ "$status" -eq 1 ]
 }
 
 # ─── categorize_staged_files ─────────────────────────────────────────────────
@@ -229,40 +87,7 @@ teardown() {
     assert_output_contains "FILE CATEGORIES"
 }
 
-# ─── build_enhanced_context ──────────────────────────────────────────────────
-
-@test "build_enhanced_context returns ENHANCED CONTEXT header" {
-    echo "content" > app.js
-    git add app.js
-    local staged changes
-    staged=$(git diff --staged --name-only)
-    changes=$(git diff --staged)
-    run build_enhanced_context "$staged" "$changes"
-    [ "$status" -eq 0 ]
-    assert_output_contains "ENHANCED CONTEXT"
-}
-
-@test "build_enhanced_context includes Project Type line" {
-    echo "content" > app.js
-    git add app.js
-    local staged changes
-    staged=$(git diff --staged --name-only)
-    changes=$(git diff --staged)
-    run build_enhanced_context "$staged" "$changes"
-    assert_output_contains "Project Type"
-}
-
-@test "build_enhanced_context includes Focus Directory line" {
-    echo "content" > app.js
-    git add app.js
-    local staged changes
-    staged=$(git diff --staged --name-only)
-    changes=$(git diff --staged)
-    run build_enhanced_context "$staged" "$changes"
-    assert_output_contains "Focus Directory"
-}
-
-# ─── Scope Inference and Grouping ─────────────────────────────────────────────
+# ─── infer_file_scope ─────────────────────────────────────────────────────────
 
 @test "infer_file_scope identifies config files" {
     run infer_file_scope "eslint.config.js"
@@ -285,24 +110,6 @@ teardown() {
     [ "$output" = "seo" ]
 }
 
-@test "group_staged_files_by_scope clusters files into distinct scopes" {
-    local files
-    files="$(printf 'eslint.config.js\npnpm-workspace.yaml\nscripts/validate-html.js\nscripts/validate-markdown.js\nsrc/components/Schema.astro\npublic/.well-known/acme-challenge/sample')"
-    run group_staged_files_by_scope "$files"
-    [ "$status" -eq 0 ]
-    assert_output_contains $'config\teslint.config.js\tpnpm-workspace.yaml'
-    assert_output_contains $'scripts\tscripts/validate-html.js\tscripts/validate-markdown.js'
-    assert_output_contains $'seo\tsrc/components/Schema.astro\tpublic/.well-known/acme-challenge/sample'
-}
-
-@test "count_staged_scopes counts distinct scopes correctly" {
-    local files
-    files="$(printf 'eslint.config.js\npnpm-workspace.yaml\nscripts/validate-html.js\nscripts/validate-markdown.js\nsrc/components/Schema.astro')"
-    run count_staged_scopes "$files"
-    [ "$status" -eq 0 ]
-    [ "$output" -eq 3 ]
-}
-
 @test "infer_file_scope identifies core, prompt, and test scopes" {
     run infer_file_scope "aicommit.sh"
     [ "$output" = "core" ]
@@ -314,100 +121,87 @@ teardown() {
     [ "$output" = "test" ]
 }
 
-@test "group_staged_files_by_scope correctly groups 8 standard changes into 3 scopes" {
-    local files
-    files="$(printf 'aicommit.sh\nlib/context-analyzer.sh\nlib/core.sh\nlib/output-formatter.sh\ntemplates/prompt.txt\ntest/unit/test_context_analyzer.bats\ntest/unit/test_core.bats\ntest/unit/test_output_formatter.bats')"
-    run group_staged_files_by_scope "$files"
-    [ "$status" -eq 0 ]
-    assert_output_contains $'core\taicommit.sh\tlib/context-analyzer.sh\tlib/core.sh\tlib/output-formatter.sh'
-    assert_output_contains $'prompt\ttemplates/prompt.txt'
-    assert_output_contains $'test\ttest/unit/test_context_analyzer.bats\ttest/unit/test_core.bats\ttest/unit/test_output_formatter.bats'
+# ─── infer_logical_file_context (generic, project-agnostic) ──────────────────
 
-    run count_staged_scopes "$files"
-    [ "$status" -eq 0 ]
-    [ "$output" -eq 3 ]
-}
-
-@test "group_staged_files_logically clusters related multi-directory files into feature contexts" {
-    local files
-    files="$(printf 'config/initializers/apartment.rb\ntest/integration/tenant_switching_test.rb\ntest/support/database_cleaner_apartment.rb\nconfig/initializers/devise.rb\ntest/integration/google_oauth_test.rb\napp/views/shared/nav/_user_menu.html.erb\napp/models/product.rb\napp/models/spare.rb\nAGENTS.md\ndocs/plans/index.md')"
-    run group_staged_files_logically "$files"
-    [ "$status" -eq 0 ]
-    assert_output_contains $'apartment multi-tenancy config & tests\tconfig/initializers/apartment.rb\ttest/integration/tenant_switching_test.rb\ttest/support/database_cleaner_apartment.rb'
-    assert_output_contains $'google oauth & devise authentication\tconfig/initializers/devise.rb\ttest/integration/google_oauth_test.rb\tapp/views/shared/nav/_user_menu.html.erb'
-    assert_output_contains $'product & spare catalog\tapp/models/product.rb\tapp/models/spare.rb'
-    assert_output_contains $'documentation & plans\tAGENTS.md\tdocs/plans/index.md'
-}
-
-@test "validate_and_reconcile_contexts extracts contexts and accounts for all staged files" {
-    local staged="app/models/product.rb\napp/models/spare.rb\nconfig/initializers/devise.rb\nmissed_file.txt"
-    local raw="<think>Grouping changes logically...</think>
-@@@
-product models | app/models/product.rb, app/models/spare.rb
-auth config | config/initializers/devise.rb, hallucinated_file.rb
-@@@"
-    run validate_and_reconcile_contexts "$raw" "$staged"
-    [ "$status" -eq 0 ]
-    assert_output_contains $'product models\tapp/models/product.rb\tapp/models/spare.rb'
-    assert_output_contains $'auth config\tconfig/initializers/devise.rb'
-    assert_output_contains $'additional changes\tmissed_file.txt'
-    refute_output_contains "hallucinated_file.rb"
-}
-
-@test "validate_and_reconcile_contexts rejects malformed scope names like joined_files=... and recovers files" {
-    local staged="aicommit.sh\nconfig/defaults.sh\nlib/backends.sh"
-    local raw="@@@
-joined_files=aicommit.sh,config/defaults.sh | aicommit.sh, config/defaults.sh
-core functionality | lib/backends.sh
-@@@"
-    run validate_and_reconcile_contexts "$raw" "$staged"
-    [ "$status" -eq 0 ]
-    refute_output_contains "joined_files"
-    assert_output_contains $'core functionality\tlib/backends.sh'
-    assert_output_contains $'additional changes\taicommit.sh\tconfig/defaults.sh'
-}
-
-# ─── infer_logical_file_context & grouping heuristics ────────────────────────
-
-@test "infer_logical_file_context identifies multi-tenancy, auth, docs, ci, and models" {
-    run infer_logical_file_context "config/initializers/apartment.rb"
-    [ "$output" = "apartment multi-tenancy config & tests" ]
-
-    run infer_logical_file_context "app/services/oauth_service.rb"
-    [ "$output" = "google oauth & devise authentication" ]
-
-    run infer_logical_file_context "app/models/product.rb"
-    [ "$output" = "product & spare catalog" ]
-
-    run infer_logical_file_context "app/views/layouts/application.html.erb"
-    [ "$output" = "navigation UI updates" ]
-
-    run infer_logical_file_context "db/schema.rb"
-    [ "$output" = "database schema & seeds" ]
-
-    run infer_logical_file_context "docs/index.md"
-    [ "$output" = "documentation & plans" ]
-
+@test "infer_logical_file_context maps generic categories" {
+    run infer_logical_file_context "test/unit/test_core.bats"
+    [ "$output" = "test" ]
+    run infer_logical_file_context "README.md"
+    [ "$output" = "docs" ]
     run infer_logical_file_context ".github/workflows/ci.yml"
-    [ "$output" = "infrastructure & container deployment" ]
-
-    run infer_logical_file_context "scripts/deploy.sh"
-    [ "$output" = "scripts" ]
-
-    run infer_logical_file_context "package.json"
-    [ "$output" = "config" ]
-
+    [ "$output" = "ci" ]
+    run infer_logical_file_context "db/migrate/001_init.sql"
+    [ "$output" = "db" ]
     run infer_logical_file_context "lib/core.sh"
     [ "$output" = "core" ]
+    run infer_logical_file_context "scripts/deploy.sh"
+    [ "$output" = "scripts" ]
 }
 
-@test "group_staged_files_heuristically groups files by logical context" {
-    local files="app/models/product.rb"$'\n'"app/models/spare.rb"$'\n'"README.md"
-    run group_staged_files_heuristically "$files"
+# ─── cluster_staged_files_deterministic ──────────────────────────────────────
+
+@test "cluster_staged_files_deterministic pairs test files with subjects by stem" {
+    local files
+    files="$(printf 'lib/core.sh\ntest/unit/test_core.bats\nREADME.md\n.github/workflows/test.yml')"
+    run cluster_staged_files_deterministic "$files"
     [ "$status" -eq 0 ]
-    assert_output_contains $'product & spare catalog\tapp/models/product.rb\tapp/models/spare.rb'
-    assert_output_contains $'documentation & plans\tREADME.md'
+    # core+test paired; docs and ci remain their own components
+    assert_output_contains $'1\t.github/workflows/test.yml'
+    assert_output_contains $'2\tREADME.md'
+    assert_output_contains $'3\tlib/core.sh\ttest/unit/test_core.bats'
+    [ "$(printf '%s' "$output" | count_lines)" -eq 3 ]
 }
+
+@test "cluster_staged_files_deterministic binds same-dir singletons together" {
+    local files
+    files="$(printf 'app/models/product.rb\napp/models/spare.rb\nREADME.md')"
+    run cluster_staged_files_deterministic "$files"
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s' "$output" | count_lines)" -eq 2 ]
+    assert_output_contains $'app/models/product.rb\tapp/models/spare.rb'
+}
+
+@test "cluster_staged_files_deterministic joins files sharing a changed symbol" {
+    local files diff_file
+    files="$(printf 'lib/api.sh\nscripts/client.sh\ntools/unrelated.sh')"
+    diff_file="$TEST_TEMP_DIR/diff.txt"
+    cat > "$diff_file" <<'EOF'
+diff --git a/lib/api.sh b/lib/api.sh
++authenticate_session() {
++    check_token
++}
+diff --git a/scripts/client.sh b/scripts/client.sh
++    authenticate_session --refresh
+diff --git a/tools/unrelated.sh b/tools/unrelated.sh
++    echo hi
+EOF
+    run cluster_staged_files_deterministic "$files" "$diff_file"
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s' "$output" | count_lines)" -eq 2 ]
+    assert_output_contains $'lib/api.sh\tscripts/client.sh'
+}
+
+@test "cluster_staged_files_deterministic joins co-changed file pairs" {
+    local files cochange
+    files="$(printf 'src/auth.js\nsrc/session.js\nother/random.js')"
+    cochange="$TEST_TEMP_DIR/COCHANGE"
+    printf 'deadbeefsha\nsrc/auth.js\tsrc/session.js\t5\n' > "$cochange"
+    run cluster_staged_files_deterministic "$files" "" "$cochange"
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s' "$output" | count_lines)" -eq 2 ]
+    assert_output_contains $'src/auth.js\tsrc/session.js'
+}
+
+@test "cluster_staged_files_deterministic is byte-identical on repeated runs" {
+    local files
+    files="$(printf 'a/b/one.js\nc/d/two.js\ne/f/three.js\na/b/four.js')"
+    local r1 r2
+    r1=$(cluster_staged_files_deterministic "$files")
+    r2=$(cluster_staged_files_deterministic "$files")
+    [ "$r1" = "$r2" ]
+}
+
+# ─── group_staged_files_* (deterministic naming) ─────────────────────────────
 
 @test "group_staged_files_heuristically returns empty for empty input" {
     run group_staged_files_heuristically ""
@@ -415,23 +209,121 @@ core functionality | lib/backends.sh
     [ "$output" = "" ]
 }
 
-@test "cluster_staged_files_with_ai returns 1 when prompt template missing" {
-    export AI_GROUPING_PROMPT_FILE="/nonexistent/template.txt"
-    run cluster_staged_files_with_ai "app.js" "" ""
+@test "group_staged_files_heuristically names deterministic components" {
+    local files
+    files="$(printf 'lib/core.sh\ntest/unit/test_core.bats\nREADME.md\n.github/workflows/test.yml')"
+    run group_staged_files_heuristically "$files"
+    [ "$status" -eq 0 ]
+    assert_output_contains $'ci\t.github/workflows/test.yml'
+    assert_output_contains $'docs\tREADME.md'
+    assert_output_contains $'core\tlib/core.sh\ttest/unit/test_core.bats'
+}
+
+@test "group_staged_files_by_scope clusters disjoint files into named groups" {
+    local files
+    files="$(printf 'eslint.config.js\npnpm-workspace.yaml\nscripts/validate-html.js\nscripts/validate-markdown.js\nsrc/components/Schema.astro\npublic/.well-known/acme-challenge/sample')"
+    run group_staged_files_by_scope "$files"
+    [ "$status" -eq 0 ]
+    # scripts/* pair shares a leaf dir; the rest are singletons
+    assert_output_contains $'scripts\tscripts/validate-html.js\tscripts/validate-markdown.js'
+    assert_output_contains $'config\teslint.config.js'
+    assert_output_contains $'seo\tpublic/.well-known/acme-challenge/sample'
+}
+
+@test "group_staged_files_logically pairs model tests with subjects" {
+    local files
+    files="$(printf 'config/initializers/apartment.rb\ntest/integration/tenant_switching_test.rb\napp/models/product.rb\napp/models/spare.rb\ndocs/plans/index.md')"
+    run group_staged_files_logically "$files"
+    [ "$status" -eq 0 ]
+    # app/models pair joins via leaf dir; the rest stay separate
+    assert_output_contains $'app/models/product.rb\tapp/models/spare.rb'
+    assert_output_contains $'docs/plans/index.md'
+}
+
+@test "group_staged_files_logically returns a single named group for one file" {
+    run group_staged_files_logically "README.md"
+    [ "$status" -eq 0 ]
+    assert_output_contains $'docs\tREADME.md'
+}
+
+@test "group_staged_files_logically covers every staged file exactly once" {
+    local files
+    files="$(printf 'a/one.js\nb/two.js\nc/three.md\nd/four.yml')"
+    local groups
+    groups=$(group_staged_files_logically "$files")
+    local seen
+    seen=$(printf '%s\n' "$groups" | cut -f2- | tr '\t' '\n' | sort)
+    [ "$seen" = "$(printf '%s\n' "$files" | sort)" ]
+}
+
+# ─── reconcile_grouping_json ─────────────────────────────────────────────────
+
+@test "reconcile_grouping_json assigns every staged file exactly once" {
+    local staged="app/models/product.rb\napp/models/spare.rb\nconfig/initializers/devise.rb\nmissed_file.txt"
+    local comp="1\tapp/models/product.rb\tapp/models/spare.rb
+2\tconfig/initializers/devise.rb
+3\tmissed_file.txt"
+    local raw='{"groups":[
+      {"name":"product models","type":"feat","files":["app/models/product.rb","app/models/spare.rb","hallucinated_file.rb"]},
+      {"name":"auth config","type":"feat","files":["config/initializers/devise.rb"]}]}'
+    run reconcile_grouping_json "$raw" "$(printf '%b' "$staged")" "$comp"
+    [ "$status" -eq 0 ]
+    assert_output_contains $'product models\tapp/models/product.rb\tapp/models/spare.rb'
+    assert_output_contains $'auth config\tconfig/initializers/devise.rb'
+    refute_output_contains "hallucinated_file.rb"
+    # the dropped file is re-attached to its deterministic component
+    assert_output_contains "missed_file.txt"
+}
+
+@test "reconcile_grouping_json rejects non-JSON output" {
+    run reconcile_grouping_json "garbage @@@ ui | app.js @@@" "app.js" "1\tapp.js"
     [ "$status" -eq 1 ]
 }
 
-@test "cluster_staged_files_with_ai clusters with mock LLM" {
-    local template="$AICOMMIT_DIR/templates/context-grouping-prompt.txt"
-    mkdir -p "$(dirname "$template")"
-    echo 'Grouping prompt: ${CHANGES_CONTEXT}' > "$template"
-    export AI_GROUPING_PROMPT_FILE="$template"
+# ─── name_groups_with_ai ─────────────────────────────────────────────────────
 
-    mock_bin "ollama" "
-        printf '@@@\\nui | app.js\\n@@@\\n'
-    "
-    run cluster_staged_files_with_ai "app.js" "1	0	app.js" "console.log('test')"
-    [ "$status" -eq 0 ]
-    assert_output_contains "ui"
+@test "name_groups_with_ai returns 1 when prompt template missing" {
+    export AI_GROUPING_PROMPT_FILE="/nonexistent/template.txt"
+    run name_groups_with_ai "1\tapp.js" "app.js"
+    [ "$status" -eq 1 ]
 }
 
+@test "name_groups_with_ai calls the API with schema-constrained request" {
+    export AI_ENABLE_LLM_GROUPING="true"
+    export AI_MODEL="test-model"
+    mock_ollama_api '{"groups":[{"name":"auth flow","type":"feat","files":["app.js"]}]}'
+    run name_groups_with_ai "1\tapp.js" "app.js"
+    [ "$status" -eq 0 ]
+    assert_output_contains "auth flow"
+}
+
+# ─── count_staged_scopes ─────────────────────────────────────────────────────
+
+@test "count_staged_scopes counts distinct components" {
+    local files
+    files="$(printf 'eslint.config.js\nscripts/validate-html.js\nscripts/validate-markdown.js\nsrc/components/Schema.astro')"
+    run count_staged_scopes "$files"
+    [ "$status" -eq 0 ]
+    # scripts pair joins; eslint + Schema are singletons → 3
+    [ "$output" -eq 3 ]
+}
+
+# ─── build_cochange_cache ────────────────────────────────────────────────────
+
+@test "build_cochange_cache emits pairs committed together at least twice" {
+    mkdir -p src
+    echo a > src/a.js
+    echo b > src/b.js
+    git add src/a.js src/b.js
+    git commit -qm "first" || true
+    echo a2 > src/a.js
+    echo b2 > src/b.js
+    git add src/a.js src/b.js
+    git commit -qm "second" || true
+    local state_dir
+    state_dir=$(get_aicommit_state_dir)
+    run build_cochange_cache "$state_dir"
+    [ "$status" -eq 0 ]
+    grep -q "src/a.js" "${state_dir}/COCHANGE"
+    awk -F'\t' '$1=="src/a.js" && $2=="src/b.js" && $3>=2 {found=1} END{exit !found}' "${state_dir}/COCHANGE"
+}

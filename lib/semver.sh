@@ -801,11 +801,12 @@ ai_evaluate_semver() {
     local changes_input="${2:-}"
     local action_label="${3:-Calculating SemVer bump}"
 
-    # Verify LLM prerequisites
-    if ! command -v invoke_llm >/dev/null 2>&1; then
+    # Verify LLM prerequisites — the API is the source of truth (the installed
+    # ollama CLI can lag the server, so pgrep/CLI checks are unreliable).
+    if ! command -v invoke_llm >/dev/null 2>&1 || ! command -v _ollama_curl >/dev/null 2>&1; then
         return 1
     fi
-    if ! pgrep -f "ollama" >/dev/null 2>&1; then
+    if ! _ollama_curl "$(_ollama_host)/api/version" >/dev/null 2>&1; then
         return 1
     fi
 
@@ -816,8 +817,7 @@ ai_evaluate_semver() {
     if command -v get_aicommit_tmp_dir >/dev/null 2>&1; then
         tmp_dir=$(get_aicommit_tmp_dir)
     else
-        tmp_dir="/tmp/.aicommit_semver_$$"
-        mkdir -m 700 -p "$tmp_dir" 2>/dev/null || true
+        tmp_dir=$(mktemp -d "${TMPDIR:-/tmp}/aicommit.XXXXXXXX" 2>/dev/null) || return 1
     fi
 
     local changes_file="${tmp_dir}/SEMVER_CHANGES"
@@ -876,7 +876,11 @@ $(cat "$changes_file" 2>/dev/null | head -n 150)
 EOF
     fi
 
-    if ! invoke_llm "$model" "$prompt_file" "$response_file" "$error_file" "$timeout_secs" "$action_label"; then
+    local request_file="${tmp_dir}/SEMVER_REQUEST.json"
+    if ! build_ollama_request "$request_file" "$model" "$prompt_file"; then
+        return 1
+    fi
+    if ! invoke_llm "$model" "$request_file" "$response_file" "$error_file" "$timeout_secs" "$action_label"; then
         return 1
     fi
 
@@ -1150,12 +1154,12 @@ EOF
 }
 
 # Revert staged and modified version files and remove untracked changelog on commit failure
-# Args: $1=files (newline- or space-separated list of file paths)
+# Args: $1=files (newline-separated list of file paths)
 restore_semver_updates() {
     local files="$1"
     [ -z "$files" ] && return 0
     local f
-    for f in $files; do
+    while IFS= read -r f; do
         [ -z "$f" ] && continue
         if git rev-parse --verify "HEAD:$f" >/dev/null 2>&1; then
             agit restore --staged --worktree -- "$f" 2>/dev/null || git restore --staged --worktree -- "$f" 2>/dev/null || true
@@ -1163,7 +1167,7 @@ restore_semver_updates() {
             agit rm -f --cached -- "$f" 2>/dev/null || git rm -f --cached -- "$f" 2>/dev/null || true
             rm -f "$f" 2>/dev/null || true
         fi
-    done
+    done <<< "$files"
 }
 
 # Check if working tree has a higher version than the evaluated next version.

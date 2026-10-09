@@ -323,3 +323,59 @@ teardown() {
     assert_output_contains "Updated version in: package.json, Cargo.toml"
 }
 
+# ─── format_group_files_compact & display_resolved_atomic_groups ──────────────
+
+@test "format_group_files_compact formats single file directly" {
+    run format_group_files_compact "PLAN.md"
+    [ "$status" -eq 0 ]
+    [ "$output" = "PLAN.md" ]
+}
+
+@test "format_group_files_compact formats multiple files of same type as +N" {
+    local files=("PLAN.md" "docs/spec.md" "docs/guide.md" "notes.md")
+    run format_group_files_compact "${files[@]}"
+    [ "$status" -eq 0 ]
+    [ "$output" = "PLAN.md +3 markdown files" ]
+
+    local two_files=("aicommit.sh" "lib/core.sh")
+    run format_group_files_compact "${two_files[@]}"
+    [ "$status" -eq 0 ]
+    [ "$output" = "aicommit.sh +1 shell script" ]
+}
+
+@test "format_group_files_compact formats mixed file categories as one row per category" {
+    local files=(
+        ".github/workflows/test.yml"
+        "PLAN.md"
+        "docs/api.md"
+        "aicommit.sh"
+        "lib/core.sh"
+        "lib/semver.sh"
+        "test/contexts/compliance.bats"
+        "test/contexts/edge.bats"
+    )
+    run format_group_files_compact "${files[@]}"
+    [ "$status" -eq 0 ]
+    assert_output_contains ".github/workflows/test.yml"
+    assert_output_contains "PLAN.md +1 markdown file"
+    assert_output_contains "aicommit.sh +2 shell scripts"
+    assert_output_contains "test/contexts/compliance.bats +1 test file"
+}
+
+@test "display_resolved_atomic_groups formats single file scope inline" {
+    local groups=$'core\t.env.production'
+    run display_resolved_atomic_groups "$groups"
+    [ "$status" -eq 0 ]
+    [ "$output" = "  • core -> .env.production" ]
+}
+
+@test "display_resolved_atomic_groups formats multi-file scope as bullet list" {
+    local groups=$'ci\t.github/workflows/test.yml\tPLAN.md\tdocs/api.md\taicommit.sh\tlib/core.sh\tlib/semver.sh'
+    run display_resolved_atomic_groups "$groups"
+    [ "$status" -eq 0 ]
+    assert_output_contains "  • ci:"
+    assert_output_contains "      - .github/workflows/test.yml"
+    assert_output_contains "      - PLAN.md +1 markdown file"
+    assert_output_contains "      - aicommit.sh +2 shell scripts"
+}
+

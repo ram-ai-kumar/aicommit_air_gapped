@@ -18,10 +18,10 @@ teardown() {
     [ -d "$d" ]
 }
 
-@test "get_aicommit_tmp_dir returns a path under /tmp/.aicommit" {
+@test "get_aicommit_tmp_dir returns a path under .git/aicommit/runs" {
     local d
     d=$(get_aicommit_tmp_dir)
-    [[ "$d" == /tmp/.aicommit/* ]]
+    [[ "$d" == "$(git rev-parse --absolute-git-dir)/aicommit/runs/"* ]]
 }
 
 @test "get_aicommit_tmp_dir sets directory permissions to 700" {
@@ -36,6 +36,100 @@ teardown() {
     d1=$(get_aicommit_tmp_dir)
     d2=$(get_aicommit_tmp_dir)
     [ "$d1" = "$d2" ]
+}
+
+# ─── init_aicommit_run / dead-run purge / secure-dir checks ──────────────────
+
+@test "init_aicommit_run creates a unique run dir under .git/aicommit/runs" {
+    init_aicommit_run
+    [ -n "$_AICOMMIT_RUN_DIR" ]
+    [ -d "$_AICOMMIT_RUN_DIR" ]
+    [[ "$_AICOMMIT_RUN_DIR" == "$(git rev-parse --absolute-git-dir)/aicommit/runs/"* ]]
+}
+
+@test "init_aicommit_run purges run dirs owned by dead PIDs" {
+    init_aicommit_run
+    local base
+    base=$(get_aicommit_base_dir)
+    mkdir -p "${base}/runs/99999999.dead"
+    init_aicommit_run
+    [ ! -d "${base}/runs/99999999.dead" ]
+    [ -d "$_AICOMMIT_RUN_DIR" ]
+}
+
+@test "init_aicommit_run leaves run dirs owned by live PIDs alone" {
+    init_aicommit_run
+    local base
+    base=$(get_aicommit_base_dir)
+    sleep 60 &
+    local sleeper=$!
+    mkdir -p "${base}/runs/${sleeper}.live"
+    init_aicommit_run
+    [ -d "${base}/runs/${sleeper}.live" ]
+    kill "$sleeper" 2>/dev/null || true
+    wait "$sleeper" 2>/dev/null || true
+}
+
+@test "init_aicommit_run succeeds in zsh with empty runs directory" {
+    which zsh >/dev/null 2>&1 || skip "zsh not installed"
+    run zsh -c "
+        export AICOMMIT_DIR='$AICOMMIT_DIR'
+        source '$AICOMMIT_DIR/aicommit.sh'
+        init_aicommit_run
+    "
+    [ "$status" -eq 0 ]
+}
+
+@test "init_aicommit_run aborts on insecure base directory" {
+    local base
+    base=$(get_aicommit_base_dir)
+    mkdir -m 700 -p "$base"
+    chmod 755 "$base"
+    run init_aicommit_run
+    [ "$status" -eq 1 ]
+    assert_output_contains "insecure"
+}
+
+@test "init_aicommit_run aborts on symlinked base directory" {
+    local base
+    base="$(git rev-parse --absolute-git-dir)/aicommit"
+    rm -rf "$base"
+    mkdir -p "$TEST_TEMP_DIR/evil"
+    ln -s "$TEST_TEMP_DIR/evil" "$base"
+    run init_aicommit_run
+    [ "$status" -eq 1 ]
+}
+
+# ─── aicommit_acquire_lock / aicommit_release_lock ───────────────────────────
+
+@test "aicommit_acquire_lock serializes and releases the commit lock" {
+    init_aicommit_run
+    aicommit_acquire_lock
+    [ -n "$_AICOMMIT_LOCK_DIR" ]
+    [ -d "$_AICOMMIT_LOCK_DIR" ]
+    aicommit_release_lock
+    [ -z "$_AICOMMIT_LOCK_DIR" ]
+    [ ! -d "$(get_aicommit_base_dir)/lock" ]
+}
+
+@test "aicommit_acquire_lock reclaims a lock owned by a dead PID" {
+    init_aicommit_run
+    local base
+    base=$(get_aicommit_base_dir)
+    mkdir -p "${base}/lock"
+    printf '99999999' > "${base}/lock/pid"
+    aicommit_acquire_lock
+    [ -n "$_AICOMMIT_LOCK_DIR" ]
+    aicommit_release_lock
+}
+
+# ─── state dir ───────────────────────────────────────────────────────────────
+
+@test "get_aicommit_state_dir returns .git/aicommit/state" {
+    local d
+    d=$(get_aicommit_state_dir)
+    [ -d "$d" ]
+    [[ "$d" == "$(git rev-parse --absolute-git-dir)/aicommit/state" ]]
 }
 
 # ─── build_file_context ──────────────────────────────────────────────────────
@@ -185,35 +279,37 @@ teardown() {
 # ─── cleanup_aicommit_ephemeral ──────────────────────────────────────────────
 
 @test "cleanup_aicommit_ephemeral removes CHANGES_CONTEXT" {
-    local d
-    d=$(get_aicommit_tmp_dir)
+    get_aicommit_tmp_dir > /dev/null
+    local d="$_AICOMMIT_RUN_DIR"
     touch "${d}/CHANGES_CONTEXT"
     cleanup_aicommit_ephemeral
     [ ! -f "${d}/CHANGES_CONTEXT" ]
 }
 
 @test "cleanup_aicommit_ephemeral removes FILE_CONTEXT" {
-    local d
-    d=$(get_aicommit_tmp_dir)
+    get_aicommit_tmp_dir > /dev/null
+    local d="$_AICOMMIT_RUN_DIR"
     touch "${d}/FILE_CONTEXT"
     cleanup_aicommit_ephemeral
     [ ! -f "${d}/FILE_CONTEXT" ]
 }
 
 @test "cleanup_aicommit_ephemeral removes FILE_COUNT" {
-    local d
-    d=$(get_aicommit_tmp_dir)
+    get_aicommit_tmp_dir > /dev/null
+    local d="$_AICOMMIT_RUN_DIR"
     touch "${d}/FILE_COUNT"
     cleanup_aicommit_ephemeral
     [ ! -f "${d}/FILE_COUNT" ]
 }
 
-@test "cleanup_aicommit_ephemeral preserves FULL_PROMPT" {
-    local d
-    d=$(get_aicommit_tmp_dir)
-    touch "${d}/FULL_PROMPT" "${d}/CHANGES_CONTEXT"
+@test "cleanup_aicommit_ephemeral removes the whole run dir but preserves state files" {
+    get_aicommit_tmp_dir > /dev/null
+    local d="$_AICOMMIT_RUN_DIR" s
+    s=$(get_aicommit_state_dir)
+    touch "${s}/FULL_PROMPT" "${d}/CHANGES_CONTEXT"
     cleanup_aicommit_ephemeral
-    [ -f "${d}/FULL_PROMPT" ]
+    [ ! -d "$d" ]
+    [ -f "${s}/FULL_PROMPT" ]
 }
 
 # ─── generate_commit_message ─────────────────────────────────────────────────
@@ -250,20 +346,11 @@ teardown() {
     refute_output_contains "@@@"
 }
 
-@test "generate_commit_message strips Thinking Process without open tag and extracts commit" {
-    echo "console.log('hello');" > app.js
-    git add app.js
-    local changes staged numstat
-    changes=$(git diff --staged)
-    staged=$(git diff --staged --name-only)
-    numstat=$(git diff --staged --numstat)
-    build_ai_context "$changes" "$staged" "$numstat"
-
-    # Mock the LLM call with the exact scenario reported by the user:
-    # Thinking Process without open <think> tag, ending in </think>, with docs: appearing twice
-    invoke_llm() {
-        local response_file="$3"
-        cat << 'EOF' > "$response_file"
+@test "_assemble_commit_message strips Thinking Process without open tag and extracts commit" {
+    # Exact scenario reported by the user: Thinking Process without open
+    # <think> tag, ending in </think>, with docs: appearing twice
+    local rf="$TEST_TEMP_DIR/response.txt"
+    cat << 'EOF' > "$rf"
 Thinking Process:
 1.  Analyze the Request:
     *   Input: A log of recent git commits and a prompt indicating "Stage 12".
@@ -279,11 +366,7 @@ docs: create improvements plan for identified optimizations
 - Implements Stage 12 deliverable: docs/IMPROVEMENTS_PLAN.md
 - Consolidates findings
 EOF
-        return 0
-    }
-    export -f invoke_llm
-
-    run generate_commit_message
+    run _assemble_commit_message "$rf" "$TEST_TEMP_DIR"
     [ "$status" -eq 0 ]
     assert_output_contains "docs: create improvements plan for identified optimizations"
     assert_output_contains "- Implements Stage 12 deliverable: docs/IMPROVEMENTS_PLAN.md"
@@ -358,22 +441,22 @@ EOF
 
 # ─── cleanup_aicommit_all ────────────────────────────────────────────────────
 
-@test "cleanup_aicommit_all removes FULL_PROMPT" {
-    local d
-    d=$(get_aicommit_tmp_dir)
-    touch "${d}/FULL_PROMPT"
+@test "cleanup_aicommit_all removes FULL_PROMPT from state dir" {
+    local s
+    s=$(get_aicommit_state_dir)
+    touch "${s}/FULL_PROMPT"
     cleanup_aicommit_all
-    [ ! -f "${d}/FULL_PROMPT" ]
+    [ ! -f "${s}/FULL_PROMPT" ]
 }
 
 @test "cleanup_aicommit_all removes all ephemeral files" {
-    local d
-    d=$(get_aicommit_tmp_dir)
-    touch "${d}/CHANGES_CONTEXT" "${d}/FILE_CONTEXT" "${d}/FILE_COUNT" "${d}/FULL_PROMPT"
+    get_aicommit_tmp_dir > /dev/null
+    local d="$_AICOMMIT_RUN_DIR" s
+    s=$(get_aicommit_state_dir)
+    touch "${d}/CHANGES_CONTEXT" "${d}/FILE_CONTEXT" "${d}/FILE_COUNT" "${s}/FULL_PROMPT"
     cleanup_aicommit_all
-    [ ! -f "${d}/CHANGES_CONTEXT" ]
-    [ ! -f "${d}/FILE_CONTEXT" ]
-    [ ! -f "${d}/FULL_PROMPT" ]
+    [ ! -d "$d" ]
+    [ ! -f "${s}/FULL_PROMPT" ]
 }
 
 # ─── Stutter Cleanup & Scope Retention ───────────────────────────────────────
@@ -460,6 +543,229 @@ unit test behavior"
     ! echo "$result" | grep -qE '^confirmation$'
 }
 
+
+# ─── build_ai_context facts/types/scopes ─────────────────────────────────────
+
+@test "build_ai_context writes FACTS, ALLOWED_TYPES, SCOPE_CANDIDATES" {
+    printf 'def added_function():\n    pass\n' > app.py
+    git add app.py
+    local changes staged numstat
+    changes=$(git diff --staged)
+    staged=$(git diff --staged --name-only)
+    numstat=$(git diff --staged --numstat)
+    build_ai_context "$changes" "$staged" "$numstat"
+    local d
+    d=$(get_aicommit_tmp_dir)
+    [ -f "${d}/FACTS" ]
+    [ -f "${d}/ALLOWED_TYPES" ]
+    [ -f "${d}/SCOPE_CANDIDATES" ]
+    grep -q "=== FACTS ===" "${d}/FACTS"
+    grep -q "Definitions added" "${d}/FACTS"
+    grep -q "added_function" "${d}/FACTS"
+}
+
+@test "build_ai_context writes run files STAGED_DIFF, STAGED_NAMES, NUMSTAT" {
+    echo "x" > app.js
+    git add app.js
+    build_ai_context "$(git diff --staged)" "$(git diff --staged --name-only)" "$(git diff --staged --numstat)"
+    local d
+    d=$(get_aicommit_tmp_dir)
+    [ -s "${d}/STAGED_DIFF" ]
+    [ -s "${d}/STAGED_NAMES" ]
+    [ -s "${d}/NUMSTAT" ]
+}
+
+@test "build_facts detects added and deleted files" {
+    local diff_text
+    diff_text=$'diff --git a/new.txt b/new.txt\nnew file mode 100644\n+content\ndiff --git a/gone.txt b/gone.txt\ndeleted file mode 100644\n-old\n'
+    local result
+    result=$(printf '%s' "$diff_text" | build_facts)
+    echo "$result" | grep -qF "Files added: new.txt"
+    echo "$result" | grep -qF "Files deleted: gone.txt"
+}
+
+@test "infer_allowed_types narrows docs-only change sets" {
+    local result
+    result=$(printf 'README.md\ndocs/guide.md\n' | infer_allowed_types)
+    [ "$result" = "docs" ]
+}
+
+@test "infer_allowed_types narrows test-only change sets" {
+    local result
+    result=$(printf 'test/unit/test_core.bats\ntest/unit/test_other.bats\n' | infer_allowed_types)
+    [ "$result" = "test" ]
+}
+
+@test "infer_allowed_types gives the full enum for mixed changes" {
+    local result
+    result=$(printf 'lib/core.sh\nREADME.md\n' | infer_allowed_types)
+    echo "$result" | grep -qx "feat"
+    echo "$result" | grep -qx "chore"
+}
+
+# ─── validate_commit_grounding ───────────────────────────────────────────────
+
+@test "validate_commit_grounding accepts a grounded message" {
+    echo "x" > app.js
+    git add app.js
+    build_ai_context "$(git diff --staged)" "$(git diff --staged --name-only)" "$(git diff --staged --numstat)"
+    local d
+    d=$(get_aicommit_tmp_dir)
+    run validate_commit_grounding "feat(app): add app.js" "$d"
+    [ "$status" -eq 0 ]
+}
+
+@test "validate_commit_grounding rejects hallucinated file paths" {
+    echo "x" > app.js
+    git add app.js
+    build_ai_context "$(git diff --staged)" "$(git diff --staged --name-only)" "$(git diff --staged --numstat)"
+    local d
+    d=$(get_aicommit_tmp_dir)
+    run validate_commit_grounding "feat: update src/nonexistent.js" "$d"
+    [ "$status" -eq 1 ]
+    assert_output_contains "not in the diff"
+}
+
+@test "validate_commit_grounding rejects a type outside the allowed enum" {
+    echo "x" > README.md
+    git add README.md
+    build_ai_context "$(git diff --staged)" "$(git diff --staged --name-only)" "$(git diff --staged --numstat)"
+    local d
+    d=$(get_aicommit_tmp_dir)
+    run validate_commit_grounding "feat: update docs" "$d"
+    [ "$status" -eq 1 ]
+    assert_output_contains "not allowed"
+}
+
+@test "validate_commit_grounding rejects headers over 72 chars" {
+    echo "x" > app.js
+    git add app.js
+    build_ai_context "$(git diff --staged)" "$(git diff --staged --name-only)" "$(git diff --staged --numstat)"
+    local d
+    d=$(get_aicommit_tmp_dir)
+    run validate_commit_grounding "feat: $(printf 'x%.0s' {1..80})" "$d"
+    [ "$status" -eq 1 ]
+    assert_output_contains "72"
+}
+
+# ─── _commit_msg_from_json_obj / _assemble_commit_message ────────────────────
+
+@test "_commit_msg_from_json_obj assembles header and body" {
+    local obj='{"type":"feat","scope":"auth","breaking":false,"subject":"add oauth login","body":["wire google provider"]}'
+    run _commit_msg_from_json_obj "$obj"
+    [ "$status" -eq 0 ]
+    [ "${lines[0]}" = "feat(auth): add oauth login" ]
+    assert_output_contains "- wire google provider"
+}
+
+@test "_commit_msg_from_json_obj handles scope none and other" {
+    run _commit_msg_from_json_obj '{"type":"chore","scope":"none","breaking":false,"subject":"update deps"}'
+    [ "$output" = "chore: update deps" ]
+    run _commit_msg_from_json_obj '{"type":"fix","scope":"other","scope_other":"Payments API","breaking":true,"subject":"handle timeouts"}'
+    [ "${lines[0]}" = "fix(paymentsapi)!: handle timeouts" ]
+}
+
+@test "_commit_msg_from_json_obj strips embedded conventional prefix" {
+    run _commit_msg_from_json_obj '{"type":"feat","scope":"none","breaking":false,"subject":"feat: add thing"}'
+    [ "$output" = "feat: add thing" ]
+}
+
+@test "_assemble_commit_message parses schema JSON responses" {
+    printf '{"type":"feat","scope":"none","breaking":false,"subject":"add transport"}' > "$TEST_TEMP_DIR/resp.txt"
+    run _assemble_commit_message "$TEST_TEMP_DIR/resp.txt" "$TEST_TEMP_DIR"
+    [ "$output" = "feat: add transport" ]
+}
+
+@test "template_commit_from_facts builds a deterministic fallback" {
+    echo "x" > app.js
+    git add app.js
+    build_ai_context "$(git diff --staged)" "$(git diff --staged --name-only)" "$(git diff --staged --numstat)"
+    local d
+    d=$(get_aicommit_tmp_dir)
+    run template_commit_from_facts "$d"
+    [ "$status" -eq 0 ]
+    assert_output_contains "app.js"
+    verify_conventional_commit "$output"
+}
+
+# ─── generate_commit_message — schema, grounding, cache ─────────────────────
+
+@test "generate_commit_message assembles a schema-conform JSON response" {
+    echo "console.log('hello');" > app.js
+    git add app.js
+    build_ai_context "$(git diff --staged)" "$(git diff --staged --name-only)" "$(git diff --staged --numstat)"
+    invoke_llm() {
+        printf '%s' '{"type":"feat","scope":"app","breaking":false,"subject":"add app.js"}' > "$3"
+        return 0
+    }
+    export -f invoke_llm
+    run generate_commit_message
+    [ "$status" -eq 0 ]
+    [ "$output" = "feat(app): add app.js" ]
+}
+
+@test "generate_commit_message falls back to facts when grounding fails twice" {
+    echo "x" > app.js
+    git add app.js
+    build_ai_context "$(git diff --staged)" "$(git diff --staged --name-only)" "$(git diff --staged --numstat)"
+    invoke_llm() {
+        printf '%s' '{"type":"feat","scope":"none","breaking":false,"subject":"rewrite src/totally-fake.js"}' > "$3"
+        return 0
+    }
+    export -f invoke_llm
+    run generate_commit_message
+    [ "$status" -eq 0 ]
+    # Fallback must be a valid conventional commit grounded in real files
+    verify_conventional_commit "$output"
+    refute_output_contains "totally-fake"
+}
+
+@test "generate_commit_message reuses cached response for identical request" {
+    echo "x" > app.js
+    git add app.js
+    build_ai_context "$(git diff --staged)" "$(git diff --staged --name-only)" "$(git diff --staged --numstat)"
+    echo "0" > "$TEST_TEMP_DIR/llm_count"
+    invoke_llm() {
+        c=$(( $(cat "$TEST_TEMP_DIR/llm_count") + 1 ))
+        echo "$c" > "$TEST_TEMP_DIR/llm_count"
+        printf '%s' '{"type":"feat","scope":"app","breaking":false,"subject":"add app.js"}' > "$3"
+        return 0
+    }
+    export -f invoke_llm
+    generate_commit_message > /dev/null
+    [ "$(cat "$TEST_TEMP_DIR/llm_count")" -eq 1 ]
+    local second
+    second=$(generate_commit_message)
+    [ "$(cat "$TEST_TEMP_DIR/llm_count")" -eq 1 ]
+    [ "$second" = "feat(app): add app.js" ]
+}
+
+@test "regenerate_commit_message bumps the request seed" {
+    echo "x" > app.js
+    git add app.js
+    build_ai_context "$(git diff --staged)" "$(git diff --staged --name-only)" "$(git diff --staged --numstat)"
+    invoke_llm() {
+        cp "$2" "$TEST_TEMP_DIR/req_seen.json"
+        printf '%s' '{"type":"feat","scope":"app","breaking":false,"subject":"add app.js"}' > "$3"
+        return 0
+    }
+    export -f invoke_llm
+    generate_commit_message > /dev/null
+    [ "$(jq '.options.seed' "$TEST_TEMP_DIR/req_seen.json")" = "42" ]
+    regenerate_commit_message > /dev/null
+    [ "$(jq '.options.seed' "$TEST_TEMP_DIR/req_seen.json")" = "43" ]
+}
+
+@test "generate_commit_message writes FULL_PROMPT into the state dir" {
+    echo "x" > app.js
+    git add app.js
+    build_ai_context "$(git diff --staged)" "$(git diff --staged --name-only)" "$(git diff --staged --numstat)"
+    generate_commit_message --dry-run
+    local s
+    s=$(get_aicommit_state_dir)
+    [ -s "${s}/FULL_PROMPT" ]
+    grep -q "USER CONTEXT" "${s}/FULL_PROMPT"
+}
 
 # ─── commit_staged_subset ────────────────────────────────────────────────────
 
@@ -680,4 +986,112 @@ unit test behavior"
     [ "$status" -eq 0 ]
     assert_output_contains "SemVer Release Plan"
 }
+
+@test "aicommit preserves caller INT and TERM traps in bash and zsh" {
+    # Verify in bash
+    run bash -c "
+        trap 'echo old_int' INT
+        trap 'echo old_term' TERM
+        export AICOMMIT_DIR='$AICOMMIT_DIR'
+        source '$AICOMMIT_DIR/aicommit.sh'
+        aicommit --help >/dev/null
+        trap -p INT
+        trap -p TERM
+    "
+    [ "$status" -eq 0 ]
+    assert_output_contains "old_int"
+    assert_output_contains "old_term"
+
+    # Verify in zsh if available
+    if which zsh >/dev/null 2>&1; then
+        run zsh -c "
+            trap 'echo old_int' INT
+            trap 'echo old_term' TERM
+            export AICOMMIT_DIR='$AICOMMIT_DIR'
+            source '$AICOMMIT_DIR/aicommit.sh'
+            aicommit --help >/dev/null
+            trap
+        "
+        [ "$status" -eq 0 ]
+        assert_output_contains "trap -- 'echo old_int' INT"
+        assert_output_contains "trap -- 'echo old_term' TERM"
+    fi
+}
+
+@test "_generate_group_messages_batched builds valid batch JSON schema" {
+    local tmp_dir="$TEST_TEMP_DIR/batch_test"
+    mkdir -p "${tmp_dir}/groups/1" "${tmp_dir}/groups/2"
+    echo "feat" > "${tmp_dir}/groups/1/ALLOWED_TYPES"
+    echo "core" > "${tmp_dir}/groups/1/SCOPE_CANDIDATES"
+    echo "fix" > "${tmp_dir}/groups/2/ALLOWED_TYPES"
+    echo "ui" > "${tmp_dir}/groups/2/SCOPE_CANDIDATES"
+    touch "${tmp_dir}/groups/1/CHANGES_CONTEXT"
+    touch "${tmp_dir}/groups/2/CHANGES_CONTEXT"
+    echo "prompt" > "${AICOMMIT_DIR}/templates/prompt.txt"
+    export AI_PROMPT_FILE="${AICOMMIT_DIR}/templates/prompt.txt"
+
+    # Mock ollama request and invoke_llm to succeed with valid json response
+    build_ollama_request() { return 0; }
+    invoke_llm() {
+        printf '{"commits":[{"type":"feat","scope":"core","breaking":false,"subject":"one","body":[]},{"type":"fix","scope":"ui","breaking":false,"subject":"two","body":[]}]}' > "$3"
+        return 0
+    }
+
+    run _generate_group_messages_batched 2 "$tmp_dir"
+    [ "$status" -eq 0 ]
+    [ -f "${tmp_dir}/BATCH_SCHEMA.json" ]
+    run jq . "${tmp_dir}/BATCH_SCHEMA.json"
+    [ "$status" -eq 0 ]
+    refute_output_contains "syntax error"
+}
+
+@test "aicommit entry points suppress interactive shell background job noise" {
+    if which zsh >/dev/null 2>&1; then
+        run zsh -f -i -c "
+            export AICOMMIT_DIR='$AICOMMIT_DIR'
+            source '$AICOMMIT_DIR/aicommit.sh'
+            aicommit --help >/dev/null
+        "
+        [ "$status" -eq 0 ]
+        refute_output_contains "done       "
+        refute_output_contains "[1]"
+    fi
+}
+
+@test "_generate_group_messages_batched parses fenced JSON response from model" {
+    local tmp_dir="$TEST_TEMP_DIR/batch_fenced_test"
+    mkdir -p "${tmp_dir}/groups/1" "${tmp_dir}/groups/2"
+    echo "feat" > "${tmp_dir}/groups/1/ALLOWED_TYPES"
+    echo "core" > "${tmp_dir}/groups/1/SCOPE_CANDIDATES"
+    echo "fix" > "${tmp_dir}/groups/2/ALLOWED_TYPES"
+    echo "ui" > "${tmp_dir}/groups/2/SCOPE_CANDIDATES"
+    touch "${tmp_dir}/groups/1/CHANGES_CONTEXT"
+    touch "${tmp_dir}/groups/2/CHANGES_CONTEXT"
+    echo "prompt" > "${AICOMMIT_DIR}/templates/prompt.txt"
+    export AI_PROMPT_FILE="${AICOMMIT_DIR}/templates/prompt.txt"
+
+    build_ollama_request() { return 0; }
+    invoke_llm() {
+        cat << 'EOF' > "$3"
+```json
+{
+  "commits": [
+    {"type": "feat", "scope": "core", "breaking": false, "subject": "one", "body": []},
+    {"type": "fix", "scope": "ui", "breaking": false, "subject": "two", "body": []}
+  ]
+}
+```
+EOF
+        return 0
+    }
+
+    _AICOMMIT_GRP_MSGS=()
+    _generate_group_messages_batched 2 "$tmp_dir"
+    [ $? -eq 0 ]
+    [ "${_AICOMMIT_GRP_MSGS[1]}" = "feat(core): one" ]
+    [ "${_AICOMMIT_GRP_MSGS[2]}" = "fix(ui): two" ]
+}
+
+
+
 

@@ -2,20 +2,248 @@
 # aicommit — Core Logic
 # Orchestrates context building, prompt assembly, and LLM commit generation.
 
+# ─── Working-directory layout ────────────────────────────────────────────────
+# All aicommit working files live inside the repository's own git dir:
+#
+#   $(git rev-parse --absolute-git-dir)/aicommit/
+#     state/                  shared between runs, every file keyed by a
+#       SCOPE_GROUPS          fingerprint or hash and written tmp+mv
+#       STAGED_FINGERPRINT
+#       FULL_PROMPT           audit artifact (system rules + user context)
+#       MSG_KEY/MSG_CACHE/    last request hash + assembled message
+#       MSG_REQUEST/SEED_OFFSET
+#       GROUPS_KEY/GROUPS_CACHE  grouping cache (sha of sorted staged list)
+#       COCHANGE              co-change pairs, HEAD sha on line 1
+#     runs/<pid>.XXXXXX/      private to one invocation — two terminals never
+#       STAGED_DIFF           share files; removed on exit
+#       STAGED_NAMES NUMSTAT FACTS CHANGES_CONTEXT REQUEST.json RESPONSE
+#       groups/<i>/{DIFF,NUMSTAT,CHANGES_CONTEXT,...}
+#     lock/                   mkdir mutex (macOS has no flock) around
+#                             index/ref mutation
+#
+# The git dir is never tracked, needs no .gitignore, is isolated per project
+# AND per worktree (each worktree has its own git dir), and is deleted with
+# the repo. It adds no new exposure: the same content already sits in the
+# working tree and the object store.
+
+# Repo-scoped base dir (<git-dir>/aicommit). Empty outside a git repo.
+get_aicommit_base_dir() {
+    if [ -n "$_AICOMMIT_BASE_DIR" ] && [ "$_AICOMMIT_BASE_DIR_PWD" = "$PWD" ]; then
+        printf '%s' "$_AICOMMIT_BASE_DIR"
+        return 0
+    fi
+    local git_dir
+    git_dir=$(git rev-parse --absolute-git-dir 2>/dev/null) || return 1
+    _AICOMMIT_BASE_DIR="${git_dir}/aicommit"
+    _AICOMMIT_BASE_DIR_PWD="$PWD"
+    printf '%s' "$_AICOMMIT_BASE_DIR"
+}
+
+# Check a directory is ours and private: not a symlink, owned by $UID, mode 700.
+# Returns: 0 = secure, 1 = exists but insecure, 2 = missing.
+_aicommit_dir_check() {
+    local d="$1" owner perms
+    [ -L "$d" ] && return 1
+    [ -d "$d" ] || return 2
+    owner=$(stat -f %u "$d" 2>/dev/null || stat -c %u "$d" 2>/dev/null) || return 1
+    [ "$owner" = "$(id -u)" ] || return 1
+    perms=$(stat -f %A "$d" 2>/dev/null || stat -c %a "$d" 2>/dev/null) || return 1
+    [ "$perms" = "700" ] || return 1
+    return 0
+}
+
+# Ensure <base>/aicommit plus runs/ and state/ exist and are secure.
+# Returns: 0 ok, 1 exists-but-insecure (caller must abort), 2 cannot create.
+_init_base_layout() {
+    local base="$1" rc sub
+    # Guarded call — a nonzero result must never hit the shell's ERR trap
+    # (bats runs tests with `set -E`; a simple failing command would abort).
+    _aicommit_dir_check "$base" && rc=0 || rc=$?
+    [ $rc -eq 1 ] && return 1
+    if [ $rc -eq 2 ]; then
+        mkdir -m 700 -p "$base" 2>/dev/null || return 2
+        _aicommit_dir_check "$base" >/dev/null 2>&1 || return 2
+    fi
+    for sub in runs state; do
+        _aicommit_dir_check "${base}/${sub}" && rc=0 || rc=$?
+        [ $rc -eq 1 ] && return 1
+        if [ $rc -eq 2 ]; then
+            mkdir -m 700 "${base}/${sub}" 2>/dev/null || return 2
+        fi
+    done
+    return 0
+}
+
+# Per-invocation working dir. Lazily resolves to <base>/runs/$$ (deterministic,
+# so subshells that call this before the parent ever did still agree on the
+# path). init_aicommit_run overrides it with a unique mktemp dir per aicommit
+# invocation.
+get_aicommit_tmp_dir() {
+    if [ -n "$_AICOMMIT_RUN_DIR" ] && [ -d "$_AICOMMIT_RUN_DIR" ]; then
+        printf '%s' "$_AICOMMIT_RUN_DIR"
+        return 0
+    fi
+    local base rc
+    base=$(get_aicommit_base_dir 2>/dev/null) || base=""
+    if [ -n "$base" ]; then
+        _init_base_layout "$base" >/dev/null 2>&1 && rc=0 || rc=$?
+        if [ $rc -eq 1 ]; then
+            display_error "Refusing insecure aicommit directory: ${base}" \
+                "Must not be a symlink, must be owned by you, mode 700"
+            return 1
+        fi
+        if [ $rc -eq 0 ]; then
+            _AICOMMIT_RUN_DIR="${base}/runs/$$"
+            _aicommit_dir_check "$_AICOMMIT_RUN_DIR" && rc=0 || rc=$?
+            [ $rc -eq 1 ] && { display_error "Refusing insecure run directory: ${_AICOMMIT_RUN_DIR}"; return 1; }
+            [ $rc -eq 2 ] && { mkdir -m 700 "$_AICOMMIT_RUN_DIR" 2>/dev/null || return 1; }
+            printf '%s' "$_AICOMMIT_RUN_DIR"
+            return 0
+        fi
+        # rc == 2 → git dir not writable → private TMPDIR fallback
+    fi
+    _AICOMMIT_RUN_DIR=$(mktemp -d "${TMPDIR:-/tmp}/aicommit.XXXXXXXX" 2>/dev/null) || return 1
+    printf '%s' "$_AICOMMIT_RUN_DIR"
+}
+
+# Shared cross-run state dir (SCOPE_GROUPS, message cache, co-change cache…).
+get_aicommit_state_dir() {
+    local base rc
+    base=$(get_aicommit_base_dir 2>/dev/null) || base=""
+    if [ -n "$base" ]; then
+        _init_base_layout "$base" >/dev/null 2>&1 && rc=0 || rc=$?
+        if [ $rc -eq 0 ]; then
+            printf '%s' "${base}/state"
+            return 0
+        fi
+        [ $rc -eq 1 ] && return 1
+    fi
+    # Fallback: state lives inside the run dir when there is no usable git dir
+    local rd
+    rd=$(get_aicommit_tmp_dir) || return 1
+    mkdir -m 700 -p "${rd}/state" 2>/dev/null || return 1
+    printf '%s' "${rd}/state"
+}
+
+# Called once per aicommit() invocation: fresh private run dir + dead-run purge.
+init_aicommit_run() {
+    _AICOMMIT_RUN_DIR=""
+    local base rc
+    base=$(get_aicommit_base_dir 2>/dev/null) || base=""
+    if [ -n "$base" ]; then
+        _init_base_layout "$base" >/dev/null 2>&1 && rc=0 || rc=$?
+        if [ $rc -eq 1 ]; then
+            display_error "Refusing insecure aicommit directory: ${base}" \
+                "Must not be a symlink, must be owned by you, mode 700"
+            return 1
+        fi
+        if [ $rc -eq 0 ]; then
+            aicommit_purge_dead_runs "$base"
+            _AICOMMIT_RUN_DIR=$(mktemp -d "${base}/runs/$$.XXXXXXXX" 2>/dev/null) || rc=2
+            if [ $rc -eq 0 ]; then
+                # Reset the regenerate seed offset for this invocation
+                printf '0' > "${base}/state/SEED_OFFSET.tmp" && mv "${base}/state/SEED_OFFSET.tmp" "${base}/state/SEED_OFFSET" 2>/dev/null || true
+                return 0
+            fi
+        fi
+        # rc == 2 → git dir not writable → private TMPDIR fallback
+    fi
+    _AICOMMIT_RUN_DIR=$(mktemp -d "${TMPDIR:-/tmp}/aicommit.XXXXXXXX" 2>/dev/null) || return 1
+    return 0
+}
+
+# Remove run dirs whose owning PID is dead, and same-shell leftovers from
+# previous invocations (a shell function runs sequentially per PID, so any
+# runs/$$* dir other than the current one is stale). A dir whose PID is alive
+# and different belongs to a concurrent run in another terminal — untouched.
+aicommit_purge_dead_runs() {
+    [ -n "$ZSH_VERSION" ] && setopt localoptions nonomatch
+    local base="$1" d pid
+    [ -d "${base}/runs" ] || return 0
+    for d in "${base}"/runs/*; do
+        [ -e "$d" ] || continue
+        [ "$d" = "$_AICOMMIT_RUN_DIR" ] && continue
+        pid="${d##*/}"; pid="${pid%%.*}"
+        if [ "$pid" = "$$" ] || ! kill -0 "$pid" 2>/dev/null; then
+            rm -rf "$d"
+        fi
+    done
+}
+
+aicommit_cleanup_run_dir() {
+    if [ -n "$_AICOMMIT_RUN_DIR" ] && [ -d "$_AICOMMIT_RUN_DIR" ]; then
+        rm -rf "$_AICOMMIT_RUN_DIR" 2>/dev/null || true
+    fi
+    _AICOMMIT_RUN_DIR=""
+}
+
+# mkdir-based mutex around index/ref mutation so two terminals can't interleave
+# `git commit`/`update-ref` in the same repo. The holder's PID is recorded; a
+# dead holder's lock is reclaimed. Returns 0 unlocked when there is no git dir
+# (nothing to serialize then) and 1 on wait timeout.
+aicommit_acquire_lock() {
+    local base lockdir holder tries=0 mtime now
+    base=$(get_aicommit_base_dir 2>/dev/null) || return 0
+    _init_base_layout "$base" >/dev/null 2>&1 || return 0
+    lockdir="${base}/lock"
+    while ! mkdir "$lockdir" 2>/dev/null; do
+        holder=$(cat "${lockdir}/pid" 2>/dev/null || true)
+        if [ -n "$holder" ]; then
+            if ! kill -0 "$holder" 2>/dev/null; then
+                rm -rf "$lockdir" 2>/dev/null
+                continue
+            fi
+        else
+            # No pid yet — holder is mid-acquisition or died before writing it.
+            # Reclaim once the dir is clearly stale.
+            mtime=$(stat -f %m "$lockdir" 2>/dev/null || stat -c %Y "$lockdir" 2>/dev/null || echo 0)
+            now=$(date +%s)
+            if [ $((now - mtime)) -gt 15 ]; then
+                rm -rf "$lockdir" 2>/dev/null
+                continue
+            fi
+        fi
+        tries=$((tries + 1))
+        if [ "$tries" -ge 120 ]; then
+            display_error "Timed out waiting for the aicommit commit lock" \
+                "Another aicommit run holds ${lockdir}"
+            return 1
+        fi
+        sleep 0.5
+    done
+    printf '%s' "$$" > "${lockdir}/pid" 2>/dev/null || true
+    _AICOMMIT_LOCK_DIR="$lockdir"
+    return 0
+}
+
+aicommit_release_lock() {
+    if [ -n "$_AICOMMIT_LOCK_DIR" ]; then
+        rm -rf "$_AICOMMIT_LOCK_DIR" 2>/dev/null || true
+        _AICOMMIT_LOCK_DIR=""
+    fi
+}
+
+# aicommit --clean-cache: remove the repo-local .git/aicommit working tree.
+aicommit_clean_cache() {
+    local base
+    base=$(get_aicommit_base_dir) || {
+        echo "Not inside a git repository — nothing to clean."
+        return 0
+    }
+    case "$base" in
+        */aicommit)
+            rm -rf "$base" && echo "🧹 Removed ${base}"
+            ;;
+        *)
+            display_error "Refusing to remove unexpected path" "$base"
+            return 1
+            ;;
+    esac
+}
+
 # Validate prerequisites using backend abstraction
 validate_prerequisites() {
     validate_backend_prerequisites
-}
-
-# Get temp directory scoped to current repo
-get_aicommit_tmp_dir() {
-    # Cache repo root to avoid repeated git calls
-    if [ -z "$_AICOMMIT_REPO_NAME" ]; then
-        export _AICOMMIT_REPO_NAME=$(basename "$(git rev-parse --show-toplevel 2>/dev/null)" 2>/dev/null || echo "unknown")
-    fi
-    local tmp_dir="/tmp/.aicommit/${_AICOMMIT_REPO_NAME}"
-    mkdir -m 700 -p "$tmp_dir" > /dev/null 2>&1
-    echo "$tmp_dir"
 }
 
 # All git reads/writes touching paths go through this: disables path quoting/octal
@@ -88,86 +316,81 @@ count_lines() {
     awk '$0 != "" { c++ } END { print c + 0 }'
 }
 
-# Build file context — writes FILE_CONTEXT, CHANGE_STATS, and FILE_COUNT to temp dir
-# Args: $1=staged_files, $2=numstat_data
-# Writes count to ${tmp_dir}/FILE_COUNT (avoids stdout pollution from zsh xtrace)
+# Build file context — writes FILE_CONTEXT, CHANGE_STATS, and FILE_COUNT.
+# Single awk pass (was: per-file grep + awk subshell per line).
+# Args: $1=staged_files, $2=numstat_data, $3=out_dir (optional, default run dir)
+# Writes count to ${out_dir}/FILE_COUNT (avoids stdout pollution from zsh xtrace)
 build_file_context() {
     local staged_files="$1"
     local numstat_data="$2"
-    local tmp_dir
-    tmp_dir=$(get_aicommit_tmp_dir)
+    local out_dir="${3:-}"
+    if [ -z "$out_dir" ]; then
+        out_dir=$(get_aicommit_tmp_dir) || return 1
+    fi
+    mkdir -m 700 -p "$out_dir" 2>/dev/null || return 1
 
     # Restrict permissions for sensitive content
     umask 077
 
-    # Zero-out owned files before writing — never use stale content
-    : > "${tmp_dir}/FILE_CONTEXT"
-    : > "${tmp_dir}/CHANGE_STATS"
-    : > "${tmp_dir}/FILE_COUNT"
+    # numstat travels via file, not -v: BSD awk rejects literal newlines in -v
+    printf '%s' "$numstat_data" > "${out_dir}/NUMSTAT"
 
-    local total_files=0
-    local file_context=""
-    local change_stats=""
-
-    while IFS= read -r file; do
-        # Use Bash internal trimming for significantly better performance than sed
-        file="${file#"${file%%[![:space:]]*}"}"
-        file="${file%"${file##*[![:space:]]}"}"
-        # Remove carriage returns
-        file="${file//$'\r'/}"
-        [ -z "$file" ] && continue
-
-        # Skip sensitive files from change statistics
-        if echo "$file" | grep -qE "\.env$|\.env\.|config\.ini|.*secrets.*|.*credentials.*|.*\.key|.*\.pem|.*\.p12"; then
-            total_files=$((total_files + 1))
-            continue
-        fi
-
-        total_files=$((total_files + 1))
-
-        local numstat_line lines_added lines_deleted file_ext file_type
-        # Use grep for literal match to avoid awk field-splitting issues
-        numstat_line=$(printf '%s\n' "$numstat_data" | grep -F $'\t'"${file}" | head -1)
-        lines_added=$(printf '%s' "$numstat_line" | awk '{print $1}')
-        lines_deleted=$(printf '%s' "$numstat_line" | awk '{print $2}')
-
-        file_ext="${file##*.}"
-        case "$file_ext" in
-            js|ts|jsx|tsx) file_type="javascript/typescript" ;;
-            py)            file_type="python" ;;
-            sh|bash)       file_type="shell" ;;
-            md|txt)        file_type="documentation" ;;
-            json|yaml|yml) file_type="config" ;;
-            html|css|scss) file_type="web" ;;
-            rb)            file_type="ruby" ;;
-            *)             file_type="$file_ext" ;;
-        esac
-
-        file_context="${file_context}
-${file} (${file_type})"
-        if [ -n "$lines_added" ] && [ -n "$lines_deleted" ]; then
-            change_stats="${change_stats}
-${file}: +${lines_added} -${lines_deleted} lines"
-        fi
-    done <<< "$staged_files"
-
-    printf '%s' "$file_context" > "${tmp_dir}/FILE_CONTEXT"
-    printf '%s' "$change_stats" > "${tmp_dir}/CHANGE_STATS"
-    # Write count to file — avoids stdout pollution from zsh xtrace in subshell capture
-    printf '%s' "$total_files" > "${tmp_dir}/FILE_COUNT"
+    printf '%s\n' "$staged_files" | awk \
+        -v numstat_file="${out_dir}/NUMSTAT" \
+        -v out="$out_dir" \
+        -v sensitive="$_AICOMMIT_SENSITIVE_RE" '
+    BEGIN {
+        while ((getline row < numstat_file) > 0) {
+            c = split(row, f, "\t")
+            if (c >= 3) { add[f[3]] = f[1]; del[f[3]] = f[2] }
+        }
+        close(numstat_file)
+        file_ctx = ""; stats = ""; total = 0
+    }
+    {
+        line = $0
+        gsub(/^[ \t]+/, "", line)
+        gsub(/[ \t\r]+$/, "", line)
+        if (line == "") next
+        total++
+        if (line ~ sensitive) next
+        ext = line
+        if (ext !~ /\./) ext = ""; else sub(/.*\./, "", ext)
+        if      (ext ~ /^(js|ts|jsx|tsx)$/)  t = "javascript/typescript"
+        else if (ext == "py")                t = "python"
+        else if (ext ~ /^(sh|bash)$/)        t = "shell"
+        else if (ext ~ /^(md|txt)$/)         t = "documentation"
+        else if (ext ~ /^(json|yaml|yml)$/)  t = "config"
+        else if (ext ~ /^(html|css|scss)$/)  t = "web"
+        else if (ext == "rb")                t = "ruby"
+        else                                 t = ext
+        file_ctx = file_ctx "\n" line " (" t ")"
+        if (add[line] != "" && del[line] != "")
+            stats = stats "\n" line ": +" add[line] " -" del[line] " lines"
+    }
+    END {
+        # BSD awk needs the redirected filename parenthesized
+        printf "%s", file_ctx > (out "/FILE_CONTEXT")
+        printf "%s", stats    > (out "/CHANGE_STATS")
+        printf "%s", total    > (out "/FILE_COUNT")
+    }
+    '
 }
 
 # Filter diff by tier and truncate per-file. Reads from stdin, writes to stdout.
-# Tier 1 (stat only)  — generated/binary/sensitive files: diff entirely excluded
-# Tier 2 (20-line cap) — low-signal files: tests, docs, markdown
-# Tier 3 (80-line cap) — full-signal files: source, config, migrations
+# Tier 1 (stat only)     — generated/binary/sensitive files: diff entirely excluded
+# Tier 2 (tier2 cap)     — low-signal files: tests, docs, markdown (default 20)
+# Tier 3 (tier3 cap)     — full-signal files: source, config, migrations (default 80)
+# Args: $1=tier2 cap, $2=tier3 cap — a cap of 0 makes the tier stat-only.
 filter_and_truncate_diff() {
-    local sensitive_pattern='\.env$|\.env\.|config\.ini|.*secrets.*|.*credentials.*|.*\.key|.*\.pem|.*\.p12'
+    local tier2_cap="${1:-20}"
+    local tier3_cap="${2:-80}"
 
-    awk -v sensitive="$sensitive_pattern" '
-    BEGIN { tier = 3; max_lines = 80; file_lines = 0 }
+    awk -v sensitive="$_AICOMMIT_SENSITIVE_RE" \
+        -v cap2="$tier2_cap" -v cap3="$tier3_cap" '
+    BEGIN { tier = 3; max_lines = cap3; file_lines = 0 }
     /^diff --git/ {
-        if (file_lines > max_lines && max_lines > 0)
+        if (file_lines > max_lines && max_lines >= 0 && tier >= 2)
             printf "    ... (%d lines truncated)\n", (file_lines - max_lines)
         # Filenames containing spaces break a naive $NF split (it grabs only
         # the last word). Match the " b/<path>" suffix instead — reliable for
@@ -198,7 +421,7 @@ filter_and_truncate_diff() {
             file ~ /\.env$/ || file ~ /\.env\./) {
             tier = 1; max_lines = 0
         }
-        # Tier 2 — low-signal, 20-line cap
+        # Tier 2 — low-signal
         else if (file ~ /^tests?\// || file ~ /\/tests?\// ||
                  file ~ /^spec\// || file ~ /\/spec\// ||
                  file ~ /^__tests__\// ||
@@ -208,11 +431,11 @@ filter_and_truncate_diff() {
                  file ~ /^docs?\// || file ~ /\/docs?\// ||
                  file ~ /\.(md|rst)$/ ||
                  file ~ /^README/ || file ~ /^CHANGELOG/ || file ~ /^CONTRIBUTING/) {
-            tier = 2; max_lines = 20
+            tier = 2; max_lines = cap2 + 0
         }
-        # Tier 3 — full signal, 80-line cap
+        # Tier 3 — full signal
         else {
-            tier = 3; max_lines = 80
+            tier = 3; max_lines = cap3 + 0
         }
         if (tier >= 2) print
         next
@@ -222,83 +445,199 @@ filter_and_truncate_diff() {
         if (tier >= 2 && file_lines <= max_lines) print
     }
     END {
-        if (file_lines > max_lines && max_lines > 0)
+        if (file_lines > max_lines && max_lines >= 0 && tier >= 2)
             printf "    ... (%d lines truncated)\n", (file_lines - max_lines)
     }
     '
 }
 
-# Build AI context — writes CHANGES_CONTEXT to temp dir
-# Args: $1=diff, $2=staged_files, $3=numstat_data, $4=logical_scope (optional)
+# Deterministic facts extracted from the staged diff — one awk pass.
+# The model is told to describe THESE facts instead of guessing. Reads diff
+# text on stdin.
+build_facts() {
+    awk '
+    /^diff --git / {
+        file = $0
+        if (match(file, / b\/.*$/)) file = substr(file, RSTART + 3)
+        else { split(file, p, " "); file = p[3]; sub(/^b\//, "", file) }
+        cur = file
+        next
+    }
+    /^new file mode/     { added[cur] = 1;   next }
+    /^deleted file mode/ { deleted[cur] = 1; next }
+    /^rename to /        {
+        rn = $0; sub(/^rename to /, "", rn)
+        renamed[cur] = rn; next
+    }
+    /^@@ / {
+        ctx = $0
+        sub(/^.*@@/, "", ctx)
+        gsub(/^[ \t]+|[ \t]+$/, "", ctx)
+        if (ctx != "") symbols[ctx] = 1
+        next
+    }
+    /^[+-]/ && !/^[+-][+-][+-]/ {
+        line = $0
+        sym = ""
+        if (match(line, /(^|[^A-Za-z0-9_])(def |function |func |class |interface |struct |enum )[A-Za-z_][A-Za-z0-9_]*/)) {
+            sym = substr(line, RSTART, RLENGTH)
+            sub(/.* /, "", sym)
+        } else if (match(line, /[A-Za-z_][A-Za-z0-9_]*[ \t]*\([^;{}]*\)[ \t]*\{/)) {
+            s = substr(line, RSTART, RLENGTH)
+            match(s, /^[A-Za-z_][A-Za-z0-9_]*/)
+            sym = substr(s, RSTART, RLENGTH)
+        }
+        if (sym != "") {
+            if (line ~ /^\+/) defs_add[sym] = 1; else defs_del[sym] = 1
+        }
+        next
+    }
+    END {
+        print "=== FACTS ==="
+        first = 1; out = ""
+        for (f in added)   { out = out (first ? "" : ", ") f; first = 0 }
+        if (out != "") print "Files added: " out
+        first = 1; out = ""
+        for (f in deleted) { out = out (first ? "" : ", ") f; first = 0 }
+        if (out != "") print "Files deleted: " out
+        for (f in renamed) print "File renamed: " f " -> " renamed[f]
+        first = 1; out = ""
+        for (s in symbols) { out = out (first ? "" : ", ") s; first = 0 }
+        if (out != "") print "Symbols touched (hunk context): " out
+        first = 1; out = ""
+        for (s in defs_add) { out = out (first ? "" : ", ") s; first = 0 }
+        if (out != "") print "Definitions added: " out
+        first = 1; out = ""
+        for (s in defs_del) { out = out (first ? "" : ", ") s; first = 0 }
+        if (out != "") print "Definitions removed: " out
+    }
+    '
+}
+
+# Narrow the conventional-commit type enum from the staged file list (stdin).
+# Emits one allowed type per line. The schema enum makes a wrong type
+# unrepresentable instead of merely discouraged.
+infer_allowed_types() {
+    awk '
+    {
+        if ($0 == "") next
+        n++
+        is_docs = ($0 ~ /(^|\/)(docs?|documentation)\// || $0 ~ /\.(md|rst|txt|adoc)$/ || \
+                   $0 ~ /(^|\/)(README|CHANGELOG|CONTRIBUTING|LICENSE|NOTICE|AGENTS|AUTHORS)(\.[^.\/]+)?$/)
+        is_test = ($0 ~ /(^|\/)(tests?|spec|__tests__|testdata)\// || \
+                   $0 ~ /(_test|_spec|\.test|\.spec)\.[^.\/]+$/ || $0 ~ /\.bats$/ || \
+                   $0 ~ /(^|\/)test_[^\/]+$/)
+        is_ci   = ($0 ~ /^\.(github|gitlab|circleci)\// || $0 ~ /(^|\/)(Jenkinsfile|azure-pipelines\.yml|\.gitlab-ci\.yml)$/ || \
+                   $0 ~ /(^|\/)Dockerfile[^\/]*$/ || $0 ~ /(^|\/)(docker-compose[^\/]*|compose\.ya?ml)$/)
+        is_dep  = ($0 ~ /(^|\/)(package-lock\.json|pnpm-lock\.yaml|yarn\.lock|Gemfile\.lock|go\.sum|Cargo\.lock|poetry\.lock|composer\.lock|Pipfile\.lock|mix\.lock|bun\.lockb)$/ || \
+                   $0 ~ /(^|\/)(package\.json|Gemfile|go\.mod|Cargo\.toml|pyproject\.toml|requirements[^\/]*\.txt|pom\.xml|build\.gradle[^\/]*|composer\.json|pubspec\.yaml|setup\.py|setup\.cfg|[^\/]*\.csproj|[^\/]*\.fsproj)$/)
+        if (!is_docs) all_docs = 0
+        if (!is_test) all_test = 0
+        if (!is_ci)   all_ci   = 0
+        if (!is_dep)  all_dep  = 0
+    }
+    BEGIN { all_docs = all_test = all_ci = all_dep = 1 }
+    END {
+        if (n == 0) { print "chore"; exit }
+        if (all_docs) print "docs"
+        else if (all_test) print "test"
+        else if (all_ci)   print "ci"
+        else if (all_dep)  print "build\nchore"
+        else print "feat\nfix\ndocs\nstyle\nrefactor\nperf\ntest\nbuild\nci\nchore\nrevert"
+    }
+    '
+}
+
+# Scope candidates: deterministic scopes from staged paths plus scopes actually
+# used in this repo's recent history (style reference, not shown to the model).
+# Args: $1=staged_files
+collect_scope_candidates() {
+    local staged_files="$1" f s
+    {
+        while IFS= read -r f; do
+            [ -n "$f" ] && infer_file_scope "$f"
+        done <<< "$staged_files"
+        agit log -200 --format=%s 2>/dev/null \
+            | sed -nE 's/^[a-z]+\(([a-zA-Z0-9_.,\/ -]+)\)!?: .+/\1/p' \
+            | tr ',' '\n' | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//; s/[[:space:]]+/-/g'
+    } | awk 'NF' | sort -u | head -20
+}
+
+# Build AI context — writes run-dir files consumed by the prompt pipeline.
+# Args: $1=diff, $2=staged_files, $3=numstat_data, $4=logical_scope (optional),
+#       $5=out_dir (optional, default run dir), $6=tier2 cap, $7=tier3 cap
 build_ai_context() {
     local changes="$1"
     local staged_files="$2"
     local numstat_data="$3"
     local logical_scope="${4:-}"
+    local out_dir="${5:-}"
+    local tier2_cap="${6:-20}"
+    local tier3_cap="${7:-80}"
     local tmp_dir
-    tmp_dir=$(get_aicommit_tmp_dir)
+    tmp_dir=$(get_aicommit_tmp_dir) || return 1
+    [ -z "$out_dir" ] && out_dir="$tmp_dir"
+    mkdir -m 700 -p "$out_dir" 2>/dev/null || return 1
 
     # Restrict permissions for sensitive content
     umask 077
 
-    # Zero-out owned file before writing — never use stale content
-    : > "${tmp_dir}/CHANGES_CONTEXT"
+    # Persist raw inputs: facts/schema/grounding consumers and the token-budget
+    # rebuilder read these files instead of re-running git or big shell strings.
+    printf '%s' "$changes"      > "${out_dir}/STAGED_DIFF"
+    printf '%s' "$staged_files" > "${out_dir}/STAGED_NAMES"
+    printf '%s' "$numstat_data" > "${out_dir}/NUMSTAT"
+    printf '%s' "$logical_scope" > "${out_dir}/LOGICAL_SCOPE"
+    : > "${out_dir}/CHANGES_CONTEXT"
 
-    # Run build_file_context; read count from temp file to avoid xtrace stdout pollution
-    build_file_context "$staged_files" "$numstat_data" > /dev/null 2>&1
+    build_file_context "$staged_files" "$numstat_data" "$out_dir" > /dev/null 2>&1
     local total_files
-    tmp_dir=$(get_aicommit_tmp_dir)
-    total_files=$(cat "${tmp_dir}/FILE_COUNT" 2>/dev/null || echo "0")
+    total_files=$(cat "${out_dir}/FILE_COUNT" 2>/dev/null || echo "0")
 
     if [ "$total_files" -eq 0 ] 2>/dev/null || ! [ "$total_files" -gt 0 ] 2>/dev/null; then
         display_error "No staged files found"
         return 1
     fi
 
-    # Filter out sensitive files from staged_files before processing
-    local filtered_staged_files=""
-    while IFS= read -r file; do
-        if ! echo "$file" | grep -qE "\.env$|\.env\.|config\.ini|.*secrets.*|.*credentials.*|.*\.key|.*\.pem|.*\.p12"; then
-            filtered_staged_files="${filtered_staged_files}${file}\n"
-        fi
-    done <<< "$staged_files"
+    # Deterministic facts, allowed types and scope candidates — the grounding
+    # inputs the model is held accountable to.
+    printf '%s' "$changes" | build_facts > "${out_dir}/FACTS"
+    printf '%s\n' "$staged_files" | infer_allowed_types > "${out_dir}/ALLOWED_TYPES"
+    collect_scope_candidates "$staged_files" > "${out_dir}/SCOPE_CANDIDATES"
 
-    local file_context change_stats enhanced_context categories_context
-    file_context=$(cat "${tmp_dir}/FILE_CONTEXT")
-    change_stats=$(cat "${tmp_dir}/CHANGE_STATS")
-    enhanced_context=$(build_enhanced_context "$filtered_staged_files" "$changes")
-    categories_context=$(categorize_staged_files "$filtered_staged_files" "$tmp_dir")
+    # Filter out sensitive files before any downstream processing (one grep pass)
+    local filtered_staged_files
+    filtered_staged_files=$(printf '%s\n' "$staged_files" | grep -vE "$_AICOMMIT_SENSITIVE_RE" || true)
 
-    # Tier 1 patterns (stat only): generated, binary, sensitive — matches filter_and_truncate_diff tier 1
+    local file_context change_stats categories_context
+    file_context=$(cat "${out_dir}/FILE_CONTEXT")
+    change_stats=$(cat "${out_dir}/CHANGE_STATS")
+    categories_context=$(categorize_staged_files "$filtered_staged_files" "$out_dir")
+
+    # Tier 1 stat-only files (generated, binary, sensitive) — one grep pass
     local stat_only_ext='\.lock$|lock\.(json|yaml|toml)$|\.snap$|\.pyc$|\.class$|\.map$|_pb2\.py$|\.pb\.go$'
     local stat_only_assets='\.svg$|\.png$|\.jpg$|\.jpeg$|\.gif$|\.ico$|\.fig$|\.webp$|\.mp4$|\.mp3$|\.woff2?$|\.ttf$|\.min\.(js|css)$'
     local stat_only_dirs='^(dist|build|out|\.next|coverage|\.nyc_output)/|/(dist|build|coverage)/'
-    local stat_only_env='\.env$|\.env\.|config\.ini|.*secrets.*|.*credentials.*|.*\.key|.*\.pem|.*\.p12'
-    local stat_only_patterns="${stat_only_ext}|${stat_only_assets}|${stat_only_env}"
-    local stat_only_files=""
+    local stat_only_patterns="${stat_only_ext}|${stat_only_assets}|${stat_only_dirs}|${_AICOMMIT_SENSITIVE_RE}"
+    local stat_only_files
+    stat_only_files=$(printf '%s\n' "$staged_files" | grep -E "$stat_only_patterns" || true)
 
-    while IFS= read -r file; do
-        if [ -n "$file" ] && { echo "$file" | grep -qE "$stat_only_patterns" || echo "$file" | grep -qE "$stat_only_dirs"; }; then
-            stat_only_files="${stat_only_files}${file}\n"
-        fi
-    done <<< "$staged_files"
-
-    # Single-pass tiered filter: excludes tier-1 diffs, caps tier-2 at 20 lines, tier-3 at 80 lines
+    # Single-pass tiered filter: excludes tier-1 diffs, caps tier-2/3 diffs
     local changes_summary
-    changes_summary=$(echo "$changes" | filter_and_truncate_diff)
+    changes_summary=$(printf '%s' "$changes" | filter_and_truncate_diff "$tier2_cap" "$tier3_cap")
 
-    # Stat summary for tier-1 files (lets LLM infer dependency/asset changes without reading diff)
+    # Stat summary for tier-1 files (lets the model infer dependency/asset
+    # changes without reading their diffs) — one awk join, not per-file grep
     local stat_only_stat=""
     if [ -n "$stat_only_files" ]; then
-        stat_only_stat=$(printf '%b' "$stat_only_files" | sed '/^$/d' | while IFS= read -r sf; do
-            local stat_line
-            stat_line=$(echo "$numstat_data" | awk -v f="$sf" '$3 == f {printf "%s | +%s -%s\n", $3, $1, $2}')
-            [ -n "$stat_line" ] && echo "$stat_line"
-        done)
+        stat_only_stat=$(printf '%s\n' "$numstat_data" | awk -v list="$stat_only_files" '
+            BEGIN { n = split(list, f, "\n"); for (i = 1; i <= n; i++) keep[f[i]] = 1 }
+            $3 in keep { printf "%s | +%s -%s\n", $3, $1, $2 }
+        ')
     fi
 
     local repo_name
-    repo_name="${_AICOMMIT_REPO_NAME:-unknown}"
+    repo_name=$(basename "$(agit rev-parse --show-toplevel 2>/dev/null)" 2>/dev/null || echo "unknown")
 
     local changes_context="=== REPOSITORY ===
 ${repo_name}
@@ -308,7 +647,7 @@ ${categories_context}
 === CHANGE STATISTICS ===
 ${change_stats}
 
-${enhanced_context}
+$(cat "${out_dir}/FACTS")
 
 === CHANGES ===
 ${changes_summary}"
@@ -320,16 +659,6 @@ ${changes_summary}"
 ${stat_only_stat}"
     fi
 
-    # Add recent commit history for scope consistency (ignore new repos with no commits)
-    local commit_history
-    commit_history=$(git log --oneline -10 2>/dev/null) || true
-    if [ -n "$commit_history" ]; then
-        changes_context="${changes_context}
-
-=== RECENT COMMITS (STYLE AND SCOPE REFERENCE ONLY - DO NOT DESCRIBE IN COMMIT) ===
-${commit_history}"
-    fi
-
     if [ -n "$logical_scope" ]; then
         changes_context="${changes_context}
 
@@ -338,13 +667,14 @@ This atomic commit is scoped specifically to: ${logical_scope}.
 Generate the commit message type, scope, and description focused on this logical concern."
     fi
 
-    printf '%s' "$changes_context" > "${tmp_dir}/CHANGES_CONTEXT"
+    printf '%s' "$changes_context" > "${out_dir}/CHANGES_CONTEXT"
 }
 
 # Extract and sanitize clean conventional commit message from raw LLM output.
 # Handles reasoning model thinking blocks (<think>...</think>, </think> without open tag,
 # Thinking Process: preambles, duplicate keyword occurrences in draft vs final, etc.),
 # delimiters (@@@, code fences), conventional commit anchor discovery, and normalization.
+# Kept as the fallback parser when the model does not return schema JSON.
 extract_conventional_commit() {
     local raw_input="$1"
     [ -z "$raw_input" ] && return 0
@@ -599,68 +929,536 @@ suggest_semver_bump() {
     esac
 }
 
-# Generate commit message — assembles prompt and calls Ollama
-# Args: --dry-run (optional)
+# ─── Structured commit generation ────────────────────────────────────────────
+
+# JSON schema for the commit object, with enum constraints built from the
+# context dir's ALLOWED_TYPES and SCOPE_CANDIDATES.
+# Args: $1=out_file, $2=ctx_dir, $3=mode ("single"|"batch"), $4=batch_size
+_build_commit_schema() {
+    local out_file="$1" d="$2" mode="${3:-single}" batch_size="${4:-0}"
+    jq -n \
+        --argjson types "$(awk 'NF' "${d}/ALLOWED_TYPES" 2>/dev/null | jq -R . | jq -sc 'unique')" \
+        --argjson scopes "$({ cat "${d}/SCOPE_CANDIDATES" 2>/dev/null; printf 'none\nother\n'; } | awk 'NF' | jq -R . | jq -sc 'unique')" \
+        --argjson mode "$([ "$mode" = "batch" ] && echo 1 || echo 0)" \
+        --argjson n "$batch_size" \
+        'def commit_obj: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+                type:        {type: "string", enum: $types},
+                scope:       {type: "string", enum: $scopes},
+                scope_other: {type: "string", maxLength: 24},
+                breaking:    {type: "boolean"},
+                subject:     {type: "string", maxLength: 60},
+                body:        {type: "array", items: {type: "string"}, maxItems: 6}
+            },
+            required: ["type", "scope", "breaking", "subject"]
+        };
+        if $mode == 1 then {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+                commits: {type: "array", items: commit_obj, minItems: $n, maxItems: $n}
+            },
+            required: ["commits"]
+        } else commit_obj end' > "$out_file"
+}
+
+# Keep the request inside num_ctx: if the estimated prompt size blows the
+# budget, rebuild CHANGES_CONTEXT with progressively smaller per-file caps
+# (tier3 80→40→20→stat-only) instead of letting Ollama silently drop the head
+# of the prompt — which is where the rules live.
+# Args: $1=ctx_dir
+_enforce_token_budget() {
+    local d="$1"
+    [ -f "${d}/CHANGES_CONTEXT" ] || return 0
+    local budget est
+    budget=$(( ${AI_NUM_CTX:-16384} - ${AI_NUM_PREDICT:-400} - 512 ))
+    est=$(( ( $(wc -c < "$AI_PROMPT_FILE" 2>/dev/null | tr -d ' ') + $(wc -c < "${d}/CHANGES_CONTEXT" | tr -d ' ') ) * 10 / 35 ))
+    [ "$est" -le "$budget" ] && return 0
+
+    local t2 t3
+    for caps in "10 40" "5 20" "0 0"; do
+        t2="${caps%% *}"; t3="${caps##* }"
+        build_ai_context \
+            "$(cat "${d}/STAGED_DIFF" 2>/dev/null)" \
+            "$(cat "${d}/STAGED_NAMES" 2>/dev/null)" \
+            "$(cat "${d}/NUMSTAT" 2>/dev/null)" \
+            "$(cat "${d}/LOGICAL_SCOPE" 2>/dev/null)" \
+            "$d" "$t2" "$t3" || return 0
+        est=$(( ( $(wc -c < "$AI_PROMPT_FILE" 2>/dev/null | tr -d ' ') + $(wc -c < "${d}/CHANGES_CONTEXT" | tr -d ' ') ) * 10 / 35 ))
+        [ "$est" -le "$budget" ] && return 0
+    done
+    return 0
+}
+
+# Assemble a conventional commit message (header + bullet body) from a
+# schema-shaped JSON object. The 72-char rule is enforced downstream by
+# validate_commit_grounding; we deliberately assemble in shell so the format
+# is guaranteed.
+# Args: $1=json object, $2=ctx_dir (optional, unused for now)
+_commit_msg_from_json_obj() {
+    local obj="$1"
+    local type scope scope_other breaking subject body
+    type=$(printf '%s' "$obj" | jq -r '.type // empty' 2>/dev/null)
+    subject=$(printf '%s' "$obj" | jq -r '.subject // empty' 2>/dev/null)
+    [ -n "$type" ] && [ -n "$subject" ] || return 1
+
+    scope=$(printf '%s' "$obj" | jq -r '.scope // "none"' 2>/dev/null)
+    breaking=$(printf '%s' "$obj" | jq -r '.breaking // false' 2>/dev/null)
+    if [ "$scope" = "other" ]; then
+        scope_other=$(printf '%s' "$obj" | jq -r '.scope_other // ""' 2>/dev/null | tr 'A-Z' 'a-z' | tr -cd 'a-z0-9._/-' | cut -c1-24)
+        scope="$scope_other"
+    fi
+    case "$scope" in
+        ""|none|null|other) scope="" ;;
+        *) scope=$(printf '%s' "$scope" | tr -cd 'a-zA-Z0-9._/-' | cut -c1-24)
+           [ -n "$scope" ] && scope="($scope)" ;;
+    esac
+
+    # A conventional prefix embedded in the subject is stripped — the schema
+    # tells the model to return only the description, but don't trust it.
+    subject=$(printf '%s' "$subject" | sed -E 's/^[a-zA-Z]+(\([^)]*\))?!?:[[:space:]]*//' \
+        | tr -s '[:space:]' ' ' | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//; s/\.$//')
+    [ -z "$subject" ] && return 1
+
+    local bang=""
+    [ "$breaking" = "true" ] && bang="!"
+    printf '%s%s%s: %s' "$type" "$scope" "$bang" "$subject"
+
+    body=$(printf '%s' "$obj" | jq -r '(.body // [])[] | select(type == "string" and length > 0) | "- " + .' 2>/dev/null)
+    [ -n "$body" ] && printf '\n\n%s' "$body"
+    printf '\n'
+}
+
+# Parse a raw model response into a commit message: schema JSON first, the
+# legacy free-text extractor as fallback.
+# Args: $1=response_file, $2=ctx_dir
+_assemble_commit_message() {
+    local response_file="$1" d="$2"
+    local raw obj=""
+    raw=$(cat "$response_file" 2>/dev/null)
+
+    local cleaned
+    if command -v extract_json_object >/dev/null 2>&1; then
+        cleaned=$(extract_json_object "$raw" 2>/dev/null)
+    else
+        cleaned="$raw"
+    fi
+
+    if printf '%s' "$cleaned" | jq -e 'type == "object" and has("type") and has("subject")' >/dev/null 2>&1; then
+        obj="$cleaned"
+    elif command -v perl >/dev/null 2>&1; then
+        # Model wrapped the JSON in prose/fences — lift the outermost {…} span
+        local extracted
+        extracted=$(printf '%s' "$raw" | perl -0777 -ne 'print $1 if /(\{.*\})/s' | head -c 8192)
+        if printf '%s' "$extracted" | jq -e 'type == "object" and has("type") and has("subject")' >/dev/null 2>&1; then
+            obj="$extracted"
+        fi
+    fi
+
+    if [ -n "$obj" ]; then
+        _commit_msg_from_json_obj "$obj" "$d"
+        return
+    fi
+    extract_conventional_commit "$raw"
+}
+
+# One LLM round-trip: invoke, then assemble the response into a commit message.
+# Args: $1=request_file, $2=ctx_dir, $3=action_label (optional)
+_llm_commit_once() {
+    local request_file="$1" d="$2" action_label="${3:-Generating commit message}"
+    local resp="${d}/RESPONSE" err="${d}/OLLAMA_ERROR"
+    : > "$resp"; : > "$err"
+    if ! invoke_llm "${AI_MODEL:-$DEFAULT_AI_MODEL}" "$request_file" "$resp" "$err" "${AI_TIMEOUT:-120}" "$action_label"; then
+        return 1
+    fi
+    _assemble_commit_message "$resp" "$d"
+}
+
+# Post-validation gate — checks the assembled message is grounded in the diff.
+# Emits one feedback line per violation (consumed by the retry prompt).
+# Args: $1=commit_msg, $2=ctx_dir
+validate_commit_grounding() {
+    local msg="$1" d="${2:-}"
+    [ -z "$d" ] && d=$(get_aicommit_tmp_dir)
+    local ok=true header type tok
+
+    header=$(printf '%s\n' "$msg" | head -1)
+    if [ -z "$header" ]; then
+        echo "empty commit header"
+        return 1
+    fi
+    if [ "${#header}" -gt 72 ]; then
+        printf 'header exceeds 72 chars (%d)\n' "${#header}"
+        ok=false
+    fi
+    type=$(printf '%s' "$header" | sed -nE 's/^([a-z]+)(\([^)]*\))?!?: .*/\1/p')
+    if [ -z "$type" ]; then
+        echo "header is not a conventional commit"
+        ok=false
+    elif [ -f "${d}/ALLOWED_TYPES" ] && ! grep -qxF "$type" "${d}/ALLOWED_TYPES" 2>/dev/null; then
+        printf 'type %s is not allowed for these changes\n' "$type"
+        ok=false
+    fi
+
+    # Every file path or identifier mentioned must exist in the staged set or
+    # in the extracted facts. Path-like = contains '/', ends in '.ext', or is
+    # backtick-quoted.
+    local candidates
+    candidates=$(printf '%s\n' "$msg" | grep -oE '`[^`]+`|[A-Za-z0-9_.~+-]+/[A-Za-z0-9_./~+-]+|[A-Za-z0-9_+-]+\.[A-Za-z0-9]{1,8}\b' \
+        | tr -d '`' | sort -u)
+    while IFS= read -r tok; do
+        [ -z "$tok" ] && continue
+        printf '%s' "$tok" | grep -qE '^[0-9]+([.][0-9]+)*$' && continue
+        if [ -f "${d}/STAGED_NAMES" ]; then
+            grep -qxF "$tok" "${d}/STAGED_NAMES" 2>/dev/null && continue
+            grep -qF "/${tok}" "${d}/STAGED_NAMES" 2>/dev/null && continue
+        fi
+        [ -f "${d}/FACTS" ] && grep -qF "$tok" "${d}/FACTS" 2>/dev/null && continue
+        printf '%s is not in the diff\n' "$tok"
+        ok=false
+    done <<< "$candidates"
+
+    $ok
+}
+
+# Last-resort commit message built purely from extracted facts — used when the
+# model fails the grounding gate twice.
+# Args: $1=ctx_dir
+template_commit_from_facts() {
+    local d="$1" type scope first_file count subject
+    local type_count
+    type_count=$(awk 'END { print NR }' "${d}/ALLOWED_TYPES" 2>/dev/null || echo 0)
+    if [ "$type_count" -le 2 ]; then
+        type=$(head -1 "${d}/ALLOWED_TYPES" 2>/dev/null)
+    fi
+    type="${type:-chore}"
+
+    first_file=$(head -1 "${d}/STAGED_NAMES" 2>/dev/null)
+    count=$(count_lines < "${d}/STAGED_NAMES" 2>/dev/null || echo 1)
+    scope=$(infer_file_scope "$first_file" 2>/dev/null || echo "")
+    case "$scope" in ""|none|other) scope="" ;; esac
+
+    subject="update ${first_file:-files}"
+    if [ "$count" -gt 1 ]; then
+        subject="update ${first_file:-files} and $((count - 1)) other files"
+    fi
+
+    local header="${type}${scope:+(${scope})}: ${subject}"
+    # Keep the fallback itself inside the 72-char contract
+    if [ "${#header}" -gt 72 ]; then
+        header="${type}: update ${first_file:-files}"
+        [ "${#header}" -gt 72 ] && header="${type}: update staged changes"
+    fi
+    printf '%s\n' "$header"
+}
+
+# Generate commit message — assembles the request and calls Ollama.
+# Args: --dry-run (optional), ctx_dir (optional, default run dir)
 generate_commit_message() {
-    local dry_run=false
-    [ "$1" = "--dry-run" ] && dry_run=true
+    local dry_run=false ctx_dir=""
+    case "${1:-}" in
+        --dry-run) dry_run=true; ctx_dir="${2:-}" ;;
+        *)         ctx_dir="${1:-}" ;;
+    esac
 
     local model="${AI_MODEL:-$DEFAULT_AI_MODEL}"
-    local prompt_file="${AI_PROMPT_FILE}"
-    local tmp_dir
-    tmp_dir=$(get_aicommit_tmp_dir)
+    local tmp_dir state_dir
+    tmp_dir=$(get_aicommit_tmp_dir) || return 1
+    state_dir=$(get_aicommit_state_dir) || return 1
+    [ -z "$ctx_dir" ] && ctx_dir="$tmp_dir"
 
     # Restrict permissions for sensitive content
     umask 077
 
-    local changes_file="${tmp_dir}/CHANGES_CONTEXT"
-    local prompt_out="${tmp_dir}/FULL_PROMPT"
-
-    # Zero-out owned files before writing — never use stale content
-    : > "${tmp_dir}/FULL_PROMPT"
-    : > "${tmp_dir}/RESPONSE"
-    : > "${tmp_dir}/OLLAMA_ERROR"
-
+    local changes_file="${ctx_dir}/CHANGES_CONTEXT"
     if [ ! -f "$changes_file" ] || [ ! -s "$changes_file" ]; then
-        display_error "Context files not found or empty in $tmp_dir"
+        display_error "Context files not found or empty in $ctx_dir"
         return 1
     fi
 
-    # Assemble prompt: substitute template placeholders with context files
-    awk '
-    /\$\{CHANGES_CONTEXT\}/ {
-        while ((getline line < changes_file) > 0) print line
-        close(changes_file)
-        next
-    }
-    { print }
-    ' changes_file="$changes_file" "$prompt_file" > "$prompt_out"
+    # Shrink the context to fit the token budget before anything else
+    _enforce_token_budget "$ctx_dir"
+
+    # Schema-constrained request: system = static rules, user = dynamic context
+    local schema_file="${ctx_dir}/SCHEMA.json" request_file="${ctx_dir}/REQUEST.json"
+    _build_commit_schema "$schema_file" "$ctx_dir"
+    if ! build_ollama_request "$request_file" "$model" "$changes_file" "${AI_PROMPT_FILE}" "$schema_file"; then
+        return 1
+    fi
+
+    # Audit artifact: what the model effectively sees (also powers --dry-run)
+    {
+        cat "${AI_PROMPT_FILE}"
+        printf '\n\n=== USER CONTEXT ===\n'
+        cat "$changes_file"
+    } > "${state_dir}/FULL_PROMPT"
 
     if [ "$dry_run" = "true" ]; then
         return 0
     fi
 
-    # Invoke LLM using backend abstraction
-    local response_file="${tmp_dir}/RESPONSE"
-    local error_file="${tmp_dir}/OLLAMA_ERROR"
-    local timeout_secs=${AI_TIMEOUT:-120}
+    # Response cache — identical request bytes ⇒ identical response, replayed.
+    local key
+    key=$(shasum -a 256 < "$request_file" | awk '{print $1}')
+    if [ -f "${state_dir}/MSG_KEY" ] && [ "$(cat "${state_dir}/MSG_KEY" 2>/dev/null)" = "$key" ] && [ -s "${state_dir}/MSG_CACHE" ]; then
+        cat "${state_dir}/MSG_CACHE"
+        return 0
+    fi
 
-    if ! invoke_llm "$model" "$prompt_out" "$response_file" "$error_file" "$timeout_secs"; then
+    local commit_msg
+    if ! commit_msg=$(_llm_commit_once "$request_file" "$ctx_dir"); then
         return 1
     fi
 
-    local raw_response commit_msg
-    raw_response=$(cat "$response_file" 2>/dev/null)
-    commit_msg=$(extract_conventional_commit "$raw_response")
+    # Grounding gate: verify, retry once with feedback, else deterministic template
+    local feedback=""
+    if ! feedback=$(validate_commit_grounding "$commit_msg" "$ctx_dir"); then
+        local retry_req="${ctx_dir}/REQUEST.retry.json" retry_msg=""
+        jq --arg fb "$feedback" \
+            '.messages[1].content += "\n\nCORRECTION REQUIRED — your previous answer violated grounding:\n" + $fb + "\nFix and return only the JSON object."' \
+            "$request_file" > "$retry_req" 2>/dev/null
+        if [ -s "$retry_req" ] \
+            && retry_msg=$(_llm_commit_once "$retry_req" "$ctx_dir" "Retrying with grounding feedback") \
+            && [ -n "$retry_msg" ] \
+            && validate_commit_grounding "$retry_msg" "$ctx_dir" >/dev/null 2>&1; then
+            commit_msg="$retry_msg"
+        else
+            commit_msg=$(template_commit_from_facts "$ctx_dir")
+        fi
+    fi
+
+    # Persist cache + replayable request atomically (tmp + mv)
+    printf '%s' "$key" > "${state_dir}/MSG_KEY.tmp" && mv "${state_dir}/MSG_KEY.tmp" "${state_dir}/MSG_KEY"
+    printf '%s\n' "$commit_msg" > "${state_dir}/MSG_CACHE.tmp" && mv "${state_dir}/MSG_CACHE.tmp" "${state_dir}/MSG_CACHE"
+    cp "$request_file" "${state_dir}/MSG_REQUEST.tmp" && mv "${state_dir}/MSG_REQUEST.tmp" "${state_dir}/MSG_REQUEST"
 
     echo "$commit_msg"
 }
 
-# Execute the git commit
+# --regenerate: replay the last request with a bumped seed so it produces a
+# genuinely different candidate instead of a cache hit.
+regenerate_commit_message() {
+    local state_dir tmp_dir
+    state_dir=$(get_aicommit_state_dir) || return 1
+    tmp_dir=$(get_aicommit_tmp_dir) || return 1
+
+    local req_src="${state_dir}/MSG_REQUEST"
+    [ -f "$req_src" ] || return 1
+
+    local off=0
+    off=$(( $(cat "${state_dir}/SEED_OFFSET" 2>/dev/null || echo 0) + 1 ))
+    printf '%s' "$off" > "${state_dir}/SEED_OFFSET.tmp" && mv "${state_dir}/SEED_OFFSET.tmp" "${state_dir}/SEED_OFFSET"
+
+    local req="${tmp_dir}/REQUEST.regen.json"
+    jq --argjson o "$off" '.options.seed = ((.options.seed // 0) + $o)' "$req_src" > "$req" || return 1
+
+    local commit_msg
+    commit_msg=$(_llm_commit_once "$req" "$tmp_dir" "Regenerating commit message") || return 1
+    [ -z "$commit_msg" ] && return 1
+
+    # Update the cache so a subsequent --regenerate still changes the answer
+    local key
+    key=$(shasum -a 256 < "$req" | awk '{print $1}')
+    printf '%s' "$key" > "${state_dir}/MSG_KEY.tmp" && mv "${state_dir}/MSG_KEY.tmp" "${state_dir}/MSG_KEY"
+    printf '%s\n' "$commit_msg" > "${state_dir}/MSG_CACHE.tmp" && mv "${state_dir}/MSG_CACHE.tmp" "${state_dir}/MSG_CACHE"
+    cp "$req" "${state_dir}/MSG_REQUEST.tmp" && mv "${state_dir}/MSG_REQUEST.tmp" "${state_dir}/MSG_REQUEST"
+
+    echo "$commit_msg"
+}
+
+# ─── Split-commit group generation ───────────────────────────────────────────
+
+# Split the run's STAGED_DIFF + NUMSTAT into per-group files under groups/<i>/.
+# Args: $1=diff_file, $2=numstat_file, $3=index_file (lines "i\tf1\tf2..."), $4=groups_dir
+_split_diff_by_groups() {
+    local diff_file="$1" numstat_file="$2" index_file="$3" groups_dir="$4"
+    awk -v index_file="$index_file" -v outdir="$groups_dir" '
+    BEGIN {
+        while ((getline l < index_file) > 0) {
+            n = split(l, p, "\t")
+            for (j = 2; j <= n; j++) if (p[j] != "") g[p[j]] = p[1]
+        }
+        close(index_file)
+        cur = ""
+    }
+    FNR == NR {
+        # first input: the full staged diff
+        if ($0 ~ /^diff --git /) {
+            a_name = $0; sub(/^diff --git a\//, "", a_name); sub(/ b\/.*$/, "", a_name)
+            b_name = $0; sub(/^.* b\//, "", b_name)
+            cur = (b_name in g) ? g[b_name] : ((a_name in g) ? g[a_name] : "")
+        }
+        if (cur != "") print $0 >> (outdir "/" cur "/DIFF")
+        next
+    }
+    {
+        # second input: numstat — field 3 is the path (rename lines carry
+        # "old => new" syntax that simply will not match; stats only)
+        if ($3 in g) print $0 >> (outdir "/" g[$3] "/NUMSTAT")
+    }
+    ' "$diff_file" "$numstat_file"
+}
+
+# Materialize per-group run files and generate every group's commit message
+# before any commit happens. Fills the 1-indexed array _AICOMMIT_GRP_MSGS.
+# Args: $1=scope_groups (TAB lines), $2=tmp_dir (run dir)
+generate_group_messages() {
+    local scope_groups="$1" tmp_dir="$2"
+    _AICOMMIT_GRP_MSGS=()
+
+    local i=0 group_line gdir
+    local groups_root="${tmp_dir}/groups"
+    local index_file="${groups_root}/INDEX"
+    mkdir -m 700 -p "$groups_root" || return 1
+    : > "$index_file"
+
+    # Per-group run dirs + the group index used to split the diff
+    while IFS= read -r group_line; do
+        _aicommit_split_tab_line "$group_line"
+        [ -z "$_aicommit_split_scope" ] && continue
+        [ ${#_aicommit_split_files[@]} -eq 0 ] && continue
+        i=$((i + 1))
+        gdir="${groups_root}/${i}"
+        mkdir -m 700 -p "$gdir" || return 1
+        {
+            printf '%s' "$i"
+            printf '\t%s' "${_aicommit_split_files[@]}"
+            printf '\n'
+        } >> "$index_file"
+        printf '%s\n' "${_aicommit_split_files[@]}" > "${gdir}/STAGED_NAMES"
+        printf '%s' "$_aicommit_split_scope" > "${gdir}/GROUP_SCOPE"
+    done <<< "$scope_groups"
+
+    local n=$i
+    [ "$n" -eq 0 ] && return 1
+
+    _split_diff_by_groups "${tmp_dir}/STAGED_DIFF" "${tmp_dir}/NUMSTAT" "$index_file" "$groups_root"
+
+    # Per-group contexts (facts, allowed types, scope candidates land per group)
+    for ((i = 1; i <= n; i++)); do
+        gdir="${groups_root}/${i}"
+        if [ ! -s "${gdir}/DIFF" ]; then
+            display_error "No staged changes matched for group $i" "$(cat "${gdir}/STAGED_NAMES" 2>/dev/null)"
+            return 1
+        fi
+        build_ai_context \
+            "$(cat "${gdir}/DIFF")" \
+            "$(cat "${gdir}/STAGED_NAMES")" \
+            "$(cat "${gdir}/NUMSTAT" 2>/dev/null)" \
+            "$(cat "${gdir}/GROUP_SCOPE")" \
+            "$gdir" || return 1
+    done
+
+    # One batched call for all groups when enabled; the shared rules prefix is
+    # then processed once instead of n times.
+    if [ "$n" -gt 1 ] && [ "${AI_BATCH_MESSAGES:-true}" = "true" ] \
+        && [ "${AI_DISABLE_GROUPING:-false}" != "true" ] \
+        && validate_backend_prerequisites >/dev/null 2>&1 \
+        && _generate_group_messages_batched "$n" "$tmp_dir"; then
+        _fill_missing_group_messages "$n" "$tmp_dir" || return 1
+        return 0
+    fi
+
+    # Sequential fallback — per-group generate (still deterministic per call)
+    for ((i = 1; i <= n; i++)); do
+        local m
+        if ! m=$(generate_commit_message "${groups_root}/${i}"); then
+            display_error "Failed to generate commit message for group $i"
+            return 1
+        fi
+        _AICOMMIT_GRP_MSGS[$i]="$m"
+    done
+    return 0
+}
+
+_fill_missing_group_messages() {
+    local n="$1" tmp_dir="$2" i m
+    for ((i = 1; i <= n; i++)); do
+        [ -n "${_AICOMMIT_GRP_MSGS[$i]:-}" ] && continue
+        if ! m=$(generate_commit_message "${tmp_dir}/groups/${i}"); then
+            display_error "Failed to generate commit message for group $i"
+            return 1
+        fi
+        _AICOMMIT_GRP_MSGS[$i]="$m"
+    done
+    return 0
+}
+
+# Batched per-group generation: one request returns {"commits":[obj per group]}.
+# Per-group grounding validation still applies; failures are left empty for
+# the sequential filler.
+_generate_group_messages_batched() {
+    local n="$1" tmp_dir="$2" i
+    local user_file="${tmp_dir}/BATCH_USER" sys_file="${tmp_dir}/BATCH_SYSTEM"
+    local schema_file="${tmp_dir}/BATCH_SCHEMA.json" req="${tmp_dir}/BATCH_REQUEST.json"
+    local resp="${tmp_dir}/BATCH_RESPONSE" err="${tmp_dir}/BATCH_ERROR"
+    local model="${AI_MODEL:-$DEFAULT_AI_MODEL}"
+
+    : > "$user_file"
+    for ((i = 1; i <= n; i++)); do
+        printf '=== GROUP %d ===\n' "$i" >> "$user_file"
+        cat "${tmp_dir}/groups/${i}/CHANGES_CONTEXT" >> "$user_file"
+        printf '\n' >> "$user_file"
+    done
+
+    {
+        cat "${AI_PROMPT_FILE}"
+        printf '\nBATCH MODE: the user message contains %d groups marked "=== GROUP i ===". Return a JSON object {"commits": [...]} with exactly %d commit objects, in group order. Each object describes ONLY its own group.\n' "$n" "$n"
+    } > "$sys_file"
+
+    # Union the per-group constraints into the shared batch schema
+    {
+        for ((i = 1; i <= n; i++)); do
+            [ -f "${tmp_dir}/groups/${i}/ALLOWED_TYPES" ] && cat "${tmp_dir}/groups/${i}/ALLOWED_TYPES"
+        done
+    } | sort -u > "${tmp_dir}/ALLOWED_TYPES"
+    {
+        for ((i = 1; i <= n; i++)); do
+            [ -f "${tmp_dir}/groups/${i}/SCOPE_CANDIDATES" ] && cat "${tmp_dir}/groups/${i}/SCOPE_CANDIDATES"
+        done
+    } | sort -u > "${tmp_dir}/SCOPE_CANDIDATES"
+    _build_commit_schema "$schema_file" "$tmp_dir" "batch" "$n"
+
+    if ! build_ollama_request "$req" "$model" "$user_file" "$sys_file" "$schema_file"; then
+        return 1
+    fi
+
+    : > "$resp"; : > "$err"
+    if ! invoke_llm "$model" "$req" "$resp" "$err" "$(( ${AI_TIMEOUT:-120} * 2 ))" "Generating ${n} commit messages"; then
+        return 1
+    fi
+
+    local content cnt
+    content=$(cat "$resp" 2>/dev/null)
+    if command -v extract_json_object >/dev/null 2>&1; then
+        content=$(extract_json_object "$content" 2>/dev/null)
+    fi
+    cnt=$(printf '%s' "$content" | jq '.commits | length' 2>/dev/null) || return 1
+    [ "$cnt" = "$n" ] || return 1
+
+    for ((i = 1; i <= n; i++)); do
+        local obj m
+        obj=$(printf '%s' "$content" | jq -c ".commits[$((i - 1))]" 2>/dev/null)
+        [ -z "$obj" ] && continue
+        m=$(_commit_msg_from_json_obj "$obj" "${tmp_dir}/groups/${i}") || m=""
+        if [ -n "$m" ] && validate_commit_grounding "$m" "${tmp_dir}/groups/${i}" >/dev/null 2>&1; then
+            _AICOMMIT_GRP_MSGS[$i]="$m"
+        fi
+    done
+    return 0
+}
+
+# Execute the git commit (serialized via the repo lock)
 # Args: $1=commit_msg
 process_commit() {
     local commit_msg="$1"
-    echo "$commit_msg" | git commit -F -
+    aicommit_acquire_lock || return 1
+    printf '%s\n' "$commit_msg" | git commit -F -
+    local rc=$?
+    aicommit_release_lock
+    return $rc
 }
 
 # Execute an atomic git commit for a specific subset of staged files
@@ -675,6 +1473,8 @@ commit_staged_subset() {
         display_error "commit_staged_subset called with no files" "This is a bug — refusing to create an empty commit"
         return 1
     fi
+
+    aicommit_acquire_lock || return 1
 
     local git_dir
     git_dir=$(git rev-parse --git-dir)
@@ -708,12 +1508,14 @@ commit_staged_subset() {
             if [ "$has_head" = true ] && agit ls-tree HEAD -- "$(to_pathspec "$f")" 2>/dev/null | grep -q .; then
                 if ! GIT_INDEX_FILE="$tmp_index" agit restore --staged --source=HEAD -- "$(to_pathspec "$f")" >/dev/null 2>&1; then
                     rm -f "$tmp_index"
+                    aicommit_release_lock
                     display_error "Failed to exclude '$f' from subset commit" "git restore --staged failed"
                     return 1
                 fi
             else
                 if ! GIT_INDEX_FILE="$tmp_index" agit rm --cached -q -- "$(to_pathspec "$f")" >/dev/null 2>&1; then
                     rm -f "$tmp_index"
+                    aicommit_release_lock
                     display_error "Failed to exclude '$f' from subset commit" "git rm --cached failed"
                     return 1
                 fi
@@ -726,6 +1528,7 @@ commit_staged_subset() {
     rm -f "$tmp_index"
 
     if [ -z "$tree_sha" ]; then
+        aicommit_release_lock
         display_error "Failed to create git tree for subset commit"
         return 1
     fi
@@ -738,6 +1541,7 @@ commit_staged_subset() {
     local commit_sha
     commit_sha=$(printf '%s\n' "$commit_msg" | git commit-tree "$tree_sha" "${parent_args[@]}")
     if [ -z "$commit_sha" ]; then
+        aicommit_release_lock
         display_error "Failed to create git commit tree"
         return 1
     fi
@@ -745,6 +1549,7 @@ commit_staged_subset() {
     local current_ref
     current_ref=$(git symbolic-ref HEAD 2>/dev/null || git rev-parse HEAD)
     if ! git update-ref "$current_ref" "$commit_sha"; then
+        aicommit_release_lock
         display_error "Failed to update $current_ref to $commit_sha" "The commit object was created but the branch was not advanced"
         return 1
     fi
@@ -753,30 +1558,26 @@ commit_staged_subset() {
     if [ -x "${git_dir}/hooks/post-commit" ]; then
         "${git_dir}/hooks/post-commit" 2>/dev/null || true
     fi
+
+    aicommit_release_lock
+    return 0
 }
 
-# Cleanup ephemeral context files (keeps FULL_PROMPT for --regenerate)
+# Cleanup ephemeral context files — the entire per-run dir goes away.
+# SCOPE_GROUPS/STAGED_FINGERPRINT/FULL_PROMPT/MSG_* deliberately live in the
+# shared state dir so a dry-run preview survives until `aicc` reuses it.
 cleanup_aicommit_ephemeral() {
-    local tmp_dir
-    tmp_dir=$(get_aicommit_tmp_dir)
-    rm -f "${tmp_dir}/CHANGES_CONTEXT" \
-          "${tmp_dir}/FILE_CONTEXT" \
-          "${tmp_dir}/CHANGE_STATS" \
-          "${tmp_dir}/RESPONSE" \
-          "${tmp_dir}/FILE_COUNT" \
-          "${tmp_dir}/ASSET_FILES" \
-          "${tmp_dir}/OLLAMA_ERROR" > /dev/null 2>&1
+    aicommit_cleanup_run_dir
 }
 
-# Cleanup everything including the prompt and the persisted scope-grouping decision.
-# SCOPE_GROUPS/STAGED_FINGERPRINT are deliberately NOT in cleanup_aicommit_ephemeral:
-# that runs on every invocation's EXIT trap, including the dry-run that just wrote
-# them — cleaning them there would erase the preview before aicc could reuse it.
+# Cleanup everything including the audit prompt and the persisted scope-grouping
+# decision. The message cache (MSG_*) self-invalidates by key and stays.
 cleanup_aicommit_all() {
-    cleanup_aicommit_ephemeral
-    local tmp_dir
-    tmp_dir=$(get_aicommit_tmp_dir)
-    rm -f "${tmp_dir}/FULL_PROMPT" \
-          "${tmp_dir}/SCOPE_GROUPS" \
-          "${tmp_dir}/STAGED_FINGERPRINT" > /dev/null 2>&1
+    aicommit_cleanup_run_dir
+    local state_dir
+    state_dir=$(get_aicommit_state_dir 2>/dev/null) || state_dir=""
+    [ -n "$state_dir" ] || return 0
+    rm -f "${state_dir}/FULL_PROMPT" \
+          "${state_dir}/SCOPE_GROUPS" \
+          "${state_dir}/STAGED_FINGERPRINT" > /dev/null 2>&1
 }

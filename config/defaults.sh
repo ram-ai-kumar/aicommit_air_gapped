@@ -7,10 +7,34 @@
 AI_BACKEND="${AI_BACKEND:-ollama}"
 
 # Default LLM model (single source of truth for the project)
-DEFAULT_AI_MODEL="qwen3.5-9b-unsloth:latest"
+# Official tag with a proper chat template (the unsloth raw import has a bare
+# {{ .Prompt }} template — no system/user turns, so think:false is unreliable).
+# Exported so child processes (e.g. bin wrappers, test mocks) see the default.
+DEFAULT_AI_MODEL="${DEFAULT_AI_MODEL:-qwen3.5:4b}"
+export DEFAULT_AI_MODEL
 
 # LLM model to use for commit message generation (must be available in selected backend)
 AI_MODEL="${AI_MODEL:-$DEFAULT_AI_MODEL}"
+
+# Ollama HTTP endpoint (never hardcode credentials or hosts — override in ~/.aicommitrc)
+OLLAMA_HOST="${OLLAMA_HOST:-http://127.0.0.1:11434}"
+
+# Deterministic sampling — the whole point of the HTTP transport.
+AI_SEED="${AI_SEED:-42}"
+AI_NUM_CTX="${AI_NUM_CTX:-16384}"
+AI_NUM_PREDICT="${AI_NUM_PREDICT:-400}"
+AI_THINK="${AI_THINK:-false}"
+
+# Bypass JSON schema decoding constraint if the backend/model does not support it
+# (auto-detected when Ollama returns "structured output is unavailable")
+AI_NO_STRUCTURED_OUTPUT="${AI_NO_STRUCTURED_OUTPUT:-false}"
+export AI_NO_STRUCTURED_OUTPUT
+
+# Generate per-group commit messages in one batched LLM call when splitting
+AI_BATCH_MESSAGES="${AI_BATCH_MESSAGES:-true}"
+
+# How many co-changes in git history (last 300 commits) count as a grouping edge
+AI_COCHANGE_MIN="${AI_COCHANGE_MIN:-2}"
 
 # Path to custom prompt template for commit message generation
 # Override in ~/.aicommitrc: AI_PROMPT_FILE="$HOME/.aicommit/templates/custom-prompt.txt"

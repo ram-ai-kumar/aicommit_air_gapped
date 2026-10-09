@@ -15,7 +15,8 @@ _aicommit() {
         '--no-tag[Do not create Git tag]' \
         '(-d --dry-run)'{-d,--dry-run}'[Build context without calling LLM]' \
         '(-v --verbose)'{-v,--verbose}'[Show temp file paths and enhanced context]' \
-        '(-r --regenerate)'{-r,--regenerate}'[Re-run LLM on cached prompt]'
+        '(-r --regenerate)'{-r,--regenerate}'[Re-run LLM on cached prompt]' \
+        '--clean-cache[Remove the .git/aicommit working directory and exit]'
 }
 
 _aicommit "$@"

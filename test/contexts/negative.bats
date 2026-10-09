@@ -76,23 +76,34 @@ teardown() {
 
 # ─── validate_ollama_prerequisites ───────────────────────────────────────────
 
-@test "validate_ollama_prerequisites fails when pgrep finds no process" {
-    mock_bin "pgrep" "exit 1"
+@test "validate_ollama_prerequisites fails when the API is down" {
+    mock_bin "curl" "exit 1"
     run validate_ollama_prerequisites "$(get_default_ai_model)"
     [ "$status" -eq 1 ]
     assert_output_contains "not running"
 }
 
-@test "test_model_loadability with failing model" {
-    mock_bin "ollama" "exit 1"
-    run test_model_loadability "test-model"
+@test "validate_ollama_prerequisites fails when the model metadata cannot load" {
+    mock_ollama_api
+    cat > "$TEST_TEMP_DIR/bin/curl" <<'EOF'
+#!/usr/bin/env bash
+url=""
+for a in "$@"; do case "$a" in */api/*) url="$a" ;; esac; done
+case "$url" in
+    */api/version)  echo '{"version":"0.40.1"}' ;;
+    */api/tags)     echo '{"models":[{"name":"test-model"}]}' ;;
+    */api/show)     exit 1 ;;
+    *) exit 1 ;;
+esac
+EOF
+    chmod +x "$TEST_TEMP_DIR/bin/curl"
+    run validate_ollama_prerequisites "test-model"
     [ "$status" -eq 1 ]
 }
 
 @test "validate_ollama_prerequisites fails when model not found" {
-    mock_bin "pgrep" "exit 0"
-    mock_bin "ollama" "echo 'NAME            ID              SIZE    MODIFIED'
-echo 'other-model:latest      abc123   2.3 GB  1 day ago'"
+    mock_ollama_api
+    export MOCK_OLLAMA_MODEL="other-model:latest"
     run validate_ollama_prerequisites "missing-model"
     [ "$status" -eq 1 ]
     assert_output_contains "Model 'missing-model' not found"
