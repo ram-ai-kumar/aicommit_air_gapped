@@ -157,7 +157,7 @@ init_aicommit_run() {
 # runs/$$* dir other than the current one is stale). A dir whose PID is alive
 # and different belongs to a concurrent run in another terminal — untouched.
 aicommit_purge_dead_runs() {
-    [ -n "$ZSH_VERSION" ] && setopt localoptions nonomatch
+    [ -n "$ZSH_VERSION" ] && setopt localoptions nonomatch typesetsilent
     local base="$1" d pid
     [ -d "${base}/runs" ] || return 0
     for d in "${base}"/runs/*; do
@@ -1783,8 +1783,8 @@ generate_group_messages() {
     fi
 
     # Sequential fallback — per-group generate (still deterministic per call)
+    local m
     for ((i = 1; i <= n; i++)); do
-        local m
         if ! m=$(generate_commit_message "${groups_root}/${i}"); then
             display_error "Failed to generate commit message for group $i"
             return 1
@@ -1859,8 +1859,8 @@ _generate_group_messages_batched() {
     cnt=$(printf '%s' "$content" | jq '.commits | length' 2>/dev/null) || return 1
     [ "$cnt" = "$n" ] || return 1
 
+    local obj m
     for ((i = 1; i <= n; i++)); do
-        local obj m
         obj=$(printf '%s' "$content" | jq -c ".commits[$((i - 1))]" 2>/dev/null)
         [ -z "$obj" ] && continue
         m=$(_commit_msg_from_json_obj "$obj" "${tmp_dir}/groups/${i}") || m=""

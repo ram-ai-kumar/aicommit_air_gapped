@@ -1228,6 +1228,94 @@ EOF
     [ "$(cat "$TEST_TEMP_DIR/call_count")" -eq 2 ]
 }
 
+# ─── zsh local echo suppression regression tests ───────────────────────────
+
+@test "zsh local declarations in loops do not echo cl_cand= to stdout under typesetsilent" {
+    which zsh >/dev/null 2>&1 || skip "zsh not installed"
+    run zsh -c "
+        export AICOMMIT_DIR='$AICOMMIT_DIR'
+        source '$AICOMMIT_DIR/aicommit.sh'
+        test_wrapper() {
+            [ -n \"\$ZSH_VERSION\" ] && setopt localoptions localtraps shwordsplit nonomatch nomonitor nonotify typesetsilent
+            for i in 1 2; do
+                local cl_cand
+                cl_cand='CHANGELOG.md'
+            done
+        }
+        test_wrapper
+    "
+    [ "$status" -eq 0 ]
+    refute_output_contains "cl_cand="
+}
+
+@test "generate_group_messages sequential path does not leak m= in zsh" {
+    which zsh >/dev/null 2>&1 || skip "zsh not installed"
+    run zsh -c "
+        export AICOMMIT_DIR='$AICOMMIT_DIR'
+        source '$AICOMMIT_DIR/aicommit.sh'
+
+        tmp_dir=\"\$TEST_TEMP_DIR/zsh_grp_leak\"
+        mkdir -p \"\${tmp_dir}/groups/1\" \"\${tmp_dir}/groups/2\"
+        echo 'diff1' > \"\${tmp_dir}/groups/1/DIFF\"
+        echo 'diff2' > \"\${tmp_dir}/groups/2/DIFF\"
+        echo 'file1' > \"\${tmp_dir}/groups/1/STAGED_NAMES\"
+        echo 'file2' > \"\${tmp_dir}/groups/2/STAGED_NAMES\"
+        touch \"\${tmp_dir}/groups/1/NUMSTAT\" \"\${tmp_dir}/groups/2/NUMSTAT\"
+        echo 'core' > \"\${tmp_dir}/groups/1/GROUP_SCOPE\"
+        echo 'ui' > \"\${tmp_dir}/groups/2/GROUP_SCOPE\"
+        touch \"\${tmp_dir}/STAGED_DIFF\" \"\${tmp_dir}/NUMSTAT\"
+
+        export AI_BATCH_MESSAGES='false'
+        build_ai_context() { return 0; }
+        _split_diff_by_groups() { return 0; }
+        generate_commit_message() {
+            echo 'feat(test): message for '\$1
+            return 0
+        }
+
+        scope_groups=\$(printf 'core\tfile1\nui\tfile2\n')
+        generate_group_messages \"\$scope_groups\" \"\$tmp_dir\"
+    "
+    [ "$status" -eq 0 ]
+    refute_output_contains "m="
+}
+
+@test "_generate_group_messages_batched does not leak obj= or m= in zsh" {
+    which zsh >/dev/null 2>&1 || skip "zsh not installed"
+    run zsh -c "
+        export AICOMMIT_DIR='$AICOMMIT_DIR'
+        source '$AICOMMIT_DIR/aicommit.sh'
+
+        tmp_dir=\"\$TEST_TEMP_DIR/zsh_batch_leak\"
+        mkdir -p \"\${tmp_dir}/groups/1\" \"\${tmp_dir}/groups/2\"
+        echo 'feat' > \"\${tmp_dir}/groups/1/ALLOWED_TYPES\"
+        echo 'core' > \"\${tmp_dir}/groups/1/SCOPE_CANDIDATES\"
+        echo 'fix' > \"\${tmp_dir}/groups/2/ALLOWED_TYPES\"
+        echo 'ui' > \"\${tmp_dir}/groups/2/SCOPE_CANDIDATES\"
+        touch \"\${tmp_dir}/groups/1/CHANGES_CONTEXT\" \"\${tmp_dir}/groups/2/CHANGES_CONTEXT\"
+        export AI_PROMPT_FILE=\"\${tmp_dir}/prompt\"
+        echo 'prompt' > \"\$AI_PROMPT_FILE\"
+
+        build_ollama_request() { return 0; }
+        invoke_llm() {
+            cat << 'EOF' > \"\$3\"
+{\"commits\": [
+  {\"type\": \"feat\", \"scope\": \"core\", \"breaking\": false, \"subject\": \"one\", \"body\": []},
+  {\"type\": \"fix\", \"scope\": \"ui\", \"breaking\": false, \"subject\": \"two\", \"body\": []}
+]}
+EOF
+            return 0
+        }
+
+        _AICOMMIT_GRP_MSGS=()
+        _generate_group_messages_batched 2 \"\$tmp_dir\"
+    "
+    [ "$status" -eq 0 ]
+    refute_output_contains "obj="
+    refute_output_contains "m="
+}
+
+
 
 
 

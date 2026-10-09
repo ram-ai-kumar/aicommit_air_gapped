@@ -30,7 +30,7 @@ fi
 # `aicommit` wrapper at the bottom guarantees run-dir cleanup on every path,
 # including the early returns below).
 _aicommit_main() {
-    [ -n "$ZSH_VERSION" ] && setopt localoptions localtraps shwordsplit nonomatch nomonitor nonotify
+    [ -n "$ZSH_VERSION" ] && setopt localoptions localtraps shwordsplit nonomatch nomonitor nonotify typesetsilent
     local dry_run=false verbose=false regenerate=false split_mode=false auto_yes=false
     local explicit_split=false explicit_all=false clean_cache=false
     local is_aic="${AIC_SHORTCUT:-false}"
@@ -1090,7 +1090,7 @@ _aicommit_main() {
 # every return path (success, early error, abort). The EXIT/INT/TERM traps set
 # inside _aicommit_main additionally cover subshell/script exits.
 aicommit() {
-    [ -n "$ZSH_VERSION" ] && setopt localoptions localtraps shwordsplit nonomatch nomonitor nonotify
+    [ -n "$ZSH_VERSION" ] && setopt localoptions localtraps shwordsplit nonomatch nomonitor nonotify typesetsilent
     local _rc _saved_traps="" _saved_monitor=false
     if [ -n "$BASH_VERSION" ]; then
         _saved_traps=$(trap -p INT TERM)
@@ -1126,7 +1126,7 @@ _aicommit_has_split_flag() {
 
 # Quick AI commit — auto-commits all-in-one without confirmation or scope grouping
 aic() {
-    [ -n "$ZSH_VERSION" ] && setopt localoptions localtraps shwordsplit nonomatch nomonitor nonotify
+    [ -n "$ZSH_VERSION" ] && setopt localoptions localtraps shwordsplit nonomatch nomonitor nonotify typesetsilent
     local -a args=("$@")
     _aicommit_has_split_flag "$@" || args=(--no-split "${args[@]}")
     AIC_SHORTCUT=true aicommit --yes --shortcut "${args[@]}"
@@ -1134,7 +1134,7 @@ aic() {
 
 # Quick AI commit categorized — auto-commits each atomic scope separately
 aicc() {
-    [ -n "$ZSH_VERSION" ] && setopt localoptions localtraps shwordsplit nonomatch nomonitor nonotify
+    [ -n "$ZSH_VERSION" ] && setopt localoptions localtraps shwordsplit nonomatch nomonitor nonotify typesetsilent
     local -a args=("$@")
     _aicommit_has_split_flag "$@" || args=(--split "${args[@]}")
     AIC_SHORTCUT=true aicommit --yes --shortcut "${args[@]}"
@@ -1142,7 +1142,7 @@ aicc() {
 
 # Verbose dry-run inspection for single all-in-one commit (0 changes made)
 aicx() {
-    [ -n "$ZSH_VERSION" ] && setopt localoptions localtraps shwordsplit nonomatch nomonitor nonotify
+    [ -n "$ZSH_VERSION" ] && setopt localoptions localtraps shwordsplit nonomatch nomonitor nonotify typesetsilent
     local -a args=("$@")
     _aicommit_has_split_flag "$@" || args=(--no-split "${args[@]}")
     AIC_SHORTCUT=true aicommit --dry-run --verbose --shortcut "${args[@]}"
@@ -1150,7 +1150,7 @@ aicx() {
 
 # Verbose dry-run inspection for atomic split commits (0 changes made)
 aiccx() {
-    [ -n "$ZSH_VERSION" ] && setopt localoptions localtraps shwordsplit nonomatch nomonitor nonotify
+    [ -n "$ZSH_VERSION" ] && setopt localoptions localtraps shwordsplit nonomatch nomonitor nonotify typesetsilent
     local -a args=("$@")
     _aicommit_has_split_flag "$@" || args=(--split "${args[@]}")
     AIC_SHORTCUT=true aicommit --dry-run --verbose --shortcut "${args[@]}"
@@ -1158,7 +1158,7 @@ aiccx() {
 
 # Quick AI commit with SemVer — auto-commits all-in-one with SemVer bump & tag (non-interactive, CI/CD friendly)
 aics() {
-    [ -n "$ZSH_VERSION" ] && setopt localoptions localtraps shwordsplit nonomatch nomonitor nonotify
+    [ -n "$ZSH_VERSION" ] && setopt localoptions localtraps shwordsplit nonomatch nomonitor nonotify typesetsilent
     local -a args=("$@")
     _aicommit_has_split_flag "$@" || args=(--no-split "${args[@]}")
     AIC_SHORTCUT=true aicommit --yes --bump --shortcut "${args[@]}"
@@ -1166,7 +1166,7 @@ aics() {
 
 # Quick AI commit categorized with SemVer — auto-commits each atomic scope with SemVer bump & tag (non-interactive, CI/CD friendly)
 aiccs() {
-    [ -n "$ZSH_VERSION" ] && setopt localoptions localtraps shwordsplit nonomatch nomonitor nonotify
+    [ -n "$ZSH_VERSION" ] && setopt localoptions localtraps shwordsplit nonomatch nomonitor nonotify typesetsilent
     local -a args=("$@")
     _aicommit_has_split_flag "$@" || args=(--split "${args[@]}")
     AIC_SHORTCUT=true aicommit --yes --bump --shortcut "${args[@]}"
@@ -1174,7 +1174,7 @@ aiccs() {
 
 # Verbose dry-run inspection for single commit with SemVer preview (0 changes made)
 aicsx() {
-    [ -n "$ZSH_VERSION" ] && setopt localoptions localtraps shwordsplit nonomatch nomonitor nonotify
+    [ -n "$ZSH_VERSION" ] && setopt localoptions localtraps shwordsplit nonomatch nomonitor nonotify typesetsilent
     local -a args=("$@")
     _aicommit_has_split_flag "$@" || args=(--no-split "${args[@]}")
     AIC_SHORTCUT=true aicommit --dry-run --verbose --bump --shortcut "${args[@]}"
@@ -1182,7 +1182,7 @@ aicsx() {
 
 # Verbose dry-run inspection for atomic split commits with SemVer preview (0 changes made)
 aiccsx() {
-    [ -n "$ZSH_VERSION" ] && setopt localoptions localtraps shwordsplit nonomatch nomonitor nonotify
+    [ -n "$ZSH_VERSION" ] && setopt localoptions localtraps shwordsplit nonomatch nomonitor nonotify typesetsilent
     local -a args=("$@")
     _aicommit_has_split_flag "$@" || args=(--split "${args[@]}")
     AIC_SHORTCUT=true aicommit --dry-run --verbose --bump --shortcut "${args[@]}"
