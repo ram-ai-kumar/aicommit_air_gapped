@@ -69,6 +69,12 @@ jobs:
           echo "⚠️ Running exception tests..."
           bats test/contexts/exception.bats
 
+      - name: Run Regression Tests
+        id: regression
+        run: |
+          echo "🔄 Running regression tests..."
+          bats test/contexts/regression.bats
+
       - name: Run Compliance Tests
         id: compliance
         run: |
@@ -90,13 +96,14 @@ jobs:
           EDGE: ${{ steps.edge.outcome }}
           SECURITY: ${{ steps.security.outcome }}
           EXCEPTION: ${{ steps.exception.outcome }}
+          REGRESSION: ${{ steps.regression.outcome }}
           COMPLIANCE: ${{ steps.compliance.outcome }}
           INTEGRATION: ${{ steps.integration.outcome }}
         run: |
           echo "## Test Results Summary" >> $GITHUB_STEP_SUMMARY
           echo "| Test Category | Status |" >> $GITHUB_STEP_SUMMARY
           echo "|---------------|--------|" >> $GITHUB_STEP_SUMMARY
-          for cat in Smoke Unit Negative Edge Security Exception Compliance Integration; do
+          for cat in Smoke Unit Negative Edge Security Exception Regression Compliance Integration; do
             upper=$(echo "$cat" | tr '[:lower:]' '[:upper:]' | tr ' ' '_')
             outcome="${!upper}"
             icon="✅"

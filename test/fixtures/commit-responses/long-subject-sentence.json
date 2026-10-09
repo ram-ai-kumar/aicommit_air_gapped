@@ -1,0 +1,10 @@
+{
+  "type": "feat",
+  "scope": "core",
+  "breaking": false,
+  "subject": "implement robust SemVer engine and comprehensive comparison logic. Add lib/semver.sh to support automatic detection",
+  "body": [
+    "integrate calculate_next_semver into core workflow",
+    "expand unit tests in test/unit/test_semver.bats"
+  ]
+}

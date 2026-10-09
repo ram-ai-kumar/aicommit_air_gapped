@@ -222,4 +222,48 @@ teardown() {
     [ "$status" -eq 0 ]
 }
 
+# ─── Conventional Commits contract ───────────────────────────────────────────
+
+@test "mocked aic end-to-end lands commit satisfying conventional commit contract" {
+    echo "content" > app.sh
+    git add app.sh
+    export AI_MODEL="test-model"
+    mock_ollama_api '{"type":"feat","scope":"app","breaking":false,"subject":"implement initial shell app","body":["add basic application entry point"]}'
+    run aic
+    [ "$status" -eq 0 ]
+    local recorded
+    recorded=$(git log -1 --format="%B")
+    assert_conventional_commit_contract "$recorded"
+}
+
+@test "mocked aicc with 2 groups batched satisfies contract and scopes have no -N" {
+    mkdir -p lib tests
+    echo "core code" > lib/core.sh
+    echo "test code" > tests/test.sh
+    git add lib/core.sh tests/test.sh
+    export AI_MODEL="test-model"
+    mock_ollama_api '{"commits":[{"type":"feat","scope":"core","breaking":false,"subject":"update core library","body":["add core functionality"]},{"type":"test","scope":"test","breaking":false,"subject":"add unit test suite","body":["add test assertions"]}]}'
+    run aicc
+    [ "$status" -eq 0 ]
+    local msg1 msg2
+    msg1=$(git log -1 --skip=0 --format="%B")
+    msg2=$(git log -1 --skip=1 --format="%B")
+    assert_conventional_commit_contract "$msg1"
+    assert_conventional_commit_contract "$msg2"
+    refute_output_contains "core-2"
+    refute_output_contains "test-2"
+}
+
+@test "aic --dry-run produces both FULL_PROMPT and REFLECTION_PROMPT audit files" {
+    echo "content" > app.sh
+    git add app.sh
+    run aic --dry-run
+    [ "$status" -eq 0 ]
+    local state_dir
+    state_dir=$(get_aicommit_state_dir)
+    [ -f "${state_dir}/FULL_PROMPT" ]
+    [ -f "${state_dir}/REFLECTION_PROMPT" ]
+    grep -qF "ONE-SHOT REFLECTION EXAMPLE" "${state_dir}/REFLECTION_PROMPT"
+}
+
 

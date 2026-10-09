@@ -60,6 +60,9 @@ _aicommit_main() {
                 echo "  --dry-run, -d      Build context and show prompt without calling LLM"
                 echo "  --verbose, -v      Show diagnostics: staged file list, backend/model, temp paths"
                 echo "  --regenerate, -r   Re-run LLM on cached prompt without re-analyzing"
+                echo "  --reflect          Enable reflection prompt step (default: on-failure)"
+                echo "  --reflect=always   Reflect unconditionally on every commit generation"
+                echo "  --no-reflect       Disable reflection prompt step"
                 echo "  --clean-cache      Remove the .git/aicommit working directory and exit"
                 echo "Quick Shell Shims (non-interactive, CI/CD friendly):"
                 echo "  aic                Fast all-in-one commit without SemVer"
@@ -101,6 +104,10 @@ _aicommit_main() {
             --dry-run|-d)    dry_run=true ;;
             --verbose|-v)    verbose=true ;;
             --regenerate|-r) regenerate=true ;;
+            --reflect)       export AI_ENABLE_REFLECTION=true ;;
+            --reflect=always) export AI_ENABLE_REFLECTION=true; export AI_REFLECTION_MODE="always" ;;
+            --reflect=on-failure) export AI_ENABLE_REFLECTION=true; export AI_REFLECTION_MODE="on-failure" ;;
+            --no-reflect|--no-reflection) export AI_ENABLE_REFLECTION=false ;;
             --clean-cache)   clean_cache=true ;;
             *) echo "Unknown option: $1. Use --help for usage."; return 1 ;;
         esac

@@ -142,3 +142,45 @@ EOF
     [ "$status" -eq 0 ]
     unset AI_MODEL
 }
+
+# ─── Conventional Commits contract ───────────────────────────────────────────
+
+@test "malformed or truncated JSON response falls back without crashing and satisfies contract" {
+    echo "test" > app.sh
+    git add app.sh
+    export AI_MODEL="test-model"
+    # Mock returns truncated JSON
+    mock_ollama_api '{"type":"feat","scope":"none","breaking":false,"subject":'
+    run aic
+    [ "$status" -eq 0 ]
+    local recorded
+    recorded=$(git log -1 --format="%B")
+    assert_conventional_commit_contract "$recorded"
+}
+
+@test "batched response with fewer commits than groups invokes sequential filler and satisfies contract" {
+    mkdir -p lib tests
+    echo "core code" > lib/core.sh
+    echo "test code" > tests/test.sh
+    git add lib/core.sh tests/test.sh
+    export AI_MODEL="test-model"
+    # Batch response only returns 1 commit for 2 groups; sequential filler then provides commits
+    mock_ollama_api '{"commits":[{"type":"feat","scope":"core","breaking":false,"subject":"update core library"}]}'
+    run aicc
+    [ "$status" -eq 0 ]
+    local msg1 msg2
+    msg1=$(git log -1 --skip=0 --format="%B")
+    msg2=$(git log -1 --skip=1 --format="%B")
+    assert_conventional_commit_contract "$msg1"
+    assert_conventional_commit_contract "$msg2"
+}
+
+@test "perl missing from PATH still yields message satisfying contract from extraction" {
+    mock_bin "perl" "exit 127"
+    local raw="feat(core): implement feature without perl
+
+- add feature implementation details"
+    local res
+    res=$(extract_conventional_commit "$raw")
+    assert_conventional_commit_contract "$res"
+}

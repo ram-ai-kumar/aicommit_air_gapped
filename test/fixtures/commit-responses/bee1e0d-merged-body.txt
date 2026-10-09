@@ -1,0 +1,2 @@
+feat(core): add automatic semantic versioning detection and release bumping
+Add lib/semver.sh engine to auto-detect version strings from Ruby (.gemspec, .rb), PHP (composer.json), .NET (.csproj), Java (pom.xml, gradle), and Python (setup.py) projects. Integrate calculate_next_semver into the core workflow to analyze commit messages and diffs against SemVer 2.0.0 rules, automatically determining major, minor, or patch increments. Include comprehensive unit tests for version parsing logic and release strategy validation.

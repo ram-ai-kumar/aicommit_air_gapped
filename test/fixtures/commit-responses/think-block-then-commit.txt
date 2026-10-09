@@ -1,0 +1,8 @@
+<think>
+We need to generate a commit message for the semver changes.
+Draft: feat: add semver
+Wait, need to be more specific.
+</think>
+feat(semver): implement semantic versioning engine
+
+- add comparison logic and unit tests

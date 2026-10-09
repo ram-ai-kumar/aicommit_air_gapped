@@ -1,0 +1,10 @@
+{
+  "type": "chore",
+  "scope": "other",
+  "scope_other": "core-2",
+  "breaking": false,
+  "subject": "add .env* to gitignore",
+  "body": [
+    "added .env* pattern to .gitignore"
+  ]
+}

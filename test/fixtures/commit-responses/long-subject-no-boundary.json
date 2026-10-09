@@ -1,0 +1,9 @@
+{
+  "type": "feat",
+  "scope": "core",
+  "breaking": false,
+  "subject": "implement robust semantic versioning engine and comprehensive version comparison logic across multiple languages",
+  "body": [
+    "integrate calculate_next_semver into core workflow"
+  ]
+}

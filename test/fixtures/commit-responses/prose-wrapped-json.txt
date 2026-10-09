@@ -1,0 +1,15 @@
+Here is the conventional commit message in JSON format:
+
+```json
+{
+  "type": "fix",
+  "scope": "parser",
+  "breaking": false,
+  "subject": "handle empty input gracefully",
+  "body": [
+    "return empty result when input has zero bytes"
+  ]
+}
+```
+
+I hope this helps!

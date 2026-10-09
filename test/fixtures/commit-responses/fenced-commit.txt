@@ -1,0 +1,5 @@
+```commit
+fix(parser): handle empty input gracefully
+
+- return empty result when input has zero bytes
+```

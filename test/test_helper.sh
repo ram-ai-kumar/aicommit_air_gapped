@@ -58,6 +58,7 @@ setup_test_env() {
 
     # Disable live AI grouping in tests so unit tests test deterministic heuristics
     export AI_DISABLE_GROUPING="true"
+    export AI_REFLECTION_PROMPT_FILE="$AICOMMIT_DIR/templates/reflection-prompt.txt"
 
     # Global mock for timeout to respect internal mocked functions
     timeout() {
@@ -182,20 +183,121 @@ refute_output_contains() {
 
 # ─── Compliance Helpers ───────────────────────────────────────────────────────
 
-# Return 0 if the message matches Conventional Commits format and the header
-# is at most 72 characters, matching the rule in templates/prompt.txt.
-verify_conventional_commit() {
+# Return 0 if the message satisfies the Conventional Commits v1.0.0 contract
+# and git 72-char limit across the full message.
+assert_conventional_commit_contract() {
     local msg="$1"
-    local first_line
-    first_line=$(printf '%s' "$msg" | head -n 1)
+    [ -z "$msg" ] && return 1
+
+    # Rule 1 & 2: Header format and length
+    local line1
+    line1=$(printf '%s\n' "$msg" | head -n 1)
 
     # Header length must not exceed 72 characters
-    if [ "${#first_line}" -gt 72 ]; then
+    [ "${#line1}" -le 72 ] || return 1
+
+    # Header must not have a trailing dot
+    [[ "$line1" != *\. ]] || return 1
+
+    # Line 1 must match conventional commit format with lowercase type and single space after colon
+    printf '%s' "$line1" | grep -qE \
+        "^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\([a-z0-9._/-]+\))?!?: \S" || return 1
+
+    # Scope must have no -N dedup suffix (e.g. core-2) and contain no spaces
+    if printf '%s' "$line1" | grep -qE '\([a-z0-9._/-]*-[0-9]+\)'; then
         return 1
     fi
 
-    printf '%s' "$first_line" | grep -qE \
-        "^(feat|fix|docs|style|refactor|test|chore|perf|ci|build|revert)(\(.+\))?!?: .+"
+    # Total lines
+    local total_lines
+    total_lines=$(printf '%s\n' "$msg" | wc -l | tr -d ' ')
+
+    # Rule 3: when there is more than one line, line 2 must be empty
+    if [ "$total_lines" -gt 1 ]; then
+        local line2
+        line2=$(printf '%s\n' "$msg" | sed -n '2p')
+        [ -z "$line2" ] || return 1
+    fi
+
+    # Rule 4: no two consecutive blank lines, and no trailing blank line
+    local last_line
+    last_line=$(printf '%s\n' "$msg" | tail -n 1)
+    [ -n "$last_line" ] || return 1
+
+    local has_consec
+    has_consec=$(printf '%s\n' "$msg" | awk '
+        BEGIN { prev_b = 0; bad = 0 }
+        /^[[:space:]]*$/ {
+            if (prev_b) bad = 1
+            prev_b = 1
+            next
+        }
+        { prev_b = 0 }
+        END { print bad }
+    ')
+    [ "$has_consec" -eq 0 ] || return 1
+
+    # Rule 5: footer lines form one trailing block with one blank line before it,
+    # and BREAKING CHANGE must be uppercase
+    local footer_err
+    footer_err=$(printf '%s\n' "$msg" | awk '
+        BEGIN { n = 0 }
+        { lines[n++] = $0 }
+        END {
+            if (n <= 2) exit 0
+            f_start = n
+            for (i = n - 1; i >= 2; i--) {
+                l = lines[i]
+                if (l ~ /^[[:space:]]*$/) break
+                if (l ~ /^[[:space:]]*breaking[ -]change(: | #)/) {
+                    print "LOWERCASE_BREAKING"
+                    exit 1
+                }
+                if (l ~ /^[[:space:]]*(BREAKING[ -]CHANGE|[A-Za-z-]+)(: | #)/) {
+                    f_start = i
+                } else {
+                    break
+                }
+            }
+            if (f_start < n) {
+                if (f_start == 0 || lines[f_start - 1] !~ /^[[:space:]]*$/) {
+                    print "NO_BLANK_BEFORE_FOOTERS"
+                    exit 1
+                }
+                for (i = 2; i < f_start - 1; i++) {
+                    if (lines[i] ~ /^[[:space:]]*(BREAKING[ -]CHANGE|[A-Za-z-]+)(: | #)/) {
+                        print "DISCONTINUOUS_FOOTERS"
+                        exit 1
+                    }
+                }
+            }
+            exit 0
+        }
+    ')
+    [ -z "$footer_err" ] || return 1
+
+    # Rule 6: if header has ! or BREAKING CHANGE: footer exists, suggest_semver_bump returns major
+    if declare -f suggest_semver_bump >/dev/null 2>&1; then
+        local is_major=false
+        if printf '%s' "$line1" | grep -qE '^[a-z]+(\([a-z0-9._/-]+\))?!:'; then
+            is_major=true
+        fi
+        if printf '%s\n' "$msg" | grep -qE '^BREAKING[ -]CHANGE:'; then
+            is_major=true
+        fi
+        if [ "$is_major" = true ]; then
+            local bump
+            bump=$(suggest_semver_bump "$msg")
+            [ "$bump" = "major" ] || return 1
+        fi
+    fi
+
+    return 0
+}
+
+# Alias for backwards compatibility with existing test callers
+verify_conventional_commit() {
+    assert_conventional_commit_contract "$@"
 }
 
 # ─── Default Model Helper ────────────────────────────────────────────────────
@@ -213,6 +315,7 @@ if [ "${BASH_SOURCE[0]}" != "${0}" ]; then
     export -f setup_test_env cleanup_test_env mock_bin mock_ollama_api
     export -f create_test_files
     export -f assert_output_contains refute_output_contains
+    export -f assert_conventional_commit_contract
     export -f verify_conventional_commit
     export -f get_default_ai_model
 fi

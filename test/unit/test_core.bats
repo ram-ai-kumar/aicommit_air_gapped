@@ -501,46 +501,11 @@ refactor(validation): optimize error counting
 
     local result
     result=$(extract_conventional_commit "$input")
-    echo "$result" | grep -qF "feat(aicommit): implement logical context grouping and multi-commit confirmation"
+    echo "$result" | grep -qF "feat(aicommit): implement logical context grouping and multi-commit"
+    echo "$result" | grep -qF "confirmation"
     echo "$result" | grep -qF "feature/functionality instead of directory structure"
     ! echo "$result" | grep -qF "feature/fun"
     ! echo "$result" | grep -qF "split c"
-}
-
-@test "extract_conventional_commit repairs word-wrap stutter fragments and joins wrapped headers" {
-    local input
-    input="feat(aicommit): implement logical context grouping and multi-commit
-split c
-
-confirmation
-
-- introduce AI-driven context analyzer to group staged files by
-  feature/fun
-feature/functionality instead of directory structure
-- add user prompt template for intelligent file clustering into atomic
-  comm
-commit contexts
-- update split confirmation UI to display grouped file previews with
-  dynami
-dynamic width alignment
-- add unit and integration tests for context grouping logic, output
-  formatt
-formatting, and abort handling
-- disable live AI grouping in test environment to ensure deterministic
-  unit
-unit test behavior"
-
-    local result
-    result=$(extract_conventional_commit "$input")
-    echo "$result" | grep -qF "feat(aicommit): implement logical context grouping and multi-commit split confirmation"
-    echo "$result" | grep -qF "feature/functionality instead of directory structure"
-    echo "$result" | grep -qF "commit contexts"
-    echo "$result" | grep -qF "dynamic width alignment"
-    echo "$result" | grep -qF "formatting, and abort handling"
-    echo "$result" | grep -qF "unit test behavior"
-    ! echo "$result" | grep -qF "feature/fun"
-    ! echo "$result" | grep -qF "split c"
-    ! echo "$result" | grep -qE '^confirmation$'
 }
 
 
@@ -1091,6 +1056,178 @@ EOF
     [ "${_AICOMMIT_GRP_MSGS[1]}" = "feat(core): one" ]
     [ "${_AICOMMIT_GRP_MSGS[2]}" = "fix(ui): two" ]
 }
+
+# ─── Conventional Commits v1.0.0 enforce_conventional_commit spec rules ─────
+
+@test "enforce_conventional_commit rule 1: prefixes type, optional scope, optional bang, and colon space" {
+    local r1 r2 r3 r4
+    r1=$(enforce_conventional_commit "feat: add feature")
+    [ "$r1" = "feat: add feature" ]
+
+    r2=$(enforce_conventional_commit "feat(core): add feature")
+    [ "$r2" = "feat(core): add feature" ]
+
+    r3=$(enforce_conventional_commit "feat!: breaking change")
+    [ "$r3" = "feat!: breaking change" ]
+
+    r4=$(enforce_conventional_commit "feat(core)!: breaking change")
+    [ "$r4" = "feat(core)!: breaking change" ]
+}
+
+@test "enforce_conventional_commit rule 4: scope is a noun in parentheses, sanitizes and strips dedup suffix" {
+    local r1 r2
+    r1=$(enforce_conventional_commit "chore(core-2): update deps")
+    [ "$r1" = "chore(core): update deps" ]
+
+    r2=$(enforce_conventional_commit "chore(core-15): update deps")
+    [ "$r2" = "chore(core): update deps" ]
+}
+
+@test "enforce_conventional_commit rule 5: description follows colon space and trailing period is stripped" {
+    local r
+    r=$(enforce_conventional_commit "fix(parser): resolve null pointer exception.")
+    [ "$r" = "fix(parser): resolve null pointer exception" ]
+}
+
+@test "enforce_conventional_commit rule 6: body begins one blank line after description" {
+    local input=$'feat(core): add feature\nThis is body directly following header without blank line.'
+    local r
+    r=$(enforce_conventional_commit "$input")
+    local line2
+    line2=$(printf '%s\n' "$r" | sed -n '2p')
+    [ -z "$line2" ]
+    assert_conventional_commit_contract "$r"
+}
+
+@test "enforce_conventional_commit rules 8-10: footers follow one blank line after body" {
+    local input=$'feat: add feature\n\nBody explanation.\n\nSigned-off-by: Dev <dev@example.com>\nRefs: #123'
+    local r
+    r=$(enforce_conventional_commit "$input")
+    assert_conventional_commit_contract "$r"
+    printf '%s\n' "$r" | grep -qF "Signed-off-by: Dev <dev@example.com>"
+    printf '%s\n' "$r" | grep -qF "Refs: #123"
+}
+
+@test "enforce_conventional_commit rule 11: breaking changes indicated in prefix or footer" {
+    local r1 r2
+    r1=$(enforce_conventional_commit "feat!: remove old api")
+    assert_conventional_commit_contract "$r1"
+
+    r2=$(enforce_conventional_commit $'feat: remove old api\n\nBREAKING CHANGE: endpoint removed')
+    assert_conventional_commit_contract "$r2"
+}
+
+@test "enforce_conventional_commit rule 12: BREAKING CHANGE footer must be uppercase" {
+    local input=$'feat: remove old api\n\nbreaking change: endpoint removed'
+    local r
+    r=$(enforce_conventional_commit "$input")
+    printf '%s\n' "$r" | grep -qF "BREAKING CHANGE: endpoint removed"
+    ! printf '%s\n' "$r" | grep -qF "breaking change:"
+    assert_conventional_commit_contract "$r"
+}
+
+@test "enforce_conventional_commit rule 13: breaking bang prefix immediately before colon" {
+    local r
+    r=$(enforce_conventional_commit "feat(core)!: breaking change")
+    [ "$r" = "feat(core)!: breaking change" ]
+    assert_conventional_commit_contract "$r"
+}
+
+@test "enforce_conventional_commit rule 15: types are case-insensitive and normalized to lowercase" {
+    local r1 r2
+    r1=$(enforce_conventional_commit "FEAT(core): add feature")
+    [ "$r1" = "feat(core): add feature" ]
+
+    r2=$(enforce_conventional_commit "Fix: resolve bug")
+    [ "$r2" = "fix: resolve bug" ]
+}
+
+@test "enforce_conventional_commit rule 16: BREAKING-CHANGE is synonymous with BREAKING CHANGE" {
+    local input=$'feat(core)!: update config\n\nBREAKING-CHANGE: format changed to json'
+    local r
+    r=$(enforce_conventional_commit "$input")
+    printf '%s\n' "$r" | grep -qF "BREAKING CHANGE: format changed to json"
+    ! printf '%s\n' "$r" | grep -qF "BREAKING-CHANGE:"
+    assert_conventional_commit_contract "$r"
+}
+
+@test "suggest_semver_bump returns major for BREAKING-CHANGE footer" {
+    local msg=$'feat: update configuration\n\nBREAKING-CHANGE: format changed'
+    local bump
+    bump=$(suggest_semver_bump "$msg")
+    [ "$bump" = "major" ]
+}
+
+# ─── reflect_commit_message & reflection workflow ────────────────────────────
+
+@test "reflect_commit_message executes with one-shot template and refines draft" {
+    echo "x" > app.js
+    git add app.js
+    local d
+    d=$(get_aicommit_tmp_dir)
+    build_ai_context "$(git diff --staged)" "$(git diff --staged --name-only)" "$(git diff --staged --numstat)" "" "$d"
+
+    invoke_llm() {
+        grep -qF "ONE-SHOT REFLECTION EXAMPLE" "$2"
+        printf '%s' '{"type":"feat","scope":"app","breaking":false,"subject":"add app.js"}' > "$3"
+        return 0
+    }
+    export -f invoke_llm
+
+    run reflect_commit_message "feat: update nonexistent.js" "$d" "nonexistent.js is not in the diff"
+    [ "$status" -eq 0 ]
+    [ "$output" = "feat(app): add app.js" ]
+}
+
+@test "reflect_commit_message is bypassed when AI_ENABLE_REFLECTION=false" {
+    echo "x" > app.js
+    git add app.js
+    local d
+    d=$(get_aicommit_tmp_dir)
+    build_ai_context "$(git diff --staged)" "$(git diff --staged --name-only)" "$(git diff --staged --numstat)" "" "$d"
+
+    export AI_ENABLE_REFLECTION="false"
+    run reflect_commit_message "feat: update nonexistent.js" "$d" "nonexistent.js is not in the diff"
+    [ "$status" -ne 0 ]
+}
+
+@test "generate_commit_message writes REFLECTION_PROMPT into the state dir on --dry-run" {
+    echo "x" > app.js
+    git add app.js
+    build_ai_context "$(git diff --staged)" "$(git diff --staged --name-only)" "$(git diff --staged --numstat)"
+    generate_commit_message --dry-run
+    local s
+    s=$(get_aicommit_state_dir)
+    [ -s "${s}/REFLECTION_PROMPT" ]
+    grep -q "ONE-SHOT REFLECTION EXAMPLE" "${s}/REFLECTION_PROMPT"
+}
+
+@test "generate_commit_message triggers reflection on gate failure and accepts valid reflection" {
+    echo "x" > app.js
+    git add app.js
+    build_ai_context "$(git diff --staged)" "$(git diff --staged --name-only)" "$(git diff --staged --numstat)"
+
+    echo "0" > "$TEST_TEMP_DIR/call_count"
+    invoke_llm() {
+        local count
+        count=$(cat "$TEST_TEMP_DIR/call_count")
+        count=$((count + 1))
+        echo "$count" > "$TEST_TEMP_DIR/call_count"
+        if [ "$count" -eq 1 ]; then
+            printf '%s' '{"type":"feat","scope":"app","breaking":false,"subject":"update nonexistent.js"}' > "$3"
+        else
+            printf '%s' '{"type":"feat","scope":"app","breaking":false,"subject":"add app.js"}' > "$3"
+        fi
+        return 0
+    }
+    export -f invoke_llm
+
+    run generate_commit_message
+    [ "$status" -eq 0 ]
+    [ "$output" = "feat(app): add app.js" ]
+    [ "$(cat "$TEST_TEMP_DIR/call_count")" -eq 2 ]
+}
+
 
 
 

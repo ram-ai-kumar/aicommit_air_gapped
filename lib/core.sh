@@ -660,14 +660,280 @@ ${stat_only_stat}"
     fi
 
     if [ -n "$logical_scope" ]; then
+        local clean_scope
+        clean_scope=$(printf '%s' "$logical_scope" | sed -E 's/-[0-9]+$//')
         changes_context="${changes_context}
 
 === LOGICAL COMMIT SCOPE & FEATURE ===
-This atomic commit is scoped specifically to: ${logical_scope}.
+This atomic commit is scoped specifically to: ${clean_scope}.
 Generate the commit message type, scope, and description focused on this logical concern."
     fi
 
     printf '%s' "$changes_context" > "${out_dir}/CHANGES_CONTEXT"
+}
+
+# Spec enforcer: guarantee that any commit message satisfies the
+# Conventional Commits v1.0.0 specification and git 72-char convention.
+# Every generation path terminates in this function.
+# Accepts message via $1 or stdin.
+enforce_conventional_commit() {
+    local raw_input
+    if [ $# -gt 0 ]; then
+        raw_input="$1"
+    else
+        raw_input="$(cat)"
+    fi
+
+    [ -z "$raw_input" ] && return 0
+
+    # Strip carriage returns
+    raw_input=$(printf '%s' "$raw_input" | tr -d '\r')
+
+    # If completely blank, return empty
+    if [ -z "$(printf '%s' "$raw_input" | tr -d '[:space:]')" ]; then
+        return 0
+    fi
+
+    # Run the core enforcement engine in awk
+    printf '%s\n' "$raw_input" | awk '
+        BEGIN {
+            line_count = 0
+        }
+        {
+            lines[line_count++] = $0
+        }
+        END {
+            # 1. Locate the first non-empty line as header candidate
+            first_idx = -1
+            for (i = 0; i < line_count; i++) {
+                if (lines[i] ~ /[^[:space:]]/) {
+                    first_idx = i
+                    break
+                }
+            }
+            if (first_idx == -1) exit 0
+
+            header_raw = lines[first_idx]
+            sub(/^[[:space:]]+/, "", header_raw)
+            sub(/[[:space:]]+$/, "", header_raw)
+
+            # Match conventional commit header:
+            # ^([A-Za-z]+)(\([^)]*\))?(!)?:[[:space:]]*(.*)$
+            if (header_raw !~ /^([A-Za-z]+)(\([^)]*\))?(!)?:[[:space:]]*(.*)$/) {
+                # Not a conventional commit header candidate.
+                # Output input lines verbatim without trailing blank lines.
+                last_idx = line_count - 1
+                while (last_idx >= 0 && lines[last_idx] ~ /^[[:space:]]*$/) last_idx--
+                for (i = first_idx; i <= last_idx; i++) {
+                    print lines[i]
+                }
+                exit 0
+            }
+
+            # Parse header parts
+            colon_idx = index(header_raw, ":")
+            prefix_part = substr(header_raw, 1, colon_idx - 1)
+            raw_desc = substr(header_raw, colon_idx + 1)
+            sub(/^[[:space:]]+/, "", raw_desc)
+            sub(/[[:space:]]+$/, "", raw_desc)
+            # Strip trailing period(s) from description
+            sub(/\.+$/, "", raw_desc)
+
+            # Parse prefix_part into type, scope, bang
+            has_bang = 0
+            if (substr(prefix_part, length(prefix_part), 1) == "!") {
+                has_bang = 1
+                prefix_part = substr(prefix_part, 1, length(prefix_part) - 1)
+            }
+
+            scope_str = ""
+            open_paren = index(prefix_part, "(")
+            close_paren = index(prefix_part, ")")
+            if (open_paren > 0 && close_paren > open_paren) {
+                type_str = substr(prefix_part, 1, open_paren - 1)
+                scope_content = substr(prefix_part, open_paren + 1, close_paren - open_paren - 1)
+                # Lowercase and strip dedup suffix -N (e.g. -2, -123)
+                scope_content = tolower(scope_content)
+                sub(/-[0-9]+$/, "", scope_content)
+                if (scope_content != "") {
+                    scope_str = "(" scope_content ")"
+                }
+            } else {
+                type_str = prefix_part
+            }
+
+            type_str = tolower(type_str)
+            gsub(/[^a-z]/, "", type_str)
+
+            bang_str = (has_bang ? "!" : "")
+            final_prefix = type_str scope_str bang_str ": "
+            p_len = length(final_prefix)
+
+            # Check header length limit (72 chars)
+            overflow_desc = ""
+            head_desc = raw_desc
+            total_h_len = p_len + length(head_desc)
+
+            if (total_h_len > 72) {
+                max_d = 72 - p_len
+                if (max_d < 1) max_d = 1
+
+                # Find boundary in raw_desc that keeps header <= 72.
+                # Boundaries in priority order: ". ", "; ", " — ", " - "
+                split_found = 0
+                split_pos = 0
+                delim_len = 0
+
+                delims[1] = ". "
+                delims[2] = "; "
+                delims[3] = " — "
+                delims[4] = " - "
+
+                for (d_idx = 1; d_idx <= 4; d_idx++) {
+                    d = delims[d_idx]
+                    d_len = length(d)
+                    p = index(raw_desc, d)
+                    if (p > 0) {
+                        if ((p - 1) <= max_d && (p - 1) >= 1) {
+                            split_found = 1
+                            split_pos = p
+                            delim_len = d_len
+                            break
+                        }
+                    }
+                }
+
+                if (split_found) {
+                    head_desc = substr(raw_desc, 1, split_pos - 1)
+                    sub(/\.+$/, "", head_desc)
+                    sub(/[[:space:]]+$/, "", head_desc)
+                    overflow_desc = substr(raw_desc, split_pos + delim_len)
+                    sub(/^[[:space:]]+/, "", overflow_desc)
+                } else {
+                    # No boundary fits: cut at last word boundary (space) within max_d
+                    target_sub = substr(raw_desc, 1, max_d)
+                    last_space = 0
+                    for (c = length(target_sub); c >= 1; c--) {
+                        if (substr(target_sub, c, 1) ~ /[[:space:]]/) {
+                            last_space = c
+                            break
+                        }
+                    }
+                    if (last_space > 1) {
+                        head_desc = substr(raw_desc, 1, last_space - 1)
+                        sub(/\.+$/, "", head_desc)
+                        sub(/[[:space:]]+$/, "", head_desc)
+                        overflow_desc = substr(raw_desc, last_space + 1)
+                        sub(/^[[:space:]]+/, "", overflow_desc)
+                    } else {
+                        # Single long token (> 72 chars, no spaces) -> hard cut at max_d
+                        head_desc = substr(raw_desc, 1, max_d)
+                        sub(/\.+$/, "", head_desc)
+                        overflow_desc = substr(raw_desc, max_d + 1)
+                        sub(/^[[:space:]]+/, "", overflow_desc)
+                    }
+                }
+            }
+
+            final_header = final_prefix head_desc
+
+            # 2. Extract Footers and Body from remaining lines
+            rem_count = 0
+            for (i = first_idx + 1; i < line_count; i++) {
+                rem_lines[rem_count++] = lines[i]
+            }
+
+            rem_last = rem_count - 1
+            while (rem_last >= 0 && rem_lines[rem_last] ~ /^[[:space:]]*$/) {
+                rem_last--
+            }
+
+            # Scan backwards from rem_last to find contiguous trailing footer lines:
+            # Pattern: ^[[:space:]]*(BREAKING[ -]CHANGE|[A-Za-z][A-Za-z-]*)(: | #)
+            footer_start = rem_last + 1
+            for (i = rem_last; i >= 0; i--) {
+                line = rem_lines[i]
+                if (line ~ /^[[:space:]]*$/) {
+                    break
+                }
+                if (line ~ /^[[:space:]]*([Bb][Rr][Ee][Aa][Kk][Ii][Nn][Gg][ -][Cc][Hh][Aa][Nn][Gg][Ee]|[A-Za-z][A-Za-z-]*)(: | #)/) {
+                    footer_start = i
+                } else {
+                    break
+                }
+            }
+
+            footer_count = 0
+            if (footer_start <= rem_last) {
+                for (i = footer_start; i <= rem_last; i++) {
+                    f_line = rem_lines[i]
+                    sub(/^[[:space:]]+/, "", f_line)
+                    sub(/[[:space:]]+$/, "", f_line)
+                    if (f_line ~ /^[Bb][Rr][Ee][Aa][Kk][Ii][Nn][Gg][ -][Cc][Hh][Aa][Nn][Gg][Ee]:/) {
+                        sub(/^[Bb][Rr][Ee][Aa][Kk][Ii][Nn][Gg][ -][Cc][Hh][Aa][Nn][Gg][Ee]:[[:space:]]*/, "BREAKING CHANGE: ", f_line)
+                    }
+                    final_footers[footer_count++] = f_line
+                }
+            }
+
+            body_end = footer_start - 1
+            while (body_end >= 0 && rem_lines[body_end] ~ /^[[:space:]]*$/) {
+                body_end--
+            }
+
+            body_start = 0
+            while (body_start <= body_end && rem_lines[body_start] ~ /^[[:space:]]*$/) {
+                body_start++
+            }
+
+            raw_body_count = 0
+            prev_blank = 0
+            for (i = body_start; i <= body_end; i++) {
+                b_line = rem_lines[i]
+                sub(/[[:space:]]+$/, "", b_line)
+                if (b_line ~ /^[[:space:]]*$/) {
+                    if (!prev_blank && raw_body_count > 0) {
+                        clean_body[raw_body_count++] = ""
+                        prev_blank = 1
+                    }
+                } else {
+                    clean_body[raw_body_count++] = b_line
+                    prev_blank = 0
+                }
+            }
+            while (raw_body_count > 0 && clean_body[raw_body_count - 1] == "") {
+                raw_body_count--
+            }
+
+            total_body_count = 0
+            if (overflow_desc != "") {
+                final_body[total_body_count++] = overflow_desc
+                if (raw_body_count > 0) {
+                    final_body[total_body_count++] = ""
+                }
+            }
+            for (i = 0; i < raw_body_count; i++) {
+                final_body[total_body_count++] = clean_body[i]
+            }
+
+            # 3. Output the assembled message
+            print final_header
+
+            if (total_body_count > 0) {
+                print ""
+                for (i = 0; i < total_body_count; i++) {
+                    print final_body[i]
+                }
+            }
+
+            if (footer_count > 0) {
+                print ""
+                for (i = 0; i < footer_count; i++) {
+                    print final_footers[i]
+                }
+            }
+        }
+    '
 }
 
 # Extract and sanitize clean conventional commit message from raw LLM output.
@@ -683,9 +949,24 @@ extract_conventional_commit() {
     local cleaned
     cleaned=$(printf '%s' "$raw_input" | tr -d '\r')
 
+    # If input contains a schema-conforming JSON object, delegate to json assembler
+    local json_cand
+    if command -v extract_json_object >/dev/null 2>&1; then
+        json_cand=$(extract_json_object "$cleaned" 2>/dev/null)
+    elif command -v perl >/dev/null 2>&1; then
+        json_cand=$(printf '%s\n' "$cleaned" | perl -0777 -ne 'print $1 if /(\{.*\})/s' | head -c 8192)
+    else
+        json_cand="$cleaned"
+    fi
+    if printf '%s' "$json_cand" | jq -e 'type == "object" and has("type") and has("subject")' >/dev/null 2>&1; then
+        _commit_msg_from_json_obj "$json_cand"
+        return
+    fi
+
     # Resolve terminal cursor backspaces and line clears (\x1b[<N>D\x1b[K) emitted by terminal word-wrappers
     if command -v perl >/dev/null 2>&1; then
-        cleaned=$(printf '%s\n' "$cleaned" | perl -0777 -pe '
+        local perl_cleaned
+        if perl_cleaned=$(printf '%s\n' "$cleaned" | perl -0777 -pe '
             # Strip non-destructive ANSI escapes (cursor show/hide, colors) first
             s/\x1b\[\?[0-9]+[hl]//g;
             s/\x1b\[[0-9;]*m//g;
@@ -700,7 +981,9 @@ extract_conventional_commit() {
             while (/.\x08/) {
                 s/.\x08//g;
             }
-        ')
+        ' 2>/dev/null) && [ -n "$perl_cleaned" ]; then
+            cleaned="$perl_cleaned"
+        fi
     fi
 
     # Strip remaining ANSI escape sequences
@@ -774,14 +1057,14 @@ extract_conventional_commit() {
             }
         ')
         if [ -n "$(printf '%s' "$code_block" | tr -d '[:space:]')" ]; then
-            if printf '%s\n' "$code_block" | grep -qE '^[[:space:]]*(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)([(][^)]+[)])?!?: '; then
+            if printf '%s\n' "$code_block" | grep -qiE '^[[:space:]]*(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)([(][^)]+[)])?!?: '; then
                 cleaned="$code_block"
             fi
         fi
     fi
 
-    # Step 5: Locate Conventional Commit header
-    local commit_regex='^[[:space:]]*(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)([(][^)]+[)])?!?:[[:space:]].+'
+    # Step 5: Locate Conventional Commit header (case-insensitive for type, rule 15)
+    local commit_regex='^[[:space:]]*([Ff][Ee][Aa][Tt]|[Ff][Ii][Xx]|[Dd][Oo][Cc][Ss]|[Ss][Tt][Yy][Ll][Ee]|[Rr][Ee][Ff][Aa][Cc][Tt][Oo][Rr]|[Pp][Ee][Rr][Ff]|[Tt][Ee][Ss][Tt]|[Bb][Uu][Ii][Ll][Dd]|[Cc][Ii]|[Cc][Hh][Oo][Rr][Ee]|[Rr][Ee][Vv][Ee][Rr][Tt])([(][^)]+[)])?!?:[[:space:]].+'
 
     # Extract conventional commit block:
     # Handles multiple candidate headers (e.g. drafts in thinking) by tracking blocks.
@@ -857,7 +1140,8 @@ extract_conventional_commit() {
 
     # Remove immediate token stutters and terminal word-wrap fragment stutters
     if command -v perl >/dev/null 2>&1; then
-        cleaned=$(printf '%s\n' "$cleaned" | perl -0777 -pe '
+        local perl_stutter
+        if perl_stutter=$(printf '%s\n' "$cleaned" | perl -0777 -pe '
             # Remove word-wrap fragment stutters where line N ends with a prefix of line N+1 leading word
             # e.g. "feature/fun\nfeature/functionality" -> "feature/functionality"
             s/(?:^[ \t]*|[ \t]+)([a-zA-Z0-9_\/\-\.]+)[ \t]*\n+[ \t]*(?=\1[a-zA-Z0-9_\/\-\.]*)/ /mg;
@@ -865,7 +1149,9 @@ extract_conventional_commit() {
             # Remove token duplication stutters (e.g. "an and", "and and")
             s/\b([a-zA-Z]{2,})\s+\1\b/\1/g;
             s/\b([a-zA-Z]{2,})\s+\1([a-zA-Z]+)\b/\1\2/g;
-        ')
+        ' 2>/dev/null) && [ -n "$perl_stutter" ]; then
+            cleaned="$perl_stutter"
+        fi
     fi
 
     # Trim leading and trailing empty lines and normalize header-body separation
@@ -880,12 +1166,20 @@ extract_conventional_commit() {
                 next
             }
             if (!reading_body) {
-                # If next line is not empty and not a bullet point, it is a continuation of the header line
-                if ($0 != "" && $0 !~ /^[[:space:]]*[-*+]/) {
-                    header = header " " $0
+                # A non-blank, non-bullet, non-footer line directly after the header is joined
+                # only when the joined header stays within 72 chars. Otherwise the line starts the body.
+                is_bullet = ($0 ~ /^[[:space:]]*[-*+]/)
+                is_footer = ($0 ~ /^[[:space:]]*(BREAKING[ -]CHANGE|[A-Za-z][A-Za-z-]*)(: | #)/)
+                if ($0 != "" && !is_bullet && !is_footer) {
+                    if (length(header " " $0) <= 72) {
+                        header = header " " $0
+                        next
+                    }
+                }
+                if ($0 == "") {
+                    reading_body = 1
                     next
                 }
-                if ($0 == "") next
                 reading_body = 1
             }
             body_lines[body_count++] = $0
@@ -904,7 +1198,7 @@ extract_conventional_commit() {
                 }
             }
         }
-    '
+    ' | enforce_conventional_commit
 }
 
 # Classify a Conventional Commit message into a semver bump suggestion.
@@ -915,7 +1209,7 @@ suggest_semver_bump() {
     local header
     header=$(printf '%s\n' "$commit_msg" | head -n1)
 
-    if printf '%s\n' "$commit_msg" | grep -qE '^BREAKING CHANGE:'; then
+    if printf '%s\n' "$commit_msg" | grep -qE '^BREAKING[ -]CHANGE:'; then
         echo "major"; return
     fi
     if printf '%s\n' "$header" | grep -qE '^[[:space:]]*[a-z]+(\([^)]+\))?!:'; then
@@ -945,12 +1239,13 @@ _build_commit_schema() {
             type: "object",
             additionalProperties: false,
             properties: {
-                type:        {type: "string", enum: $types},
-                scope:       {type: "string", enum: $scopes},
-                scope_other: {type: "string", maxLength: 24},
-                breaking:    {type: "boolean"},
-                subject:     {type: "string", maxLength: 60},
-                body:        {type: "array", items: {type: "string"}, maxItems: 6}
+                type:            {type: "string", enum: $types},
+                scope:           {type: "string", enum: $scopes},
+                scope_other:     {type: "string", maxLength: 24},
+                breaking:        {type: "boolean"},
+                breaking_change: {type: "string"},
+                subject:         {type: "string", maxLength: 60},
+                body:            {type: "array", items: {type: "string"}, maxItems: 6}
             },
             required: ["type", "scope", "breaking", "subject"]
         };
@@ -998,21 +1293,27 @@ _enforce_token_budget() {
 # is guaranteed.
 # Args: $1=json object, $2=ctx_dir (optional, unused for now)
 _commit_msg_from_json_obj() {
-    local obj="$1"
-    local type scope scope_other breaking subject body
+    local obj="$1" ctx_dir="${2:-}"
+    if ! printf '%s' "$obj" | jq -e 'type == "object"' >/dev/null 2>&1; then
+        extract_conventional_commit "$obj"
+        return
+    fi
+
+    local type scope scope_other breaking breaking_change subject body
     type=$(printf '%s' "$obj" | jq -r '.type // empty' 2>/dev/null)
     subject=$(printf '%s' "$obj" | jq -r '.subject // empty' 2>/dev/null)
     [ -n "$type" ] && [ -n "$subject" ] || return 1
 
     scope=$(printf '%s' "$obj" | jq -r '.scope // "none"' 2>/dev/null)
     breaking=$(printf '%s' "$obj" | jq -r '.breaking // false' 2>/dev/null)
+    breaking_change=$(printf '%s' "$obj" | jq -r '.breaking_change // empty' 2>/dev/null)
     if [ "$scope" = "other" ]; then
-        scope_other=$(printf '%s' "$obj" | jq -r '.scope_other // ""' 2>/dev/null | tr 'A-Z' 'a-z' | tr -cd 'a-z0-9._/-' | cut -c1-24)
+        scope_other=$(printf '%s' "$obj" | jq -r '.scope_other // ""' 2>/dev/null | tr 'A-Z' 'a-z' | tr -cd 'a-z0-9._/-' | sed -E 's/-[0-9]+$//' | cut -c1-24)
         scope="$scope_other"
     fi
     case "$scope" in
         ""|none|null|other) scope="" ;;
-        *) scope=$(printf '%s' "$scope" | tr -cd 'a-zA-Z0-9._/-' | cut -c1-24)
+        *) scope=$(printf '%s' "$scope" | tr 'A-Z' 'a-z' | tr -cd 'a-z0-9._/-' | sed -E 's/-[0-9]+$//' | cut -c1-24)
            [ -n "$scope" ] && scope="($scope)" ;;
     esac
 
@@ -1024,11 +1325,18 @@ _commit_msg_from_json_obj() {
 
     local bang=""
     [ "$breaking" = "true" ] && bang="!"
-    printf '%s%s%s: %s' "$type" "$scope" "$bang" "$subject"
+    local msg
+    msg="${type}${scope}${bang}: ${subject}"
 
     body=$(printf '%s' "$obj" | jq -r '(.body // [])[] | select(type == "string" and length > 0) | "- " + .' 2>/dev/null)
-    [ -n "$body" ] && printf '\n\n%s' "$body"
-    printf '\n'
+    [ -n "$body" ] && msg="${msg}"$'\n\n'"${body}"
+
+    if [ "$breaking" = "true" ]; then
+        local bc_desc="${breaking_change:-$subject}"
+        msg="${msg}"$'\n\n'"BREAKING CHANGE: ${bc_desc}"
+    fi
+
+    printf '%s\n' "$msg" | enforce_conventional_commit
 }
 
 # Parse a raw model response into a commit message: schema JSON first, the
@@ -1093,7 +1401,19 @@ validate_commit_grounding() {
         printf 'header exceeds 72 chars (%d)\n' "${#header}"
         ok=false
     fi
-    type=$(printf '%s' "$header" | sed -nE 's/^([a-z]+)(\([^)]*\))?!?: .*/\1/p')
+
+    local line_count
+    line_count=$(printf '%s\n' "$msg" | wc -l | tr -d ' ')
+    if [ "$line_count" -gt 1 ]; then
+        local line2
+        line2=$(printf '%s\n' "$msg" | sed -n '2p')
+        if [ -n "$line2" ]; then
+            echo "line 2 must be blank"
+            ok=false
+        fi
+    fi
+
+    type=$(printf '%s' "$header" | sed -nE 's/^([a-zA-Z]+)(\([^)]*\))?!?: .*/\1/p' | tr 'A-Z' 'a-z')
     if [ -z "$type" ]; then
         echo "header is not a conventional commit"
         ok=false
@@ -1154,6 +1474,56 @@ template_commit_from_facts() {
     printf '%s\n' "$header"
 }
 
+# Reflection step — critique a candidate commit message against the staged diff
+# and facts block, removing hallucinations and enforcing Conventional Commits.
+# Args: $1=candidate_msg, $2=ctx_dir (optional), $3=feedback (optional)
+reflect_commit_message() {
+    local candidate_msg="$1" ctx_dir="${2:-}" feedback="${3:-}"
+    [ "${AI_ENABLE_REFLECTION:-true}" != "true" ] && return 1
+
+    if [ -z "$ctx_dir" ]; then
+        ctx_dir=$(get_aicommit_tmp_dir) || return 1
+    fi
+    local changes_file="${ctx_dir}/CHANGES_CONTEXT"
+    if [ ! -f "$changes_file" ] || [ ! -s "$changes_file" ]; then
+        return 1
+    fi
+
+    local prompt_file="${AI_REFLECTION_PROMPT_FILE:-$AICOMMIT_DIR/templates/reflection-prompt.txt}"
+    if [ ! -f "$prompt_file" ]; then
+        display_error "Reflection prompt template not found: $prompt_file"
+        return 1
+    fi
+
+    local model="${AI_MODEL:-$DEFAULT_AI_MODEL}"
+    local schema_file="${ctx_dir}/SCHEMA.json"
+    [ -f "$schema_file" ] || _build_commit_schema "$schema_file" "$ctx_dir"
+
+    local reflect_user_file="${ctx_dir}/REFLECTION_USER"
+    {
+        printf '=== DRAFT COMMIT MESSAGE CANDIDATE ===\n%s\n\n' "$candidate_msg"
+        printf '=== DETECTED VIOLATIONS / CORRECTIONS REQUIRED ===\n'
+        if [ -n "$feedback" ]; then
+            printf '%s\n\n' "$feedback"
+        else
+            printf 'Ensure candidate strictly conforms to Conventional Commits and contains only grounded facts.\n\n'
+        fi
+        printf '=== ACTUAL CHANGES & FACTS (AUTHORITATIVE GROUND TRUTH) ===\n'
+        cat "$changes_file"
+    } > "$reflect_user_file"
+
+    local reflect_req="${ctx_dir}/REQUEST.reflect.json"
+    if ! build_ollama_request "$reflect_req" "$model" "$reflect_user_file" "$prompt_file" "$schema_file"; then
+        return 1
+    fi
+
+    local refined_msg
+    if ! refined_msg=$(_llm_commit_once "$reflect_req" "$ctx_dir" "Reflecting on commit message"); then
+        return 1
+    fi
+    echo "$refined_msg"
+}
+
 # Generate commit message — assembles the request and calls Ollama.
 # Args: --dry-run (optional), ctx_dir (optional, default run dir)
 generate_commit_message() {
@@ -1195,6 +1565,17 @@ generate_commit_message() {
         cat "$changes_file"
     } > "${state_dir}/FULL_PROMPT"
 
+    local reflect_prompt_file="${AI_REFLECTION_PROMPT_FILE:-$AICOMMIT_DIR/templates/reflection-prompt.txt}"
+    if [ -f "$reflect_prompt_file" ]; then
+        {
+            cat "$reflect_prompt_file"
+            printf '\n\n=== DRAFT COMMIT MESSAGE CANDIDATE ===\n<candidate_message>\n\n'
+            printf '=== DETECTED VIOLATIONS / CORRECTIONS REQUIRED ===\n<feedback>\n\n'
+            printf '=== ACTUAL CHANGES & FACTS (AUTHORITATIVE GROUND TRUTH) ===\n'
+            cat "$changes_file"
+        } > "${state_dir}/REFLECTION_PROMPT"
+    fi
+
     if [ "$dry_run" = "true" ]; then
         return 0
     fi
@@ -1212,20 +1593,37 @@ generate_commit_message() {
         return 1
     fi
 
-    # Grounding gate: verify, retry once with feedback, else deterministic template
+    # Unconditional reflection if AI_REFLECTION_MODE is 'always'
+    if [ "${AI_ENABLE_REFLECTION:-true}" = "true" ] && [ "${AI_REFLECTION_MODE:-on-failure}" = "always" ]; then
+        local feedback_always="" reflected_always=""
+        feedback_always=$(validate_commit_grounding "$commit_msg" "$ctx_dir" 2>&1 || true)
+        if reflected_always=$(reflect_commit_message "$commit_msg" "$ctx_dir" "$feedback_always") && [ -n "$reflected_always" ]; then
+            commit_msg="$reflected_always"
+        fi
+    fi
+
+    # Grounding gate: verify, reflect or retry once with feedback, else deterministic template
     local feedback=""
     if ! feedback=$(validate_commit_grounding "$commit_msg" "$ctx_dir"); then
-        local retry_req="${ctx_dir}/REQUEST.retry.json" retry_msg=""
-        jq --arg fb "$feedback" \
-            '.messages[1].content += "\n\nCORRECTION REQUIRED — your previous answer violated grounding:\n" + $fb + "\nFix and return only the JSON object."' \
-            "$request_file" > "$retry_req" 2>/dev/null
-        if [ -s "$retry_req" ] \
-            && retry_msg=$(_llm_commit_once "$retry_req" "$ctx_dir" "Retrying with grounding feedback") \
-            && [ -n "$retry_msg" ] \
-            && validate_commit_grounding "$retry_msg" "$ctx_dir" >/dev/null 2>&1; then
-            commit_msg="$retry_msg"
+        local reflected_msg=""
+        if [ "${AI_ENABLE_REFLECTION:-true}" = "true" ] \
+            && reflected_msg=$(reflect_commit_message "$commit_msg" "$ctx_dir" "$feedback") \
+            && [ -n "$reflected_msg" ] \
+            && validate_commit_grounding "$reflected_msg" "$ctx_dir" >/dev/null 2>&1; then
+            commit_msg="$reflected_msg"
         else
-            commit_msg=$(template_commit_from_facts "$ctx_dir")
+            local retry_req="${ctx_dir}/REQUEST.retry.json" retry_msg=""
+            jq --arg fb "$feedback" \
+                '.messages[1].content += "\n\nCORRECTION REQUIRED — your previous answer violated grounding:\n" + $fb + "\nFix and return only the JSON object."' \
+                "$request_file" > "$retry_req" 2>/dev/null
+            if [ -s "$retry_req" ] \
+                && retry_msg=$(_llm_commit_once "$retry_req" "$ctx_dir" "Retrying with grounding feedback") \
+                && [ -n "$retry_msg" ] \
+                && validate_commit_grounding "$retry_msg" "$ctx_dir" >/dev/null 2>&1; then
+                commit_msg="$retry_msg"
+            else
+                commit_msg=$(template_commit_from_facts "$ctx_dir")
+            fi
         fi
     fi
 
@@ -1257,6 +1655,29 @@ regenerate_commit_message() {
     local commit_msg
     commit_msg=$(_llm_commit_once "$req" "$tmp_dir" "Regenerating commit message") || return 1
     [ -z "$commit_msg" ] && return 1
+
+    # Unconditional reflection if AI_REFLECTION_MODE is 'always'
+    if [ "${AI_ENABLE_REFLECTION:-true}" = "true" ] && [ "${AI_REFLECTION_MODE:-on-failure}" = "always" ]; then
+        local feedback_always="" reflected_always=""
+        feedback_always=$(validate_commit_grounding "$commit_msg" "$tmp_dir" 2>&1 || true)
+        if reflected_always=$(reflect_commit_message "$commit_msg" "$tmp_dir" "$feedback_always") && [ -n "$reflected_always" ]; then
+            commit_msg="$reflected_always"
+        fi
+    fi
+
+    # Grounding gate: verify, reflect or fallback to deterministic template
+    local feedback=""
+    if ! feedback=$(validate_commit_grounding "$commit_msg" "$tmp_dir"); then
+        local reflected_msg=""
+        if [ "${AI_ENABLE_REFLECTION:-true}" = "true" ] \
+            && reflected_msg=$(reflect_commit_message "$commit_msg" "$tmp_dir" "$feedback") \
+            && [ -n "$reflected_msg" ] \
+            && validate_commit_grounding "$reflected_msg" "$tmp_dir" >/dev/null 2>&1; then
+            commit_msg="$reflected_msg"
+        else
+            commit_msg=$(template_commit_from_facts "$tmp_dir")
+        fi
+    fi
 
     # Update the cache so a subsequent --regenerate still changes the answer
     local key
@@ -1443,8 +1864,18 @@ _generate_group_messages_batched() {
         obj=$(printf '%s' "$content" | jq -c ".commits[$((i - 1))]" 2>/dev/null)
         [ -z "$obj" ] && continue
         m=$(_commit_msg_from_json_obj "$obj" "${tmp_dir}/groups/${i}") || m=""
-        if [ -n "$m" ] && validate_commit_grounding "$m" "${tmp_dir}/groups/${i}" >/dev/null 2>&1; then
-            _AICOMMIT_GRP_MSGS[$i]="$m"
+        if [ -n "$m" ]; then
+            if validate_commit_grounding "$m" "${tmp_dir}/groups/${i}" >/dev/null 2>&1; then
+                _AICOMMIT_GRP_MSGS[$i]="$m"
+            elif [ "${AI_ENABLE_REFLECTION:-true}" = "true" ]; then
+                local fb="" ref_m=""
+                fb=$(validate_commit_grounding "$m" "${tmp_dir}/groups/${i}" 2>&1 || true)
+                if ref_m=$(reflect_commit_message "$m" "${tmp_dir}/groups/${i}" "$fb") \
+                    && [ -n "$ref_m" ] \
+                    && validate_commit_grounding "$ref_m" "${tmp_dir}/groups/${i}" >/dev/null 2>&1; then
+                    _AICOMMIT_GRP_MSGS[$i]="$ref_m"
+                fi
+            fi
         fi
     done
     return 0

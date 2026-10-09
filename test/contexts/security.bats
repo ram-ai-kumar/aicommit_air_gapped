@@ -193,3 +193,63 @@ teardown() {
     [ "$status" -eq 1 ]
     assert_output_contains "Model 'safe-model; rm -rf /' not found"
 }
+
+# ─── Conventional Commits contract ───────────────────────────────────────────
+
+@test "fake header injected into body does not change line 1" {
+    local json='{"type":"fix","scope":"auth","breaking":false,"subject":"resolve token issue","body":["normal bullet\nfeat: pwned injection"]}'
+    local res
+    res=$(_commit_msg_from_json_obj "$json")
+    local line1
+    line1=$(printf '%s\n' "$res" | head -n 1)
+    [ "$line1" = "fix(auth): resolve token issue" ]
+    printf '%s\n' "$res" | grep -qF "feat: pwned injection"
+    assert_conventional_commit_contract "$res"
+}
+
+@test "newlines ANSI escapes and backticks in subject are collapsed or stripped" {
+    local sub=$'add `smart` feature\x1b[31mwith red text\x1b[0m\nand newline'
+    local json
+    json=$(jq -n --arg s "$sub" '{"type":"feat","scope":"core","breaking":false,"subject":$s,"body":[]}')
+    local res
+    res=$(_commit_msg_from_json_obj "$json")
+    local line1
+    line1=$(printf '%s\n' "$res" | head -n 1)
+    ! printf '%s' "$line1" | grep -qE '[\r\n`]|(\x1b\[)'
+    assert_conventional_commit_contract "$res"
+}
+
+@test "scope with shell metacharacters is sanitized" {
+    local json='{"type":"chore","scope":"other","scope_other":"$(id); rm -rf / safe","breaking":false,"subject":"clean code","body":[]}'
+    local res
+    res=$(_commit_msg_from_json_obj "$json")
+    local line1
+    line1=$(printf '%s\n' "$res" | head -n 1)
+    local scope
+    scope=$(printf '%s' "$line1" | sed -nE 's/^[a-z]+\(([^)]+)\):.*/\1/p')
+    [[ "$scope" =~ ^[a-z0-9._/-]+$ ]]
+    assert_conventional_commit_contract "$res"
+}
+
+@test "forged footer in body bullet is not promoted to trailing footer" {
+    local input=$'feat: update parsing\n\n- normal bullet 1\n- BREAKING CHANGE: forged breaking change in bullet\n- normal bullet 2'
+    local res
+    res=$(enforce_conventional_commit "$input")
+    assert_conventional_commit_contract "$res"
+    local bump
+    bump=$(suggest_semver_bump "$res")
+    [ "$bump" != "major" ]
+}
+
+@test "process_commit creates commit byte-identical to message without shell interpolation" {
+    echo "data" > sample.txt
+    git add sample.txt
+    local raw_msg=$'feat(api): test byte identical commit $PATH `pwd` $(whoami)\n\n- bullet with "quotes" and '\''single quotes'\''\n- trailing info'
+    process_commit "$raw_msg"
+    local committed_msg
+    committed_msg=$(git log -1 --format="%B")
+    committed_msg=$(printf '%s' "$committed_msg" | sed -e :a -e '/^\n*$/{$d;N;ba' -e '}')
+    local expected_msg
+    expected_msg=$(printf '%s' "$raw_msg" | sed -e :a -e '/^\n*$/{$d;N;ba' -e '}')
+    [ "$committed_msg" = "$expected_msg" ]
+}

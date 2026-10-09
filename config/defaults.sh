@@ -40,6 +40,11 @@ AI_COCHANGE_MIN="${AI_COCHANGE_MIN:-2}"
 # Override in ~/.aicommitrc: AI_PROMPT_FILE="$HOME/.aicommit/templates/custom-prompt.txt"
 AI_PROMPT_FILE="${AI_PROMPT_FILE:-$AICOMMIT_DIR/templates/prompt.txt}"
 
+# Reflection Step — critique & refine candidate commit messages against diff & facts
+AI_ENABLE_REFLECTION="${AI_ENABLE_REFLECTION:-true}"
+AI_REFLECTION_MODE="${AI_REFLECTION_MODE:-on-failure}"
+AI_REFLECTION_PROMPT_FILE="${AI_REFLECTION_PROMPT_FILE:-$AICOMMIT_DIR/templates/reflection-prompt.txt}"
+
 # Path to prompt template for logical context grouping
 AI_GROUPING_PROMPT_FILE="${AI_GROUPING_PROMPT_FILE:-$AICOMMIT_DIR/templates/context-grouping-prompt.txt}"
 

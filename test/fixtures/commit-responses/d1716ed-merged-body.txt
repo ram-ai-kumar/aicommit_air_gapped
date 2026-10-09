@@ -1,0 +1,9 @@
+feat(core): implement robust SemVer engine and comprehensive version comparison logic
+Add lib/semver.sh to support automatic detection of version strings across multiple ecosystems (Ruby, PHP, .NET, Java, Python) and integrate calculate_next_semver into the core workflow. This update enables automatic determination of Major, Minor, or Patch increments based on SemVer 2.0.0 rules by analyzing commit messages and diffs. Key additions include:
+
+- semver_gt: A robust comparison function handling v prefixes, major.minor.patch structures, pre-release tags (e.g., -rc.1), and build metadata (e.g., +1). It correctly resolves precedence between core releases and pre-releases.
+- Enhanced Changelog Integration: Updated logic to detect changelog files, manage updates, and restore previous states during semantic versioning operations.
+- Release Bumping UI: Improved output formatting to clearly display the current version, the bump type, and the resulting label (e.g., "MINOR (new feature)").
+- Test Coverage: Expanded unit tests in test/unit/test_semver.bats to validate version parsing, comparison logic, and the full release bumping lifecycle across different project types.
+
+This change significantly improves the tool's ability to automate semantic versioning workflows for polyglot repositories.
