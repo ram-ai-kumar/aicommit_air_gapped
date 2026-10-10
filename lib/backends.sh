@@ -123,14 +123,21 @@ build_ollama_request() {
     fi
 
     local format_json="null"
-    if [ "${AI_NO_STRUCTURED_OUTPUT:-false}" != "true" ] && [ -n "$format_file" ] && [ -f "$format_file" ]; then
+    local _s_dir="" _safe_m=""
+    command -v get_aicommit_state_dir >/dev/null 2>&1 && _s_dir=$(get_aicommit_state_dir 2>/dev/null || echo "")
+    _safe_m=$(printf '%s' "$model" | tr -c 'a-zA-Z0-9_' '_')
+    if [ "${AI_NO_STRUCTURED_OUTPUT:-false}" != "true" ] \
+        && { [ -z "$_s_dir" ] || [ ! -f "${_s_dir}/NO_STRUCTURED_OUTPUT_${_safe_m}" ]; } \
+        && [ -n "$format_file" ] && [ -f "$format_file" ]; then
         format_json=$(cat "$format_file" 2>/dev/null || echo "null")
         # A malformed schema file must not produce a malformed request
         printf '%s' "$format_json" | jq -e 'type == "object"' >/dev/null 2>&1 || format_json="null"
     fi
 
+    local ka="${AI_KEEP_ALIVE:--1}"
     jq -n \
         --arg model "$model" \
+        --arg ka "$ka" \
         --argjson think "$think" \
         --argjson seed "${AI_SEED:-42}" \
         --argjson num_ctx "${AI_NUM_CTX:-16384}" \
@@ -142,7 +149,7 @@ build_ollama_request() {
             model: $model,
             stream: false,
             think: $think,
-            keep_alive: "15m",
+            keep_alive: (if ($ka | test("^-?[0-9]+$")) then ($ka | tonumber) else $ka end),
             options: {
                 temperature: 0,
                 top_k: 1,
@@ -161,6 +168,31 @@ build_ollama_request() {
         > "$out_file"
 }
 
+# Build a follow-up request reusing prompt.txt system prefix and CHANGES_CONTEXT prefix.
+# Args: out_file, ctx_dir, tail_file, [format_schema_file]
+build_followup_request() {
+    local out_file="$1"
+    local ctx_dir="$2"
+    local tail_file="$3"
+    local format_file="${4:-}"
+
+    local changes_file="${ctx_dir}/CHANGES_CONTEXT"
+    [ -f "$changes_file" ] || return 1
+    [ -f "$tail_file" ] || return 1
+
+    local user_combined="${out_file}.user.tmp"
+    cat "$changes_file" > "$user_combined"
+    printf '\n\n' >> "$user_combined"
+    cat "$tail_file" >> "$user_combined"
+
+    local model="${AI_MODEL:-$DEFAULT_AI_MODEL}"
+    local rc=0
+    build_ollama_request "$out_file" "$model" "$user_combined" "${AI_PROMPT_FILE}" "$format_file" || rc=$?
+    rm -f "$user_combined"
+    return $rc
+}
+
+
 # Ollama backend implementation
 
 # Get list of available Ollama models via /api/tags, falling back to `ollama list`
@@ -172,6 +204,45 @@ get_available_ollama_models() {
         return 0
     fi
     ollama list 2>/dev/null | awk 'NR>1 && NF>=2 {print $1}' || true
+}
+
+# Preload configured LLM into memory with real context size and keep-alive.
+# Args: model (optional), wait_for_load (optional, default false)
+warm_up_model() {
+    local model="${1:-${AI_MODEL:-$DEFAULT_AI_MODEL}}"
+    local wait_for_load="${2:-false}"
+    local host
+    host=$(_ollama_host)
+    local ka="${AI_KEEP_ALIVE:--1}"
+    local think=false
+    [ "${AI_THINK:-false}" = "true" ] && think=true
+
+    local req
+    req=$(jq -n \
+        --arg m "$model" \
+        --arg ka "$ka" \
+        --argjson think "$think" \
+        --argjson num_ctx "${AI_NUM_CTX:-16384}" \
+        '{
+            model: $m,
+            stream: false,
+            think: $think,
+            keep_alive: (if ($ka | test("^-?[0-9]+$")) then ($ka | tonumber) else $ka end),
+            options: {
+                temperature: 0,
+                num_ctx: $num_ctx,
+                num_predict: 1
+            },
+            messages: [
+                {role: "user", content: ""}
+            ]
+        }')
+
+    if [ "$wait_for_load" = "true" ]; then
+        printf '%s' "$req" | _ollama_curl -X POST -H 'Content-Type: application/json' -d @- "${host}/api/chat" >/dev/null 2>&1
+    else
+        ( printf '%s' "$req" | _ollama_curl -X POST -H 'Content-Type: application/json' -d @- "${host}/api/chat" >/dev/null 2>&1 & ) >/dev/null 2>&1 || true
+    fi
 }
 
 # Validate that the Ollama server is reachable and the model exists.
@@ -211,14 +282,14 @@ validate_ollama_prerequisites() {
         return 1
     fi
 
-    # Background warm-up: loads the model + keeps it resident for 15m while
-    # git context is still being built, so the first real call skips load time.
-    ( jq -n --arg m "$model" '{model: $m, prompt: "", keep_alive: "15m", stream: false, options: {num_predict: 1}}' \
-        | _ollama_curl -X POST -H 'Content-Type: application/json' -d @- \
-            "${host}/api/generate" >/dev/null 2>&1 & ) >/dev/null 2>&1 || true
+    # Background warm-up: loads the model with configured num_ctx + keeps it
+    # resident according to AI_KEEP_ALIVE while git context is still being built.
+    warm_up_model "$model" false
 
     return 0
 }
+
+
 
 # POST a pre-built request body to /api/chat and extract .message.content.
 # Args: model, request_file, response_file, error_file, timeout_secs, action_label
@@ -242,6 +313,12 @@ invoke_ollama() {
     if [ ! -f "$request_file" ]; then
         display_error "LLM request file not found" "$request_file"
         return 1
+    fi
+
+    # Record start time if tracing is active
+    local _t_start_ms=0
+    if [ "${AI_TRACE:-false}" = "true" ]; then
+        _t_start_ms=$(python3 -c 'import time; print(int(time.time()*1000))' 2>/dev/null || perl -MTime::HiRes=time -e 'printf "%d", time*1000' 2>/dev/null || date +%s000)
     fi
 
     # Run curl in background to allow timeout and elapsed-time display
@@ -315,6 +392,12 @@ invoke_ollama() {
         if echo "$api_error" | grep -qi "structured output is unavailable"; then
             if jq -e 'has("format")' "$request_file" >/dev/null 2>&1; then
                 export AI_NO_STRUCTURED_OUTPUT=true
+                local _safe_m _s_dir
+                _safe_m=$(printf '%s' "$current_model" | tr -c 'a-zA-Z0-9_' '_')
+                _s_dir=$(get_aicommit_state_dir 2>/dev/null || echo "")
+                if [ -n "$_s_dir" ] && [ -d "$_s_dir" ]; then
+                    touch "${_s_dir}/NO_STRUCTURED_OUTPUT_${_safe_m}" 2>/dev/null || true
+                fi
                 local noformat_req="${request_file}.noformat"
                 if jq 'del(.format)' "$request_file" > "$noformat_req" 2>/dev/null && mv "$noformat_req" "$request_file"; then
                     invoke_ollama "$model" "$request_file" "$response_file" "$error_file" "$timeout_secs" "$action_label"
@@ -338,5 +421,53 @@ invoke_ollama() {
         return 1
     fi
 
+    if [ "${AI_TRACE:-false}" = "true" ] && [ -f "$raw_file" ]; then
+        local _t_end_ms _t_wall_ms
+        _t_end_ms=$(python3 -c 'import time; print(int(time.time()*1000))' 2>/dev/null || perl -MTime::HiRes=time -e 'printf "%d", time*1000' 2>/dev/null || date +%s000)
+        _t_wall_ms=$(( _t_end_ms - _t_start_ms ))
+        local _t_load _t_p_cnt _t_p_dur _t_e_cnt _t_e_dur
+        _t_load=$(jq -r '.load_duration // 0' "$raw_file" 2>/dev/null)
+        _t_p_cnt=$(jq -r '.prompt_eval_count // 0' "$raw_file" 2>/dev/null)
+        _t_p_dur=$(jq -r '.prompt_eval_duration // 0' "$raw_file" 2>/dev/null)
+        _t_e_cnt=$(jq -r '.eval_count // 0' "$raw_file" 2>/dev/null)
+        _t_e_dur=$(jq -r '.eval_duration // 0' "$raw_file" 2>/dev/null)
+        local _t_dir="${_AICOMMIT_RUN_DIR:-}"
+        [ -z "$_t_dir" ] && _t_dir=$(get_aicommit_tmp_dir 2>/dev/null || echo "")
+        if [ -n "$_t_dir" ] && [ -d "$_t_dir" ]; then
+            printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$action_label" "$_t_wall_ms" "$_t_load" "$_t_p_cnt" "$_t_p_dur" "$_t_e_cnt" "$_t_e_dur" >> "${_t_dir}/TRACE"
+        fi
+        local _s_dir
+        _s_dir=$(get_aicommit_state_dir 2>/dev/null || echo "")
+        if [ -n "$_s_dir" ] && [ -d "$_s_dir" ]; then
+            printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$action_label" "$_t_wall_ms" "$_t_load" "$_t_p_cnt" "$_t_p_dur" "$_t_e_cnt" "$_t_e_dur" >> "${_s_dir}/TRACE"
+        fi
+    fi
+
     return 0
 }
+
+# Display a formatted trace summary from a TRACE file
+display_trace_summary() {
+    local trace_file="$1"
+    [ -f "$trace_file" ] || return 0
+    echo ""
+    echo "📊 Execution Trace:"
+    printf "%-32s | %-8s | %-12s | %-12s\n" "Action" "Wall" "Prompt Eval" "Eval Speed"
+    echo "----------------------------------------------------------------------"
+    while IFS=$'\t' read -r label wall load p_cnt p_dur e_cnt e_dur; do
+        [ -z "$label" ] && continue
+        local p_speed="-" e_speed="-"
+        if [ "$p_dur" -gt 0 ] 2>/dev/null && [ "$p_cnt" -gt 0 ] 2>/dev/null; then
+            p_speed=$(awk -v c="$p_cnt" -v d="$p_dur" 'BEGIN { printf "%.0f tok/s", c / (d / 1000000000) }')
+        fi
+        if [ "$e_dur" -gt 0 ] 2>/dev/null && [ "$e_cnt" -gt 0 ] 2>/dev/null; then
+            e_speed=$(awk -v c="$e_cnt" -v d="$e_dur" 'BEGIN { printf "%.0f tok/s", c / (d / 1000000000) }')
+        fi
+        local wall_str="${wall}ms"
+        if [ "$wall" -ge 1000 ] 2>/dev/null; then
+            wall_str=$(awk -v w="$wall" 'BEGIN { printf "%.2fs", w / 1000 }')
+        fi
+        printf "%-32s | %-8s | %-12s | %-12s\n" "$label" "$wall_str" "$p_speed" "$e_speed"
+    done < "$trace_file"
+}
+

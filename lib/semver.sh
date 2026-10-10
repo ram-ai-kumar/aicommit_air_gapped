@@ -811,53 +811,74 @@ ai_evaluate_semver() {
     fi
 
     local model="${AI_MODEL:-$DEFAULT_AI_MODEL}"
-    local prompt_template="${AI_SEMVER_PROMPT_FILE:-$AICOMMIT_DIR/templates/semver-prompt.txt}"
-
-    local tmp_dir
+    local tmp_dir state_dir
     if command -v get_aicommit_tmp_dir >/dev/null 2>&1; then
-        tmp_dir=$(get_aicommit_tmp_dir)
-    else
-        tmp_dir=$(mktemp -d "${TMPDIR:-/tmp}/aicommit.XXXXXXXX" 2>/dev/null) || return 1
+        tmp_dir=$(get_aicommit_tmp_dir 2>/dev/null)
+    fi
+    [ -z "$tmp_dir" ] && tmp_dir=$(mktemp -d "${TMPDIR:-/tmp}/aicommit.XXXXXXXX" 2>/dev/null) || true
+    state_dir=$(get_aicommit_state_dir 2>/dev/null || echo "")
+
+    # Lever C: Check cache
+    if [ -n "$tmp_dir" ] && [ -s "${tmp_dir}/SEMVER" ]; then
+        local cached_val
+        cached_val=$(cat "${tmp_dir}/SEMVER" 2>/dev/null | tr -d '[:space:]')
+        if [[ "$cached_val" =~ ^(major|minor|patch)$ ]]; then
+            echo "$cached_val"
+            return 0
+        fi
+    fi
+    local cdir=""
+    if command -v get_aicommit_cache_key >/dev/null 2>&1 && [ -n "$state_dir" ]; then
+        local ckey
+        ckey=$(get_aicommit_cache_key 2>/dev/null || echo "")
+        if [ -n "$ckey" ]; then
+            cdir="${state_dir}/cache/${ckey}"
+            if [ -s "${cdir}/SEMVER" ]; then
+                local cached_val
+                cached_val=$(cat "${cdir}/SEMVER" 2>/dev/null | tr -d '[:space:]')
+                if [[ "$cached_val" =~ ^(major|minor|patch)$ ]]; then
+                    echo "$cached_val"
+                    return 0
+                fi
+            fi
+        fi
     fi
 
-    local changes_file="${tmp_dir}/SEMVER_CHANGES"
-    if [ -n "$changes_input" ] && [ -f "$changes_input" ]; then
-        cp "$changes_input" "$changes_file"
-    elif [ -n "$changes_input" ]; then
-        printf '%s\n' "$changes_input" > "$changes_file"
-    elif [ -f "${tmp_dir}/CHANGES_CONTEXT" ] && [ -s "${tmp_dir}/CHANGES_CONTEXT" ]; then
-        cp "${tmp_dir}/CHANGES_CONTEXT" "$changes_file"
-    else
-        agit diff --staged > "$changes_file" 2>/dev/null || git diff --staged > "$changes_file" 2>/dev/null || true
+    # Determine context dir
+    local ctx_dir="$tmp_dir"
+    if [ -n "$changes_input" ] && [ -d "$changes_input" ] && [ -f "${changes_input}/CHANGES_CONTEXT" ]; then
+        ctx_dir="$changes_input"
+    elif [ -n "$changes_input" ] && [ -f "$changes_input" ]; then
+        cp "$changes_input" "${tmp_dir}/CHANGES_CONTEXT"
     fi
 
-    if [ ! -s "$changes_file" ]; then
-        printf 'Commit message: %s\n' "$commit_msg" > "$changes_file"
+    # Ensure CHANGES_CONTEXT exists and is bounded (never send unbounded raw diff)
+    if [ ! -s "${ctx_dir}/CHANGES_CONTEXT" ]; then
+        if [ -n "$changes_input" ] && [ ! -f "$changes_input" ]; then
+            printf '%s\n' "$changes_input" | head -n 150 > "${tmp_dir}/CHANGES_CONTEXT"
+        else
+            local staged_files numstat_data
+            staged_files=$(git diff --staged --name-only 2>/dev/null || true)
+            numstat_data=$(git diff --staged --numstat 2>/dev/null || true)
+            if [ -n "$staged_files" ] && command -v build_ai_context >/dev/null 2>&1; then
+                build_ai_context "" "$staged_files" "$numstat_data" "" "$tmp_dir" 10 40 >/dev/null 2>&1 || true
+            fi
+        fi
+        [ -s "${tmp_dir}/CHANGES_CONTEXT" ] && ctx_dir="$tmp_dir"
     fi
 
-    local prompt_file="${tmp_dir}/SEMVER_PROMPT"
-    local response_file="${tmp_dir}/SEMVER_RESPONSE"
-    local error_file="${tmp_dir}/SEMVER_ERROR"
-    local timeout_secs=${AI_TIMEOUT:-120}
+    if [ ! -s "${ctx_dir}/CHANGES_CONTEXT" ]; then
+        printf 'Commit message: %s\n' "$commit_msg" > "${tmp_dir}/CHANGES_CONTEXT"
+        ctx_dir="$tmp_dir"
+    fi
 
-    # Prepare prompt
-    if [ -f "$prompt_template" ]; then
-        awk '
-        /\$\{COMMIT_MESSAGE\}/ {
-            print commit_msg
-            next
-        }
-        /\$\{CHANGES_CONTEXT\}/ {
-            while ((getline line < changes_file) > 0) print line
-            close(changes_file)
-            next
-        }
-        { print }
-        ' commit_msg="$commit_msg" changes_file="$changes_file" "$prompt_template" > "$prompt_file"
-    else
-        cat <<EOF > "$prompt_file"
-You are an expert software release engineer specializing in Semantic Versioning (SemVer 2.0.0).
-Determine whether the following git changes and commit message require a MAJOR, MINOR, or PATCH version bump:
+    local tail_file="${tmp_dir}/SEMVER_TAIL"
+    cat <<EOF > "$tail_file"
+=== SEMVER EVALUATION ===
+Commit message:
+$commit_msg
+
+Determine whether the changes and commit message require a MAJOR, MINOR, or PATCH version bump under SemVer 2.0.0:
 - MAJOR: Incompatible API changes, breaking changes.
 - MINOR: New backward-compatible functionality or features.
 - PATCH: Bug fixes, refactoring, dependency updates, docs, or maintenance chores.
@@ -867,34 +888,45 @@ Output ONLY inside @@@ delimiters:
 <level> | <brief rationale>
 @@@
 where <level> is strictly major, minor, or patch.
-
-Commit message:
-$commit_msg
-
-Changes to analyze:
-$(cat "$changes_file" 2>/dev/null | head -n 150)
 EOF
-    fi
 
     local request_file="${tmp_dir}/SEMVER_REQUEST.json"
-    if ! build_ollama_request "$request_file" "$model" "$prompt_file"; then
-        return 1
+    local response_file="${tmp_dir}/SEMVER_RESPONSE"
+    local error_file="${tmp_dir}/SEMVER_ERROR"
+    local timeout_secs=${AI_TIMEOUT:-120}
+
+    # Lever B: Use shared-prefix follow-up request with num_predict=64
+    if ! AI_NUM_PREDICT=64 build_followup_request "$request_file" "$ctx_dir" "$tail_file"; then
+        if ! build_ollama_request "$request_file" "$model" "$tail_file" "${AI_PROMPT_FILE}"; then
+            return 1
+        fi
     fi
+
     if ! invoke_llm "$model" "$request_file" "$response_file" "$error_file" "$timeout_secs" "$action_label"; then
         return 1
     fi
 
-    local raw_resp
+    local raw_resp decision
     raw_resp=$(cat "$response_file" 2>/dev/null || true)
-    extract_semver_decision "$raw_resp"
+    decision=$(extract_semver_decision "$raw_resp")
+    if [ -n "$decision" ] && [[ "$decision" =~ ^(major|minor|patch)$ ]]; then
+        printf '%s\n' "$decision" > "${tmp_dir}/SEMVER" 2>/dev/null || true
+        if [ -n "${cdir:-}" ] && [ -d "$cdir" ]; then
+            printf '%s\n' "$decision" > "${cdir}/SEMVER" 2>/dev/null || true
+        fi
+        echo "$decision"
+        return 0
+    fi
+    return 1
 }
 
 # Evaluates the semver bump level for a commit message
-# Args: $1=commit_msg, $2=explicit_level (optional: "major"|"minor"|"patch"|"ai"|"auto"), $3=changes_context (optional)
+# Args: $1=commit_msg, $2=explicit_level (optional: "major"|"minor"|"patch"|"ai"|"auto"), $3=hint_or_context (optional), $4=ctx_dir (optional)
 evaluate_commit_semver() {
     local commit_msg="$1"
     local explicit_level="${2:-}"
-    local changes_context="${3:-}"
+    local hint_or_context="${3:-}"
+    local ctx_dir="${4:-}"
 
     if [ -n "$explicit_level" ] && [ "$explicit_level" != "auto" ] && [ "$explicit_level" != "ai" ]; then
         case "$explicit_level" in
@@ -906,7 +938,7 @@ evaluate_commit_semver() {
     # Explicit AI evaluation requested
     if [ "$explicit_level" = "ai" ]; then
         local ai_bump
-        ai_bump=$(ai_evaluate_semver "$commit_msg" "$changes_context" 2>/dev/null || true)
+        ai_bump=$(ai_evaluate_semver "$commit_msg" "$hint_or_context" 2>/dev/null || true)
         if [ -n "$ai_bump" ] && [[ "$ai_bump" =~ ^(major|minor|patch)$ ]]; then
             echo "$ai_bump"
             return 0
@@ -915,22 +947,61 @@ evaluate_commit_semver() {
 
     local bump="none"
     bump=$(suggest_semver_bump "$commit_msg")
+    if [ "$bump" != "none" ] && [ -n "$bump" ]; then
+        echo "$bump"
+        return 0
+    fi
+
+    # Check for valid hint (passed directly, as file path, or in ctx_dir / run_dir)
+    local hint=""
+    if [ -n "$hint_or_context" ]; then
+        if [ -f "$hint_or_context" ]; then
+            local first_line
+            first_line=$(head -1 "$hint_or_context" 2>/dev/null | tr -d '[:space:]' | tr 'A-Z' 'a-z')
+            case "$first_line" in
+                major|minor|patch|none) hint="$first_line" ;;
+            esac
+        else
+            case "$(printf '%s' "$hint_or_context" | tr -d '[:space:]' | tr 'A-Z' 'a-z')" in
+                major|minor|patch|none) hint="$(printf '%s' "$hint_or_context" | tr -d '[:space:]' | tr 'A-Z' 'a-z')" ;;
+            esac
+        fi
+    fi
+    if [ -z "$hint" ] && [ -n "$ctx_dir" ] && [ -f "${ctx_dir}/RELEASE_HINT" ]; then
+        local first_line
+        first_line=$(head -1 "${ctx_dir}/RELEASE_HINT" 2>/dev/null | tr -d '[:space:]' | tr 'A-Z' 'a-z')
+        case "$first_line" in
+            major|minor|patch|none) hint="$first_line" ;;
+        esac
+    fi
+    if [ -z "$hint" ] && command -v get_aicommit_tmp_dir >/dev/null 2>&1; then
+        local tmp_d
+        tmp_d=$(get_aicommit_tmp_dir 2>/dev/null)
+        if [ -n "$tmp_d" ] && [ -f "${tmp_d}/RELEASE_HINT" ]; then
+            local first_line
+            first_line=$(head -1 "${tmp_d}/RELEASE_HINT" 2>/dev/null | tr -d '[:space:]' | tr 'A-Z' 'a-z')
+            case "$first_line" in
+                major|minor|patch|none) hint="$first_line" ;;
+            esac
+        fi
+    fi
+
+    if [ -n "$hint" ] && [ "$hint" != "none" ]; then
+        echo "$hint"
+        return 0
+    fi
 
     # If conventional commit heuristic is inconclusive (none/empty), use AI/LLM if needed!
-    if [ "$bump" = "none" ] || [ -z "$bump" ]; then
-        if [ "${AI_SEMVER_USE_AI:-true}" = "true" ]; then
-            local ai_bump
-            ai_bump=$(ai_evaluate_semver "$commit_msg" "$changes_context" 2>/dev/null || true)
-            if [ -n "$ai_bump" ] && [[ "$ai_bump" =~ ^(major|minor|patch)$ ]]; then
-                echo "$ai_bump"
-                return 0
-            fi
+    if [ "${AI_SEMVER_USE_AI:-true}" = "true" ]; then
+        local ai_bump
+        ai_bump=$(ai_evaluate_semver "$commit_msg" "$hint_or_context" 2>/dev/null || true)
+        if [ -n "$ai_bump" ] && [[ "$ai_bump" =~ ^(major|minor|patch)$ ]]; then
+            echo "$ai_bump"
+            return 0
         fi
-        # Default bump fallback when AI is unavailable or inconclusive
-        echo "${AI_SEMVER_DEFAULT_BUMP:-patch}"
-    else
-        echo "$bump"
     fi
+    # Default bump fallback when AI is unavailable or inconclusive
+    echo "${AI_SEMVER_DEFAULT_BUMP:-patch}"
 }
 
 # Interactive SemVer decision menu for interactive sessions

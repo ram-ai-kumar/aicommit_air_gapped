@@ -139,6 +139,7 @@ init_aicommit_run() {
         fi
         if [ $rc -eq 0 ]; then
             aicommit_purge_dead_runs "$base"
+            _aicommit_purge_cache "$base"
             _AICOMMIT_RUN_DIR=$(mktemp -d "${base}/runs/$$.XXXXXXXX" 2>/dev/null) || rc=2
             if [ $rc -eq 0 ]; then
                 # Reset the regenerate seed offset for this invocation
@@ -150,6 +151,30 @@ init_aicommit_run() {
     fi
     _AICOMMIT_RUN_DIR=$(mktemp -d "${TMPDIR:-/tmp}/aicommit.XXXXXXXX" 2>/dev/null) || return 1
     return 0
+}
+
+# Purge cache entries: retain 20 newest, remove entries older than 7 days.
+_aicommit_purge_cache() {
+    local base="$1"
+    local cache_dir="${base}/state/cache"
+    [ -d "$cache_dir" ] || return 0
+
+    # Purge entries older than 7 days
+    find "$cache_dir" -mindepth 1 -maxdepth 1 -type d -mtime +7 -exec rm -rf {} + 2>/dev/null || true
+
+    # Retain newest 20 entries
+    local entries=()
+    while IFS= read -r dir_path; do
+        [ -n "$dir_path" ] && [ -d "$dir_path" ] && entries+=("$dir_path")
+    done < <(ls -td "${cache_dir}"/*/ 2>/dev/null)
+
+    local count=${#entries[@]}
+    if [ "$count" -gt 20 ]; then
+        local i
+        for ((i = 20; i < count; i++)); do
+            rm -rf "${entries[$i]}" 2>/dev/null || true
+        done
+    fi
 }
 
 # Remove run dirs whose owning PID is dead, and same-shell leftovers from
@@ -171,6 +196,10 @@ aicommit_purge_dead_runs() {
 }
 
 aicommit_cleanup_run_dir() {
+    if [ -n "${_AICOMMIT_BG_PID:-}" ]; then
+        kill "$_AICOMMIT_BG_PID" 2>/dev/null || true
+        _AICOMMIT_BG_PID=""
+    fi
     if [ -n "$_AICOMMIT_RUN_DIR" ] && [ -d "$_AICOMMIT_RUN_DIR" ]; then
         rm -rf "$_AICOMMIT_RUN_DIR" 2>/dev/null || true
     fi
@@ -642,9 +671,10 @@ build_ai_context() {
     local changes_context="=== REPOSITORY ===
 ${repo_name}
 
-${categories_context}
+=== FILES ===
+${categories_context#=== FILE CATEGORIES ===$'\n'}
 
-=== CHANGE STATISTICS ===
+Change statistics:
 ${change_stats}
 
 $(cat "${out_dir}/FACTS")
@@ -662,11 +692,17 @@ ${stat_only_stat}"
     if [ -n "$logical_scope" ]; then
         local clean_scope
         clean_scope=$(printf '%s' "$logical_scope" | sed -E 's/-[0-9]+$//')
-        changes_context="${changes_context}
+        local should_inject=true
+        if [ -f "${out_dir}/SCOPE_CANDIDATES" ]; then
+            grep -qxF "$clean_scope" "${out_dir}/SCOPE_CANDIDATES" 2>/dev/null || should_inject=false
+        fi
+        if [ "$should_inject" = "true" ]; then
+            changes_context="${changes_context}
 
 === LOGICAL COMMIT SCOPE & FEATURE ===
 This atomic commit is scoped specifically to: ${clean_scope}.
 Generate the commit message type, scope, and description focused on this logical concern."
+        fi
     fi
 
     printf '%s' "$changes_context" > "${out_dir}/CHANGES_CONTEXT"
@@ -1245,7 +1281,8 @@ _build_commit_schema() {
                 breaking:        {type: "boolean"},
                 breaking_change: {type: "string"},
                 subject:         {type: "string", maxLength: 60},
-                body:            {type: "array", items: {type: "string"}, maxItems: 6}
+                body:            {type: "array", items: {type: "string"}, maxItems: 6},
+                release:         {type: "string", enum: ["major", "minor", "patch", "none"]}
             },
             required: ["type", "scope", "breaking", "subject"]
         };
@@ -1291,7 +1328,7 @@ _enforce_token_budget() {
 # schema-shaped JSON object. The 72-char rule is enforced downstream by
 # validate_commit_grounding; we deliberately assemble in shell so the format
 # is guaranteed.
-# Args: $1=json object, $2=ctx_dir (optional, unused for now)
+# Args: $1=json object, $2=ctx_dir (optional)
 _commit_msg_from_json_obj() {
     local obj="$1" ctx_dir="${2:-}"
     if ! printf '%s' "$obj" | jq -e 'type == "object"' >/dev/null 2>&1; then
@@ -1299,10 +1336,37 @@ _commit_msg_from_json_obj() {
         return
     fi
 
+    local d_hint="$ctx_dir"
+    [ -z "$d_hint" ] && command -v get_aicommit_tmp_dir >/dev/null 2>&1 && d_hint=$(get_aicommit_tmp_dir 2>/dev/null)
+
+    # Extract and write RELEASE_HINT (Phase 1)
+    local rel
+    rel=$(printf '%s' "$obj" | jq -r '.release // empty' 2>/dev/null | tr -d '[:space:]' | tr 'A-Z' 'a-z')
+    case "$rel" in
+        major|minor|patch|none) ;;
+        *) rel="none" ;;
+    esac
+    if [ -n "$d_hint" ] && [ -d "$d_hint" ]; then
+        printf '%s\n' "$rel" > "${d_hint}/RELEASE_HINT"
+    fi
+
     local type scope scope_other breaking breaking_change subject body
     type=$(printf '%s' "$obj" | jq -r '.type // empty' 2>/dev/null)
     subject=$(printf '%s' "$obj" | jq -r '.subject // empty' 2>/dev/null)
     [ -n "$type" ] && [ -n "$subject" ] || return 1
+
+    # Deterministic repair: Single-type coercion if type not in ALLOWED_TYPES and exactly 1 type allowed (Phase 4)
+    if [ -n "$d_hint" ] && [ -f "${d_hint}/ALLOWED_TYPES" ]; then
+        local allowed_count
+        allowed_count=$(awk 'NF' "${d_hint}/ALLOWED_TYPES" 2>/dev/null | wc -l | tr -d ' ')
+        if [ "$allowed_count" -eq 1 ]; then
+            local single_type
+            single_type=$(awk 'NF' "${d_hint}/ALLOWED_TYPES" 2>/dev/null | head -1)
+            if [ -n "$single_type" ] && [ "$type" != "$single_type" ]; then
+                type="$single_type"
+            fi
+        fi
+    fi
 
     scope=$(printf '%s' "$obj" | jq -r '.scope // "none"' 2>/dev/null)
     breaking=$(printf '%s' "$obj" | jq -r '.breaking // false' 2>/dev/null)
@@ -1313,8 +1377,18 @@ _commit_msg_from_json_obj() {
     fi
     case "$scope" in
         ""|none|null|other) scope="" ;;
-        *) scope=$(printf '%s' "$scope" | tr 'A-Z' 'a-z' | tr -cd 'a-z0-9._/-' | sed -E 's/-[0-9]+$//' | cut -c1-24)
-           [ -n "$scope" ] && scope="($scope)" ;;
+        *)
+            scope=$(printf '%s' "$scope" | tr 'A-Z' 'a-z' | tr -cd 'a-z0-9._/-' | sed -E 's/-[0-9]+$//' | cut -c1-24)
+            # Scope cleanup: reduce path/file scope to stem (e.g. lib/core.sh -> core, aicommit.sh -> aicommit)
+            scope="${scope##*/}"
+            scope="${scope%.*}"
+            # Scope cleanup: drop scope if it equals type (e.g. docs(docs) -> docs)
+            if [ "$scope" = "$type" ] || [ -z "$scope" ]; then
+                scope=""
+            else
+                scope="($scope)"
+            fi
+            ;;
     esac
 
     # A conventional prefix embedded in the subject is stripped — the schema
@@ -1328,8 +1402,25 @@ _commit_msg_from_json_obj() {
     local msg
     msg="${type}${scope}${bang}: ${subject}"
 
-    body=$(printf '%s' "$obj" | jq -r '(.body // [])[] | select(type == "string" and length > 0) | "- " + .' 2>/dev/null)
-    [ -n "$body" ] && msg="${msg}"$'\n\n'"${body}"
+    body=$(printf '%s' "$obj" | jq -r '(.body // [])[] | select(type == "string" and length > 0)' 2>/dev/null)
+    if [ -n "$body" ]; then
+        local clean_body="" line clean_line
+        while IFS= read -r line; do
+            [ -z "$line" ] && continue
+            # Strip leading conventional commit prefix from body bullets (e.g. "- refactor(x): ..." -> "- ...")
+            if printf '%s' "$line" | grep -qE '^[[:space:]]*[-*][[:space:]]+(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\([a-z0-9._/-]+\))?!?:[[:space:]]*'; then
+                clean_line=$(printf '%s' "$line" | sed -E 's/^[[:space:]]*[-*][[:space:]]+(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\([a-z0-9._/-]+\))?!?:[[:space:]]*//')
+            else
+                clean_line=$(printf '%s' "$line" | sed -E 's/^[[:space:]]*[-*][[:space:]]*//')
+            fi
+            if [ -z "$clean_body" ]; then
+                clean_body="- ${clean_line}"
+            else
+                clean_body="${clean_body}"$'\n'"- ${clean_line}"
+            fi
+        done <<< "$body"
+        [ -n "$clean_body" ] && msg="${msg}"$'\n\n'"${clean_body}"
+    fi
 
     if [ "$breaking" = "true" ]; then
         local bc_desc="${breaking_change:-$subject}"
@@ -1402,6 +1493,13 @@ validate_commit_grounding() {
         ok=false
     fi
 
+    local subj
+    subj=$(printf '%s' "$header" | sed -nE 's/^[a-zA-Z]+(\([^)]*\))?!?:[[:space:]]*(.*)/\2/p')
+    if [ "${#subj}" -gt 60 ]; then
+        printf 'subject exceeds 60 chars (%d)\n' "${#subj}"
+        ok=false
+    fi
+
     local line_count
     line_count=$(printf '%s\n' "$msg" | wc -l | tr -d ' ')
     if [ "$line_count" -gt 1 ]; then
@@ -1423,8 +1521,7 @@ validate_commit_grounding() {
     fi
 
     # Every file path or identifier mentioned must exist in the staged set or
-    # in the extracted facts. Path-like = contains '/', ends in '.ext', or is
-    # backtick-quoted.
+    # in the extracted facts or literally in CHANGES_CONTEXT.
     local candidates
     candidates=$(printf '%s\n' "$msg" | grep -oE '`[^`]+`|[A-Za-z0-9_.~+-]+/[A-Za-z0-9_./~+-]+|[A-Za-z0-9_+-]+\.[A-Za-z0-9]{1,8}\b' \
         | tr -d '`' | sort -u)
@@ -1436,6 +1533,7 @@ validate_commit_grounding() {
             grep -qF "/${tok}" "${d}/STAGED_NAMES" 2>/dev/null && continue
         fi
         [ -f "${d}/FACTS" ] && grep -qF "$tok" "${d}/FACTS" 2>/dev/null && continue
+        [ -f "${d}/CHANGES_CONTEXT" ] && grep -qF "$tok" "${d}/CHANGES_CONTEXT" 2>/dev/null && continue
         printf '%s is not in the diff\n' "$tok"
         ok=false
     done <<< "$candidates"
@@ -1448,10 +1546,10 @@ validate_commit_grounding() {
 # Args: $1=ctx_dir
 template_commit_from_facts() {
     local d="$1" type scope first_file count subject
-    local type_count
-    type_count=$(awk 'END { print NR }' "${d}/ALLOWED_TYPES" 2>/dev/null || echo 0)
-    if [ "$type_count" -le 2 ]; then
-        type=$(head -1 "${d}/ALLOWED_TYPES" 2>/dev/null)
+    if [ -f "${d}/ALLOWED_TYPES" ]; then
+        local first_allowed
+        first_allowed=$(awk 'NF' "${d}/ALLOWED_TYPES" 2>/dev/null | head -1)
+        [ -n "$first_allowed" ] && type="$first_allowed"
     fi
     type="${type:-chore}"
 
@@ -1459,11 +1557,15 @@ template_commit_from_facts() {
     count=$(count_lines < "${d}/STAGED_NAMES" 2>/dev/null || echo 1)
     scope=$(infer_file_scope "$first_file" 2>/dev/null || echo "")
     case "$scope" in ""|none|other) scope="" ;; esac
+    scope="${scope##*/}"
+    scope="${scope%.*}"
+    [ "$scope" = "$type" ] && scope=""
 
     subject="update ${first_file:-files}"
     if [ "$count" -gt 1 ]; then
         subject="update ${first_file:-files} and $((count - 1)) other files"
     fi
+    subject=$(printf '%s' "$subject" | sed -E 's/\.$//')
 
     local header="${type}${scope:+(${scope})}: ${subject}"
     # Keep the fallback itself inside the 72-char contract
@@ -1499,8 +1601,11 @@ reflect_commit_message() {
     local schema_file="${ctx_dir}/SCHEMA.json"
     [ -f "$schema_file" ] || _build_commit_schema "$schema_file" "$ctx_dir"
 
-    local reflect_user_file="${ctx_dir}/REFLECTION_USER"
+    local reflect_tail_file="${ctx_dir}/REFLECTION_TAIL"
     {
+        printf '=== REFLECTION TASK ===\n'
+        printf 'Reflect on the draft commit message below against the actual changes and facts above.\n'
+        printf 'Critique it, remove any hallucinations or ungrounded tokens, and return a corrected JSON object.\n\n'
         printf '=== DRAFT COMMIT MESSAGE CANDIDATE ===\n%s\n\n' "$candidate_msg"
         printf '=== DETECTED VIOLATIONS / CORRECTIONS REQUIRED ===\n'
         if [ -n "$feedback" ]; then
@@ -1508,12 +1613,15 @@ reflect_commit_message() {
         else
             printf 'Ensure candidate strictly conforms to Conventional Commits and contains only grounded facts.\n\n'
         fi
-        printf '=== ACTUAL CHANGES & FACTS (AUTHORITATIVE GROUND TRUTH) ===\n'
-        cat "$changes_file"
-    } > "$reflect_user_file"
+        if [ -f "$prompt_file" ]; then
+            printf '=== REFLECTION CHECKLIST & RULES ===\n'
+            cat "$prompt_file"
+            printf '\n'
+        fi
+    } > "$reflect_tail_file"
 
     local reflect_req="${ctx_dir}/REQUEST.reflect.json"
-    if ! build_ollama_request "$reflect_req" "$model" "$reflect_user_file" "$prompt_file" "$schema_file"; then
+    if ! build_followup_request "$reflect_req" "$ctx_dir" "$reflect_tail_file" "$schema_file"; then
         return 1
     fi
 
@@ -1522,6 +1630,215 @@ reflect_commit_message() {
         return 1
     fi
     echo "$refined_msg"
+}
+
+# Strict conventional commit format gate.
+# Args: $1=commit_msg, $2=ctx_dir (optional)
+is_strict_conventional_commit() {
+    local msg="$1" d="${2:-}"
+    [ -z "$msg" ] && return 1
+    [ -z "$d" ] && command -v get_aicommit_tmp_dir >/dev/null 2>&1 && d=$(get_aicommit_tmp_dir 2>/dev/null)
+
+    local header
+    header=$(printf '%s\n' "$msg" | head -1)
+    [ -n "$header" ] || return 1
+    [ "${#header}" -le 72 ] || return 1
+
+    # Header regex: type(scope)!?: subject (starts with non-space, ends with non-dot, non-empty)
+    if ! printf '%s\n' "$header" | grep -qE '^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\([a-z0-9._/-]+\))?!?: \S.*[^.]$'; then
+        return 1
+    fi
+
+    # Line 2 must be blank if there are multiple lines
+    local line_count
+    line_count=$(printf '%s\n' "$msg" | wc -l | tr -d ' ')
+    if [ "$line_count" -gt 1 ]; then
+        local line2
+        line2=$(printf '%s\n' "$msg" | sed -n '2p')
+        [ -z "$line2" ] || return 1
+    fi
+
+    # Breaking change consistency: ! in header iff BREAKING CHANGE: in body/footer
+    local has_bang=false has_breaking_footer=false
+    if printf '%s\n' "$header" | grep -qE '^[^:]*!: '; then
+        has_bang=true
+    fi
+    if printf '%s\n' "$msg" | grep -qE '^BREAKING CHANGE:[[:space:]]*\S'; then
+        has_breaking_footer=true
+    fi
+    if [ "$has_bang" = "true" ] && [ "$has_breaking_footer" != "true" ]; then
+        return 1
+    fi
+    if [ "$has_bang" != "true" ] && [ "$has_breaking_footer" = "true" ]; then
+        return 1
+    fi
+
+    # Type must be in ALLOWED_TYPES if ALLOWED_TYPES file exists
+    if [ -n "$d" ] && [ -f "${d}/ALLOWED_TYPES" ]; then
+        local type
+        type=$(printf '%s\n' "$header" | sed -nE 's/^([a-z]+)(\([^)]*\))?!?: .*/\1/p')
+        grep -qxF "$type" "${d}/ALLOWED_TYPES" 2>/dev/null || return 1
+    fi
+
+    return 0
+}
+
+# Salvage commit message: keep model's header and grounded body bullets.
+# Args: $1=msg, $2=ctx_dir
+salvage_commit_message() {
+    local msg="$1" d="${2:-}"
+    [ -z "$d" ] && command -v get_aicommit_tmp_dir >/dev/null 2>&1 && d=$(get_aicommit_tmp_dir 2>/dev/null)
+    local header
+    header=$(printf '%s\n' "$msg" | head -1)
+    [ -n "$header" ] || return 1
+
+    # Header itself must pass grounding
+    validate_commit_grounding "$header" "$d" >/dev/null 2>&1 || return 1
+
+    local has_breaking=false bc_line=""
+    if printf '%s\n' "$header" | grep -qE '^[^:]*!: '; then
+        has_breaking=true
+        bc_line=$(printf '%s\n' "$msg" | grep -E '^BREAKING CHANGE:' | head -1)
+        [ -z "$bc_line" ] && bc_line="BREAKING CHANGE: compatibility break"
+    fi
+
+    local in_body=false line candidate_bullet clean_bullets=()
+    while IFS= read -r line; do
+        if [ "$in_body" = "false" ]; then
+            [ -z "$line" ] && in_body=true
+            continue
+        fi
+        [ -z "$line" ] && continue
+        printf '%s\n' "$line" | grep -qE '^BREAKING CHANGE:' && continue
+        if validate_commit_grounding "${header}"$'\n\n'"${line}" "$d" >/dev/null 2>&1; then
+            clean_bullets+=("$line")
+        fi
+    done <<< "$msg"
+
+    local result="$header"
+    if [ ${#clean_bullets[@]} -gt 0 ]; then
+        local bullets_joined
+        bullets_joined=$(printf '%s\n' "${clean_bullets[@]}")
+        result="${result}"$'\n\n'"${bullets_joined}"
+    fi
+    if [ "$has_breaking" = "true" ] && [ -n "$bc_line" ]; then
+        result="${result}"$'\n\n'"${bc_line}"
+    fi
+
+    printf '%s\n' "$result" | enforce_conventional_commit
+}
+
+# Shared candidate finalizer across single, regenerate, and batched flows.
+# Integrates deterministic repair, grounding validation, reflection repairs,
+# salvage, and strict format gating.
+# Args: $1=candidate_raw_or_obj, $2=ctx_dir
+_finalize_candidate() {
+    local raw_input="$1" ctx_dir="${2:-}"
+    [ -z "$ctx_dir" ] && command -v get_aicommit_tmp_dir >/dev/null 2>&1 && ctx_dir=$(get_aicommit_tmp_dir 2>/dev/null)
+
+    local candidate_msg=""
+    if printf '%s' "$raw_input" | jq -e 'type == "object" and has("type") and has("subject")' >/dev/null 2>&1; then
+        candidate_msg=$(_commit_msg_from_json_obj "$raw_input" "$ctx_dir") || candidate_msg=""
+    elif command -v extract_json_object >/dev/null 2>&1 \
+        && cleaned=$(extract_json_object "$raw_input" 2>/dev/null) \
+        && printf '%s' "$cleaned" | jq -e 'type == "object" and has("type") and has("subject")' >/dev/null 2>&1; then
+        candidate_msg=$(_commit_msg_from_json_obj "$cleaned" "$ctx_dir") || candidate_msg=""
+    else
+        candidate_msg=$(extract_conventional_commit "$raw_input")
+    fi
+
+    [ -z "$candidate_msg" ] && candidate_msg=$(template_commit_from_facts "$ctx_dir")
+
+    # Unconditional reflection if AI_REFLECTION_MODE is 'always'
+    if [ "${AI_ENABLE_REFLECTION:-true}" = "true" ] && [ "${AI_REFLECTION_MODE:-on-failure}" = "always" ]; then
+        local feedback_always="" reflected_always=""
+        feedback_always=$(validate_commit_grounding "$candidate_msg" "$ctx_dir" 2>&1 || true)
+        if reflected_always=$(reflect_commit_message "$candidate_msg" "$ctx_dir" "$feedback_always") && [ -n "$reflected_always" ]; then
+            candidate_msg="$reflected_always"
+        fi
+    fi
+
+    # Grounding gate: verify, reflect up to AI_MAX_REPAIRS (default 1), else salvage or fallback
+    local feedback=""
+    if ! feedback=$(validate_commit_grounding "$candidate_msg" "$ctx_dir"); then
+        local max_rep="${AI_MAX_REPAIRS:-1}" rep_count=0 rep_msg=""
+        while [ "$rep_count" -lt "$max_rep" ]; do
+            rep_count=$((rep_count + 1))
+            [ -n "$ctx_dir" ] && printf '%s\n' "$rep_count" > "${ctx_dir}/REPAIR_COUNT"
+            if [ "${AI_ENABLE_REFLECTION:-true}" = "true" ]; then
+                if rep_msg=$(reflect_commit_message "$candidate_msg" "$ctx_dir" "$feedback") && [ -n "$rep_msg" ]; then
+                    candidate_msg="$rep_msg"
+                    if feedback=$(validate_commit_grounding "$candidate_msg" "$ctx_dir"); then
+                        break
+                    fi
+                fi
+            fi
+        done
+
+        # If still failing grounding: salvage before template
+        if ! validate_commit_grounding "$candidate_msg" "$ctx_dir" >/dev/null 2>&1; then
+            local salvaged=""
+            if salvaged=$(salvage_commit_message "$candidate_msg" "$ctx_dir") \
+                && [ -n "$salvaged" ] \
+                && validate_commit_grounding "$salvaged" "$ctx_dir" >/dev/null 2>&1; then
+                candidate_msg="$salvaged"
+            else
+                [ -n "$ctx_dir" ] && touch "${ctx_dir}/TEMPLATE_FALLBACK"
+                candidate_msg=$(template_commit_from_facts "$ctx_dir")
+            fi
+        fi
+    fi
+
+    candidate_msg=$(printf '%s\n' "$candidate_msg" | enforce_conventional_commit)
+
+    # Strict final gate
+    if ! is_strict_conventional_commit "$candidate_msg" "$ctx_dir"; then
+        [ -n "$ctx_dir" ] && touch "${ctx_dir}/TEMPLATE_FALLBACK"
+        candidate_msg=$(template_commit_from_facts "$ctx_dir")
+        candidate_msg=$(printf '%s\n' "$candidate_msg" | enforce_conventional_commit)
+    fi
+
+    printf '%s\n' "$candidate_msg"
+}
+
+# Compute content-addressed cache key for staged changes and configuration.
+# Args: $1=raw_diff_or_files (optional, for per-group caching)
+get_aicommit_cache_key() {
+    local raw_input="${1:-}"
+    local staged_raw=""
+    if [ -n "$raw_input" ] && [ -f "$raw_input" ]; then
+        staged_raw=$(cat "$raw_input" 2>/dev/null)
+    elif [ -n "$raw_input" ]; then
+        staged_raw="$raw_input"
+    else
+        staged_raw=$(agit diff --staged --raw -z --full-index 2>/dev/null || git diff --staged --raw -z --full-index 2>/dev/null || true)
+    fi
+
+    local prompt_hash="" reflect_hash=""
+    prompt_hash=$(shasum -a 256 "$AI_PROMPT_FILE" 2>/dev/null | awk '{print $1}')
+    local ref_f="${AI_REFLECTION_PROMPT_FILE:-$AICOMMIT_DIR/templates/reflection-prompt.txt}"
+    reflect_hash=$(shasum -a 256 "$ref_f" 2>/dev/null | awk '{print $1}')
+
+    local state_dir seed_offset="0"
+    state_dir=$(get_aicommit_state_dir 2>/dev/null || echo "")
+    if [ -n "$state_dir" ] && [ -f "${state_dir}/SEED_OFFSET" ]; then
+        seed_offset=$(cat "${state_dir}/SEED_OFFSET" 2>/dev/null || echo "0")
+    fi
+    local seed="${AI_SEED:-0}:${seed_offset}"
+
+    {
+        printf '%s\n' "$staged_raw"
+        printf 'model:%s\n' "${AI_MODEL:-$DEFAULT_AI_MODEL}"
+        printf 'prompt:%s\n' "$prompt_hash"
+        printf 'reflect:%s\n' "$reflect_hash"
+        printf 'num_ctx:%s\n' "${AI_NUM_CTX:-16384}"
+        printf 'num_predict:%s\n' "${AI_NUM_PREDICT:-400}"
+        printf 'tier2:%s\n' "${AI_MAX_LINES_TIER2:-}"
+        printf 'tier3:%s\n' "${AI_MAX_LINES_TIER3:-}"
+        printf 'reflection_mode:%s\n' "${AI_REFLECTION_MODE:-on-failure}"
+        printf 'seed:%s\n' "$seed"
+        printf 'keep_alive:%s\n' "${AI_KEEP_ALIVE:--1}"
+    } | shasum -a 256 | awk '{print $1}'
 }
 
 # Generate commit message — assembles the request and calls Ollama.
@@ -1580,7 +1897,25 @@ generate_commit_message() {
         return 0
     fi
 
-    # Response cache — identical request bytes ⇒ identical response, replayed.
+    # Content-addressed result cache (Lever C)
+    local ckey="" cdir=""
+    ckey=$(get_aicommit_cache_key 2>/dev/null || echo "")
+    if [ -n "$ckey" ] && [ -n "$state_dir" ]; then
+        cdir="${state_dir}/cache/${ckey}"
+        if [ -s "${cdir}/MSG" ]; then
+            local cached_msg
+            cached_msg=$(cat "${cdir}/MSG" 2>/dev/null)
+            if [ -n "$cached_msg" ] && is_strict_conventional_commit "$cached_msg" "$ctx_dir"; then
+                if [ -s "${cdir}/RELEASE" ]; then
+                    cp "${cdir}/RELEASE" "${ctx_dir}/RELEASE_HINT" 2>/dev/null || true
+                fi
+                echo "$cached_msg"
+                return 0
+            fi
+        fi
+    fi
+
+    # Legacy response cache fallback
     local key
     key=$(shasum -a 256 < "$request_file" | awk '{print $1}')
     if [ -f "${state_dir}/MSG_KEY" ] && [ "$(cat "${state_dir}/MSG_KEY" 2>/dev/null)" = "$key" ] && [ -s "${state_dir}/MSG_CACHE" ]; then
@@ -1588,46 +1923,36 @@ generate_commit_message() {
         return 0
     fi
 
-    local commit_msg
-    if ! commit_msg=$(_llm_commit_once "$request_file" "$ctx_dir"); then
+    local resp="${ctx_dir}/RESPONSE" err="${ctx_dir}/OLLAMA_ERROR"
+    : > "$resp"; : > "$err"
+    if ! invoke_llm "${AI_MODEL:-$DEFAULT_AI_MODEL}" "$request_file" "$resp" "$err" "${AI_TIMEOUT:-120}" "Generating commit message"; then
         return 1
     fi
 
-    # Unconditional reflection if AI_REFLECTION_MODE is 'always'
-    if [ "${AI_ENABLE_REFLECTION:-true}" = "true" ] && [ "${AI_REFLECTION_MODE:-on-failure}" = "always" ]; then
-        local feedback_always="" reflected_always=""
-        feedback_always=$(validate_commit_grounding "$commit_msg" "$ctx_dir" 2>&1 || true)
-        if reflected_always=$(reflect_commit_message "$commit_msg" "$ctx_dir" "$feedback_always") && [ -n "$reflected_always" ]; then
-            commit_msg="$reflected_always"
-        fi
-    fi
+    local commit_msg raw_resp
+    raw_resp=$(cat "$resp" 2>/dev/null || true)
+    commit_msg=$(_finalize_candidate "$raw_resp" "$ctx_dir")
 
-    # Grounding gate: verify, reflect or retry once with feedback, else deterministic template
-    local feedback=""
-    if ! feedback=$(validate_commit_grounding "$commit_msg" "$ctx_dir"); then
-        local reflected_msg=""
-        if [ "${AI_ENABLE_REFLECTION:-true}" = "true" ] \
-            && reflected_msg=$(reflect_commit_message "$commit_msg" "$ctx_dir" "$feedback") \
-            && [ -n "$reflected_msg" ] \
-            && validate_commit_grounding "$reflected_msg" "$ctx_dir" >/dev/null 2>&1; then
-            commit_msg="$reflected_msg"
-        else
-            local retry_req="${ctx_dir}/REQUEST.retry.json" retry_msg=""
-            jq --arg fb "$feedback" \
-                '.messages[1].content += "\n\nCORRECTION REQUIRED — your previous answer violated grounding:\n" + $fb + "\nFix and return only the JSON object."' \
-                "$request_file" > "$retry_req" 2>/dev/null
-            if [ -s "$retry_req" ] \
-                && retry_msg=$(_llm_commit_once "$retry_req" "$ctx_dir" "Retrying with grounding feedback") \
-                && [ -n "$retry_msg" ] \
-                && validate_commit_grounding "$retry_msg" "$ctx_dir" >/dev/null 2>&1; then
-                commit_msg="$retry_msg"
-            else
-                commit_msg=$(template_commit_from_facts "$ctx_dir")
+    # Persist content-addressed cache atomically
+    if [ -n "$ckey" ] && [ -n "$state_dir" ]; then
+        local cache_base="${state_dir}/cache"
+        [ -d "$cache_base" ] || mkdir -m 700 -p "$cache_base" 2>/dev/null || true
+        [ -d "$cdir" ] || mkdir -m 700 -p "$cdir" 2>/dev/null || true
+        if [ -d "$cdir" ]; then
+            printf '%s\n' "$commit_msg" > "${cdir}/MSG.tmp" && mv "${cdir}/MSG.tmp" "${cdir}/MSG"
+            if [ -f "${ctx_dir}/RELEASE_HINT" ]; then
+                cp "${ctx_dir}/RELEASE_HINT" "${cdir}/RELEASE.tmp" && mv "${cdir}/RELEASE.tmp" "${cdir}/RELEASE"
+            fi
+            if [ -f "${ctx_dir}/CHANGES_CONTEXT" ]; then
+                cp "${ctx_dir}/CHANGES_CONTEXT" "${cdir}/CHANGES_CONTEXT.tmp" && mv "${cdir}/CHANGES_CONTEXT.tmp" "${cdir}/CHANGES_CONTEXT"
+            fi
+            if [ -f "${ctx_dir}/SEMVER" ]; then
+                cp "${ctx_dir}/SEMVER" "${cdir}/SEMVER.tmp" && mv "${cdir}/SEMVER.tmp" "${cdir}/SEMVER"
             fi
         fi
     fi
 
-    # Persist cache + replayable request atomically (tmp + mv)
+    # Persist legacy cache + replayable request atomically (tmp + mv)
     printf '%s' "$key" > "${state_dir}/MSG_KEY.tmp" && mv "${state_dir}/MSG_KEY.tmp" "${state_dir}/MSG_KEY"
     printf '%s\n' "$commit_msg" > "${state_dir}/MSG_CACHE.tmp" && mv "${state_dir}/MSG_CACHE.tmp" "${state_dir}/MSG_CACHE"
     cp "$request_file" "${state_dir}/MSG_REQUEST.tmp" && mv "${state_dir}/MSG_REQUEST.tmp" "${state_dir}/MSG_REQUEST"
@@ -1652,39 +1977,35 @@ regenerate_commit_message() {
     local req="${tmp_dir}/REQUEST.regen.json"
     jq --argjson o "$off" '.options.seed = ((.options.seed // 0) + $o)' "$req_src" > "$req" || return 1
 
-    local commit_msg
-    commit_msg=$(_llm_commit_once "$req" "$tmp_dir" "Regenerating commit message") || return 1
-    [ -z "$commit_msg" ] && return 1
-
-    # Unconditional reflection if AI_REFLECTION_MODE is 'always'
-    if [ "${AI_ENABLE_REFLECTION:-true}" = "true" ] && [ "${AI_REFLECTION_MODE:-on-failure}" = "always" ]; then
-        local feedback_always="" reflected_always=""
-        feedback_always=$(validate_commit_grounding "$commit_msg" "$tmp_dir" 2>&1 || true)
-        if reflected_always=$(reflect_commit_message "$commit_msg" "$tmp_dir" "$feedback_always") && [ -n "$reflected_always" ]; then
-            commit_msg="$reflected_always"
-        fi
+    local resp="${tmp_dir}/RESPONSE.regen" err="${tmp_dir}/OLLAMA_ERROR"
+    : > "$resp"; : > "$err"
+    if ! invoke_llm "${AI_MODEL:-$DEFAULT_AI_MODEL}" "$req" "$resp" "$err" "${AI_TIMEOUT:-120}" "Regenerating commit message"; then
+        return 1
     fi
 
-    # Grounding gate: verify, reflect or fallback to deterministic template
-    local feedback=""
-    if ! feedback=$(validate_commit_grounding "$commit_msg" "$tmp_dir"); then
-        local reflected_msg=""
-        if [ "${AI_ENABLE_REFLECTION:-true}" = "true" ] \
-            && reflected_msg=$(reflect_commit_message "$commit_msg" "$tmp_dir" "$feedback") \
-            && [ -n "$reflected_msg" ] \
-            && validate_commit_grounding "$reflected_msg" "$tmp_dir" >/dev/null 2>&1; then
-            commit_msg="$reflected_msg"
-        else
-            commit_msg=$(template_commit_from_facts "$tmp_dir")
-        fi
-    fi
+    local raw_resp commit_msg
+    raw_resp=$(cat "$resp" 2>/dev/null || true)
+    commit_msg=$(_finalize_candidate "$raw_resp" "$tmp_dir")
 
-    # Update the cache so a subsequent --regenerate still changes the answer
+    # Update cache
     local key
     key=$(shasum -a 256 < "$req" | awk '{print $1}')
     printf '%s' "$key" > "${state_dir}/MSG_KEY.tmp" && mv "${state_dir}/MSG_KEY.tmp" "${state_dir}/MSG_KEY"
     printf '%s\n' "$commit_msg" > "${state_dir}/MSG_CACHE.tmp" && mv "${state_dir}/MSG_CACHE.tmp" "${state_dir}/MSG_CACHE"
     cp "$req" "${state_dir}/MSG_REQUEST.tmp" && mv "${state_dir}/MSG_REQUEST.tmp" "${state_dir}/MSG_REQUEST"
+
+    local ckey cdir
+    ckey=$(get_aicommit_cache_key 2>/dev/null || echo "")
+    if [ -n "$ckey" ] && [ -n "$state_dir" ]; then
+        cdir="${state_dir}/cache/${ckey}"
+        [ -d "$cdir" ] || mkdir -m 700 -p "$cdir" 2>/dev/null || true
+        if [ -d "$cdir" ]; then
+            printf '%s\n' "$commit_msg" > "${cdir}/MSG.tmp" && mv "${cdir}/MSG.tmp" "${cdir}/MSG"
+            if [ -f "${tmp_dir}/RELEASE_HINT" ]; then
+                cp "${tmp_dir}/RELEASE_HINT" "${cdir}/RELEASE.tmp" && mv "${cdir}/RELEASE.tmp" "${cdir}/RELEASE"
+            fi
+        fi
+    fi
 
     echo "$commit_msg"
 }
@@ -1812,10 +2133,15 @@ _fill_missing_group_messages() {
 # the sequential filler.
 _generate_group_messages_batched() {
     local n="$1" tmp_dir="$2" i
-    local user_file="${tmp_dir}/BATCH_USER" sys_file="${tmp_dir}/BATCH_SYSTEM"
+    local user_file="${tmp_dir}/BATCH_USER"
     local schema_file="${tmp_dir}/BATCH_SCHEMA.json" req="${tmp_dir}/BATCH_REQUEST.json"
     local resp="${tmp_dir}/BATCH_RESPONSE" err="${tmp_dir}/BATCH_ERROR"
     local model="${AI_MODEL:-$DEFAULT_AI_MODEL}"
+
+    # Shrink each group's context to fit token budget before building batch
+    for ((i = 1; i <= n; i++)); do
+        _enforce_token_budget "${tmp_dir}/groups/${i}"
+    done
 
     : > "$user_file"
     for ((i = 1; i <= n; i++)); do
@@ -1823,11 +2149,7 @@ _generate_group_messages_batched() {
         cat "${tmp_dir}/groups/${i}/CHANGES_CONTEXT" >> "$user_file"
         printf '\n' >> "$user_file"
     done
-
-    {
-        cat "${AI_PROMPT_FILE}"
-        printf '\nBATCH MODE: the user message contains %d groups marked "=== GROUP i ===". Return a JSON object {"commits": [...]} with exactly %d commit objects, in group order. Each object describes ONLY its own group.\n' "$n" "$n"
-    } > "$sys_file"
+    printf '\nBATCH MODE: the message above contains %d groups marked "=== GROUP i ===". Return a JSON object {"commits": [...]} with exactly %d commit objects, in group order. Each object describes ONLY its own group.\n' "$n" "$n" >> "$user_file"
 
     # Union the per-group constraints into the shared batch schema
     {
@@ -1842,7 +2164,8 @@ _generate_group_messages_batched() {
     } | sort -u > "${tmp_dir}/SCOPE_CANDIDATES"
     _build_commit_schema "$schema_file" "$tmp_dir" "batch" "$n"
 
-    if ! build_ollama_request "$req" "$model" "$user_file" "$sys_file" "$schema_file"; then
+    # Keep AI_PROMPT_FILE byte-identical as system prompt to maximize KV cache reuse
+    if ! build_ollama_request "$req" "$model" "$user_file" "${AI_PROMPT_FILE}" "$schema_file"; then
         return 1
     fi
 
@@ -1863,19 +2186,9 @@ _generate_group_messages_batched() {
     for ((i = 1; i <= n; i++)); do
         obj=$(printf '%s' "$content" | jq -c ".commits[$((i - 1))]" 2>/dev/null)
         [ -z "$obj" ] && continue
-        m=$(_commit_msg_from_json_obj "$obj" "${tmp_dir}/groups/${i}") || m=""
+        m=$(_finalize_candidate "$obj" "${tmp_dir}/groups/${i}")
         if [ -n "$m" ]; then
-            if validate_commit_grounding "$m" "${tmp_dir}/groups/${i}" >/dev/null 2>&1; then
-                _AICOMMIT_GRP_MSGS[$i]="$m"
-            elif [ "${AI_ENABLE_REFLECTION:-true}" = "true" ]; then
-                local fb="" ref_m=""
-                fb=$(validate_commit_grounding "$m" "${tmp_dir}/groups/${i}" 2>&1 || true)
-                if ref_m=$(reflect_commit_message "$m" "${tmp_dir}/groups/${i}" "$fb") \
-                    && [ -n "$ref_m" ] \
-                    && validate_commit_grounding "$ref_m" "${tmp_dir}/groups/${i}" >/dev/null 2>&1; then
-                    _AICOMMIT_GRP_MSGS[$i]="$ref_m"
-                fi
-            fi
+            _AICOMMIT_GRP_MSGS[$i]="$m"
         fi
     done
     return 0

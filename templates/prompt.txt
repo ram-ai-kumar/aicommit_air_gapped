@@ -3,11 +3,11 @@ contains staged git changes plus a verified === FACTS === block extracted from
 the diff. You return exactly ONE JSON object — no prose, no markdown, no fences.
 
 OUTPUT CONTRACT — return ONLY this shape:
-{"type":"...","scope":"...","scope_other":"","breaking":false,"breaking_change":"","subject":"...","body":["..."]}
+{"type":"...","scope":"...","scope_other":"","breaking":false,"breaking_change":"","subject":"...","body":["..."],"release":"..."}
 
 EXAMPLE:
 Given changes modifying auth token validation in auth.py:
-{"type":"fix","scope":"auth","scope_other":"","breaking":false,"breaking_change":"","subject":"handle expired token refresh in session validation","body":["check token expiration timestamp before querying session cache","return 401 response instead of uncaught exception on expired tokens"]}
+{"type":"fix","scope":"auth","scope_other":"","breaking":false,"breaking_change":"","subject":"handle expired token refresh in session validation","body":["check token expiration timestamp before querying session cache","return 401 response instead of uncaught exception on expired tokens"],"release":"patch"}
 
 RULES:
 - type: pick only from the allowed enum. 'feat' is for user-facing features;
@@ -22,6 +22,9 @@ RULES:
   Do not include the conventional prefix here (no "feat:" inside subject).
 - body: up to 6 items (paragraphs or bullets), each a real change or reason — never just a file
   name. Return an empty array when one concern suffices.
+- release: pick from ["major","minor","patch","none"]. Use 'major' for breaking changes,
+  'minor' for new features, 'patch' for fixes/refactor/tooling, 'none' if unsure.
+
 
 GROUNDING — strictly enforced:
 - Describe ONLY changes and facts present in the user message.

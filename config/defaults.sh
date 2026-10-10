@@ -24,6 +24,7 @@ AI_SEED="${AI_SEED:-42}"
 AI_NUM_CTX="${AI_NUM_CTX:-16384}"
 AI_NUM_PREDICT="${AI_NUM_PREDICT:-400}"
 AI_THINK="${AI_THINK:-false}"
+AI_KEEP_ALIVE="${AI_KEEP_ALIVE:--1}"
 
 # Bypass JSON schema decoding constraint if the backend/model does not support it
 # (auto-detected when Ollama returns "structured output is unavailable")

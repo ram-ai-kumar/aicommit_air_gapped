@@ -115,18 +115,41 @@ mock_ollama_api() {
     cat > "$TEST_TEMP_DIR/bin/curl" <<'MOCK_EOF'
 #!/usr/bin/env bash
 url=""
+data_file=""
+data_raw=""
+prev=""
 for a in "$@"; do
     case "$a" in */api/*) url="$a" ;; esac
+    if [ "$prev" = "-d" ] || [ "$prev" = "--data" ] || [ "$prev" = "--data-binary" ]; then
+        if [ "$a" = "@-" ] || [ "$a" = "-" ]; then
+            data_raw=$(cat)
+        elif [[ "$a" == @* ]]; then
+            data_file="${a#@}"
+        else
+            data_raw="$a"
+        fi
+    fi
+    prev="$a"
 done
 case "$url" in
     */api/version)   echo '{"version":"0.40.1"}' ;;
     */api/tags)      printf '{"models":[{"name":"%s"}]}' "${MOCK_OLLAMA_MODEL:-${AI_MODEL:-${DEFAULT_AI_MODEL:-test-model}}}" ;;
     */api/show)      echo '{}' ;;
     */api/generate)  echo '{}' ;;
-    */api/chat)      cat "$TEST_TEMP_DIR/mock_chat.json" ;;
+    */api/chat)
+        if [ -n "$TEST_TEMP_DIR" ]; then
+            if [ -n "$data_file" ] && [ -f "$data_file" ]; then
+                jq -c . "$data_file" 2>/dev/null >> "$TEST_TEMP_DIR/chat_calls.jsonl" || cat "$data_file" >> "$TEST_TEMP_DIR/chat_calls.jsonl"
+            elif [ -n "$data_raw" ]; then
+                printf '%s' "$data_raw" | jq -c . 2>/dev/null >> "$TEST_TEMP_DIR/chat_calls.jsonl" || printf '%s\n' "$data_raw" >> "$TEST_TEMP_DIR/chat_calls.jsonl"
+            fi
+        fi
+        cat "$TEST_TEMP_DIR/mock_chat.json"
+        ;;
     *) echo "mock curl: unexpected url '$url'" >&2; exit 1 ;;
 esac
 MOCK_EOF
+
     chmod +x "$TEST_TEMP_DIR/bin/curl"
     export PATH="$TEST_TEMP_DIR/bin:$PATH"
 }

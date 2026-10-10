@@ -383,8 +383,7 @@ group_staged_files_heuristically() {
 }
 
 # Ask the LLM to NAME the deterministic groups (and optionally merge them).
-# The schema constrains files to the staged enum — the model cannot invent or
-# drop files, only rename/merge.
+# Schema uses component ids instead of re-listing every file path.
 # Args: $1=comp_lines, $2=staged_files
 name_groups_with_ai() {
     local comp_lines="$1" staged_files="$2"
@@ -400,22 +399,24 @@ name_groups_with_ai() {
 
     umask 077
     {
-        printf 'Deterministic groups (rename them; merge only if they serve the same change):\n'
-        printf '%s\n' "$comp_lines" | awk -F'\t' '{ printf "GROUP %s:", $1; for (i = 2; i <= NF; i++) printf " %s", $i; printf "\n" }'
-        printf '\nAll staged files:\n'
-        printf '%s\n' "$staged_files"
+        printf 'Deterministic groups to name (rename each by id; merge only if they serve the same change):\n'
+        printf '%s\n' "$comp_lines" | awk -F'\t' '{ printf "GROUP %s (id: \"%s\"): ", NR, $1; for (i = 2; i <= NF; i++) printf "%s%s", (i>2?", ":""), $i; printf "\n" }'
     } > "$user_file"
 
-    jq -n --argjson files "$(printf '%s\n' "$staged_files" | awk 'NF' | jq -R . | jq -sc 'unique')" \
+    local comp_ids
+    comp_ids=$(printf '%s\n' "$comp_lines" | awk -F'\t' 'NF>=1 && $1!="" {print $1}' | jq -R . | jq -sc 'unique')
+
+    jq -n --argjson ids "$comp_ids" \
         '{type: "object", additionalProperties: false,
           properties: {groups: {type: "array", items: {
             type: "object", additionalProperties: false,
             properties: {
-                name:  {type: "string", maxLength: 40},
-                type:  {type: "string", enum: ["feat","fix","docs","style","refactor","perf","test","build","ci","chore","revert"]},
-                files: {type: "array", items: {type: "string", enum: $files}, minItems: 1}
+                id:         {type: "string", enum: $ids},
+                name:       {type: "string", maxLength: 40},
+                type:       {type: "string", enum: ["feat","fix","docs","style","refactor","perf","test","build","ci","chore","revert"]},
+                merge_into: {type: "string"}
             },
-            required: ["name", "type", "files"]}}},
+            required: ["id", "name"]}}},
           required: ["groups"]}' > "$schema_file" || return 1
 
     if ! build_ollama_request "$req" "${AI_MODEL:-$DEFAULT_AI_MODEL}" "$user_file" "$prompt_template" "$schema_file"; then
@@ -432,7 +433,7 @@ name_groups_with_ai() {
 
 # Reconcile AI naming output against the staged set: files must be staged and
 # assigned exactly once; anything the model dropped is re-attached to its
-# deterministic component (named by first file).
+# deterministic component (named by first file). Supports id-based and legacy files schema.
 # Args: $1=raw_json, $2=staged_files, $3=comp_lines
 reconcile_grouping_json() {
     local raw="$1" staged_files="$2" comp_lines="${3:-}"
@@ -443,19 +444,27 @@ reconcile_grouping_json() {
 
     printf '%s' "$raw" | jq -e '.groups | type == "array" and length > 0' >/dev/null 2>&1 || return 1
 
-    local ngroups gi name files f files_tab="" out="" used_names=" " seen=""
+    local ngroups gi name id files f files_tab="" out="" used_names=" " seen=" "
     ngroups=$(printf '%s' "$raw" | jq '.groups | length' 2>/dev/null)
 
     # file -> component id map for re-attaching dropped files
-    local comp_map_file
+    local comp_map_file comp_files_file
     comp_map_file=$(mktemp "${TMPDIR:-/tmp}/aicommit.compmap.XXXXXX") || return 1
-    printf '%s\n' "$comp_lines" | awk -F'\t' '{ for (i = 2; i <= NF; i++) printf "%s\t%s\n", $i, $1 }' > "$comp_map_file"
+    comp_files_file=$(mktemp "${TMPDIR:-/tmp}/aicommit.compfiles.XXXXXX") || return 1
+    printf '%s\n' "$comp_lines" | awk -F'\t' '{ for (i = 2; i <= NF; i++) if ($i != "") printf "%s\t%s\n", $i, $1 }' > "$comp_map_file"
+    printf '%s\n' "$comp_lines" | awk -F'\t' '{ printf "%s\t", $1; for (i = 2; i <= NF; i++) if ($i != "") printf "%s\t", $i; printf "\n" }' > "$comp_files_file"
 
     for ((gi = 0; gi < ngroups; gi++)); do
         name=$(printf '%s' "$raw" | jq -r ".groups[$gi].name // empty" 2>/dev/null \
             | sed -E 's/[=|`*]//g; s/^[[:space:]#-]+//; s/[[:space:]]+$//' | cut -c1-60)
         [ -z "$name" ] && name="changes"
-        files=$(printf '%s' "$raw" | jq -r ".groups[$gi].files[]" 2>/dev/null)
+
+        id=$(printf '%s' "$raw" | jq -r ".groups[$gi].id // empty" 2>/dev/null)
+        if [ -n "$id" ]; then
+            files=$(awk -F'\t' -v target="$id" '$1 == target { for (i = 2; i <= NF; i++) if ($i != "") print $i }' "$comp_files_file")
+        else
+            files=$(printf '%s' "$raw" | jq -r ".groups[$gi].files[]?" 2>/dev/null)
+        fi
 
         files_tab=""
         while IFS= read -r f; do
@@ -474,6 +483,7 @@ reconcile_grouping_json() {
         used_names="${used_names}${name} "
         out="${out}${name}\t${files_tab%\\t}\n"
     done
+    rm -f "$comp_files_file"
 
     # Leftover staged files → back into their deterministic components.
     # Build "comp_id\tfile" pairs, group in component order.
@@ -553,10 +563,21 @@ group_staged_files_logically() {
         return 0
     fi
 
-    # Grouping cache — one slot, keyed by the staged file list
-    local state_dir="" key=""
+    # Grouping cache — content-addressed by staged files and diff
+    local state_dir="" key="" cdir=""
     state_dir=$(get_aicommit_state_dir 2>/dev/null) || state_dir=""
-    key=$(printf '%s\n' "$staged_files" | sort | shasum -a 256 | awk '{print $1}')
+    if command -v get_aicommit_cache_key >/dev/null 2>&1; then
+        key=$(get_aicommit_cache_key 2>/dev/null || echo "")
+    else
+        key=$(printf '%s\n' "$staged_files" | sort | shasum -a 256 | awk '{print $1}')
+    fi
+    if [ -n "$state_dir" ] && [ -n "$key" ]; then
+        cdir="${state_dir}/cache/${key}"
+        if [ -s "${cdir}/GROUPS" ]; then
+            cat "${cdir}/GROUPS"
+            return 0
+        fi
+    fi
     if [ -n "$state_dir" ] && [ -f "${state_dir}/GROUPS_KEY" ] \
         && [ "$(cat "${state_dir}/GROUPS_KEY" 2>/dev/null)" = "$key" ] \
         && [ -s "${state_dir}/GROUPS_CACHE" ]; then
@@ -578,10 +599,11 @@ group_staged_files_logically() {
         build_cochange_cache "$state_dir" >/dev/null 2>&1 && cochange_file="${state_dir}/COCHANGE"
     fi
 
-    local comp_lines result=""
+    local comp_lines result="" comp_count=0
     comp_lines=$(cluster_staged_files_deterministic "$staged_files" "$diff_file" "$cochange_file")
+    comp_count=$(printf '%s\n' "$comp_lines" | awk 'NF' | wc -l | tr -d ' ')
 
-    if [ "${AI_ENABLE_LLM_GROUPING:-true}" = "true" ] && [ "${AI_DISABLE_GROUPING:-false}" != "true" ] \
+    if [ "$comp_count" -gt 1 ] && [ "${AI_ENABLE_LLM_GROUPING:-true}" = "true" ] && [ "${AI_DISABLE_GROUPING:-false}" != "true" ] \
         && validate_backend_prerequisites >/dev/null 2>&1; then
         local ai_json
         ai_json=$(name_groups_with_ai "$comp_lines" "$staged_files")
@@ -595,6 +617,14 @@ group_staged_files_logically() {
     fi
 
     if [ -n "$state_dir" ] && [ -n "$result" ]; then
+        if [ -n "$key" ]; then
+            local cache_base="${state_dir}/cache"
+            [ -d "$cache_base" ] || mkdir -m 700 -p "$cache_base" 2>/dev/null || true
+            [ -d "$cdir" ] || mkdir -m 700 -p "$cdir" 2>/dev/null || true
+            if [ -d "$cdir" ]; then
+                printf '%s\n' "$result" > "${cdir}/GROUPS.tmp" && mv "${cdir}/GROUPS.tmp" "${cdir}/GROUPS"
+            fi
+        fi
         printf '%s' "$key" > "${state_dir}/GROUPS_KEY.tmp" && mv "${state_dir}/GROUPS_KEY.tmp" "${state_dir}/GROUPS_KEY"
         printf '%s\n' "$result" > "${state_dir}/GROUPS_CACHE.tmp" && mv "${state_dir}/GROUPS_CACHE.tmp" "${state_dir}/GROUPS_CACHE"
     fi
