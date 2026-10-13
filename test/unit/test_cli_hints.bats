@@ -247,6 +247,29 @@ teardown() {
     assert_output_contains "lib/b.js"
 }
 
+@test "ET-03: AI collapsing multiple components into single group falls back to preserve atomic split" {
+    mkdir -p src test/unit
+    echo "src" > src/app.js
+    echo "test" > test/unit/test_cli_hints.bats
+    git add src/app.js test/unit/test_cli_hints.bats
+
+    init_aicommit_run
+    local run_dir
+    run_dir=$(get_aicommit_tmp_dir)
+    printf 'all changes\n' > "${run_dir}/USER_HINTS"
+
+    # Simulate LLM collapsing both components into a single group
+    mock_ollama_api '{"groups":[{"name":"lumped changes","type":"feat","files":["src/app.js","test/unit/test_cli_hints.bats"]}]}'
+
+    export AI_ENABLE_LLM_GROUPING="true"
+    run group_staged_files_logically "$(printf 'src/app.js\ntest/unit/test_cli_hints.bats')"
+    [ "$status" -eq 0 ]
+    local count
+    count=$(printf '%s\n' "$output" | count_lines)
+    # Must preserve at least 2 distinct groups, not collapse into 1
+    [ "$count" -ge 2 ]
+}
+
 # ─── 5. Security Tests ───────────────────────────────────────────────────────
 
 @test "SEC-01: shell metacharacters in user hints are treated strictly as literals" {
