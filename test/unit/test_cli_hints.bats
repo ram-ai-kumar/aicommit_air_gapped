@@ -61,6 +61,32 @@ teardown() {
     [ "$status" -eq 0 ]
 }
 
+@test "ST-05: context and prompt templates instruct model to synthesize formal header and body rather than using hint as is" {
+    echo "content" > test.txt
+    git add test.txt
+
+    init_aicommit_run
+    local run_dir
+    run_dir=$(get_aicommit_tmp_dir)
+
+    printf 'stages changes grouping enhanced\n' > "${run_dir}/USER_HINTS"
+    build_ai_context "$(git diff --staged)" "$(git diff --staged --name-only)" "$(git diff --staged --numstat)" "enhance multi-commit grouping" "$run_dir"
+
+    [ -f "${run_dir}/CHANGES_CONTEXT" ]
+    run grep -F "Directional guidance" "${run_dir}/CHANGES_CONTEXT"
+    [ "$status" -eq 0 ]
+
+    # Check grouping prompt template
+    run grep -F "Do NOT use hints as-is or copy them verbatim" "$AICOMMIT_DIR/templates/context-grouping-prompt.txt"
+    [ "$status" -eq 0 ]
+
+    # Check commit message prompt template
+    run grep -F "USER HINTS & INTENT" "$AICOMMIT_DIR/templates/prompt.txt"
+    [ "$status" -eq 0 ]
+    run grep -F "proper body section" "$AICOMMIT_DIR/templates/prompt.txt"
+    [ "$status" -eq 0 ]
+}
+
 # ─── 2. Negative Tests ───────────────────────────────────────────────────────
 
 @test "NT-01: conflicting options with hints exits non-zero" {
@@ -155,6 +181,22 @@ teardown() {
     # test.txt must only appear in the first matched group
     assert_output_contains $'hint 1\ttest.txt'
     refute_output_contains $'hint 2\ttest.txt'
+}
+
+@test "EC-06: regrouping after preview does not output warning message and continues" {
+    echo "file 1" > file1.txt
+    git add file1.txt
+
+    run aiccx "hint A"
+    [ "$status" -eq 0 ]
+
+    # Change staged files to trigger regrouping
+    echo "file 2" > file2.txt
+    git add file2.txt
+
+    run aiccx "hint B"
+    [ "$status" -eq 0 ]
+    refute_output_contains "Staged set changed since preview — regrouping"
 }
 
 # ─── 4. Exception & Resilience Tests ─────────────────────────────────────────
