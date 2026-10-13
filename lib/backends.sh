@@ -98,13 +98,15 @@ extract_json_object() {
 # Build a deterministic /api/chat request body with jq — no shell interpolation
 # of prompt content.
 # Args: out_file, model, user_content_file, system_file (optional),
-#       format_schema_file (optional; constrains decoding to a JSON schema)
+#       format_schema_file (optional; constrains decoding to a JSON schema),
+#       num_predict_override (optional; defaults to AI_NUM_PREDICT)
 build_ollama_request() {
     local out_file="$1"
     local model="$2"
     local user_file="$3"
     local system_file="${4:-}"
     local format_file="${5:-}"
+    local num_predict_opt="${6:-${AI_NUM_PREDICT:-400}}"
 
     [ -f "$user_file" ] || return 1
     command -v jq >/dev/null 2>&1 || {
@@ -141,7 +143,7 @@ build_ollama_request() {
         --argjson think "$think" \
         --argjson seed "${AI_SEED:-42}" \
         --argjson num_ctx "${AI_NUM_CTX:-16384}" \
-        --argjson num_predict "${AI_NUM_PREDICT:-400}" \
+        --argjson num_predict "$num_predict_opt" \
         --argjson system "$system_json" \
         --argjson format "$format_json" \
         --rawfile user "$user_file" \

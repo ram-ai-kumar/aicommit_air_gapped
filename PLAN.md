@@ -1,58 +1,40 @@
-# PLAN: Ollama Structured Output Auto-Fallback & Robust JSON Parsing
+# PLAN: Intent-Based Atomic Commit Grouping & Human-Guided Hints
 
 ## Goal
 
-Automatically handle Ollama environments and models (such as `qwen3.5:4b` on Apple Silicon with Homebrew Ollama) where grammar-constrained structured output is unavailable, falling back seamlessly to prompt-guided JSON generation without user-facing failures, and robustly parsing JSON whether returned raw or wrapped in markdown code fences.
+Enable organized, logical, human-, feature-, function-, intent-, and outcome-based grouping of staged changes when running multi-commit chains (`aicc`, `aiccs`, `aiccx`, `aiccsx`, and `aicommit --split`), with support for user-guided intent hints (`aiccs "docs reorganized" "Export bug resolved"`), robust cache keys, and DAG-ordered atomic commits.
 
 ## Context
 
-When using `qwen3.5:4b` on macOS via Homebrew Ollama, the model runs on the MLX runner (`libmlxc.dylib`), which lacks `xgrammar` and rejects any request containing the `format` schema parameter with `{"error": "structured output is unavailable"}`.
-However, `qwen3.5:4b` generates high-quality conventional commit JSON in ~1.5s when prompted without the `format` field.
-
-Constraints & Compliance:
-- Zero-Trust Security: No hardcoded secrets, safe subshell execution.
-- Compatibility: Fully compatible with Bash 3.2+ (macOS default /bin/bash) and Zsh 5.0+. Avoid Bash 4 `declare -A` in libraries.
-- Git Conventions: Never run git commit or git push on active repository history.
+When staging complex multi-file changes (e.g. 260+ files across renames, doc restructuring, asset cleanups, and script updates), previous grouping mechanisms risked falling back to directory buckets (`docs-1...docs-35`, `geojson`, `kml`).
+This update provides:
+1. Flexible user intent hints (`aiccs "docs reorganized" "Export bug resolved"`).
+2. Faceted component summaries to eliminate model information horizon blindness.
+3. Pre-clustering guardrails (Edge 2 symbol ceiling $K \le 4$, Edge 3.5 scoped relocation signatures).
+4. Full Conventional Commit `type` and intent propagation downstream into commit message generation.
+5. Topological DAG sorting to guarantee intermediate tree validity.
+6. Exact content-addressed caching (`staged_state_key`, `grouping_state_key`) and mid-run guards.
 
 ## Files to Touch
 
-| File                           | Change                                                                                                         |
-| ------------------------------ | -------------------------------------------------------------------------------------------------------------- |
-| `PLAN.md`                      | Update project plan with current objectives and checklist                                                      |
-| `config/defaults.sh`           | Add `AI_NO_STRUCTURED_OUTPUT="${AI_NO_STRUCTURED_OUTPUT:-false}"`                                              |
-| `lib/backends.sh`              | Add `extract_json_object`; support `AI_NO_STRUCTURED_OUTPUT`; auto-retry on `structured output is unavailable` |
-| `lib/core.sh`                  | Use `extract_json_object` in `_assemble_commit_message` and `_generate_group_messages_batched`                 |
-| `lib/context-analyzer.sh`      | Use `extract_json_object` in `reconcile_grouping_json`                                                         |
-| `test/unit/test_backends.bats` | Add tests for `extract_json_object` and structured output fallback retry                                       |
-| `test/unit/test_core.bats`     | Add test verifying `_generate_group_messages_batched` handles fenced JSON                                      |
+| File | Change |
+| --- | --- |
+| `config/defaults.sh` | Add knobs: `AI_GROUPING_TIMEOUT`, `AI_GROUPING_NUM_PREDICT*`, `AI_GROUPING_MAX_*`, `AI_SYMBOL_MAX_FILES`, `AICOMMIT_GROUPING_ALGO_VERSION` |
+| `templates/context-grouping-prompt.txt` | Prompt rewrite with reviewer archetypes, group sizing guidelines (3-8 commits), status tags, and user intent hints section |
+| `aicommit.sh` | Ingest positional non-flag arguments and comma-separated tokens as user hints, write `${tmp_dir}/USER_HINTS`, forward to flows |
+| `lib/context-analyzer.sh` | Guarded clustering edges, faceted summaries, `staged_status_map`, `grouping_state_key` (including user hints hash), DAG topological sort, type retention |
+| `lib/core.sh` | `staged_state_key()`, group-DIFF cache isolation, 3-field `_aicommit_split_tab_line`, `GROUP_TYPE`/`GROUP_INTENT` context injection |
+| `lib/split-flow.sh` | Mid-run foreign file guard with `_AICOMMIT_SELF_STAGED` exemption, provenance display, formatted group previews with hints |
+| `lib/backends.sh` | Dynamic `num_predict` override support in `build_ollama_request` |
+| `test/unit/test_cli_hints.bats` | Comprehensive test suite covering Smoke, Negative, Edge, Exception, and Security cases |
+| `test/unit/test_context_analyzer.bats` | Unit tests for guarded edges, faceted summarizer, DAG sorter, type retention |
+| `test/unit/test_core.bats` | Unit tests for exact staged-state key, group-diff cache isolation, 3-field split tab parsing |
+| `test/unit/test_optimization_pipeline.bats` | Pipeline tests for dry-run to real handoff and per-group message generation |
 
-## Steps
+## Verification Checklist
 
-1. **Config (`config/defaults.sh`)**:
-   - Add default `AI_NO_STRUCTURED_OUTPUT="${AI_NO_STRUCTURED_OUTPUT:-false}"`.
-2. **Backend Engine (`lib/backends.sh`)**:
-   - Add `extract_json_object`: returns raw JSON object directly, or lifts outermost `{...}` if wrapped in markdown fences/prose.
-   - In `build_ollama_request`: skip adding `format` if `AI_NO_STRUCTURED_OUTPUT="true"`.
-   - In `invoke_ollama`: if `api_error` matches `structured output is unavailable`, strip `.format`, export `AI_NO_STRUCTURED_OUTPUT=true`, and auto-retry once immediately.
-3. **Core & Context Analyzer Integration (`lib/core.sh` & `lib/context-analyzer.sh`)**:
-   - In `_assemble_commit_message`: clean raw response with `extract_json_object`.
-   - In `_generate_group_messages_batched`: clean response with `extract_json_object` before array length and item extraction.
-   - In `reconcile_grouping_json`: clean response with `extract_json_object`.
-4. **Automated Tests**:
-   - Add unit tests in `test/unit/test_backends.bats` and `test/unit/test_core.bats`.
-5. **Verify Test Suite**:
-   - Run Bats unit tests and full `./test/run_tests.sh`.
-
-## Tests
-
-- [x] Unit tests for `extract_json_object` with raw JSON and markdown fences pass.
-- [x] Unit test for `invoke_ollama` structured output fallback retry passes.
-- [x] Unit test for `_generate_group_messages_batched` handling fenced JSON passes.
-- [x] Full test runner `./test/run_tests.sh` passes 100%.
-
-## Acceptance Criteria
-
-- [x] `qwen3.5:4b` succeeds without failing on `structured output is unavailable`.
-- [x] Subsequent requests in the same session omit `format` when structured output is unavailable.
-- [x] Batch and sequential commit messages wrapped in markdown fences parse cleanly.
-
+- [ ] Bats unit test suites pass (`test_cli_hints.bats`, `test_context_analyzer.bats`, `test_core.bats`, etc.).
+- [ ] Full test runner `./test/run_tests.sh` passes 100%.
+- [ ] Smoke tests for positional and comma-separated hints pass.
+- [ ] Negative and edge tests pass.
+- [ ] Security test cases pass (command injection defense, sensitive file filtering, path traversal protection).

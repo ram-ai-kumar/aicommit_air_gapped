@@ -178,9 +178,16 @@ cluster_staged_files_deterministic() {
     printf '%s\n' "$staged_files" | LC_ALL=C sort | awk \
         -v diff_file="$diff_file" \
         -v cochange_file="$cochange_file" \
-        -v cochange_min="${AI_COCHANGE_MIN:-2}" '
+        -v cochange_min="${AI_COCHANGE_MIN:-2}" \
+        -v sym_max="${AI_SYMBOL_MAX_FILES:-4}" '
     function basename_of(p,   b) { b = p; sub(/^.*\//, "", b); return b }
     function dirname_of(p,   d) { d = p; return (sub(/\/[^\/]*$/, "", d) ? d : ".") }
+    function dir2(p,   d, a, n) {
+        d = dirname_of(p)
+        if (d == ".") return "."
+        n = split(d, a, "/")
+        return (n >= 2) ? a[1] "/" a[2] : a[1]
+    }
     function norm_stem(b,   s) {
         s = b
         sub(/\.[^.\/]+$/, "", s)                                    # extension
@@ -216,6 +223,9 @@ cluster_staged_files_deterministic() {
                     continue
                 }
                 if (cur == "") continue
+                if (line ~ /^rename from /)   { old_path[cur] = substr(line, 12); continue }
+                if (line ~ /^new file mode/)  { status[cur] = "A"; continue }
+                if (line ~ /^deleted file mode/) { status[cur] = "D"; continue }
                 if (line ~ /^[+-]/ && line !~ /^[+-][+-][+-]/) {
                     hunk[cur] = hunk[cur] substr(line, 1, 300) "\n"
                     if (length(hunk[cur]) > 60000) hunk[cur] = substr(hunk[cur], 1, 60000)
@@ -262,13 +272,22 @@ cluster_staged_files_deterministic() {
         }
 
         # Edge 2 — shared symbol: a definition changed in file A appears in
-        # the hunks of file B (word-boundary match, not bare substring)
+        # the hunks of file B (word-boundary match, not bare substring).
+        # Guarded: skip symbols appearing in more than sym_max files.
         for (sym in definer) {
             nd = split(definer[sym], dl, " ")
+            if (nd > sym_max) continue
             first = ""
             for (j = 1; j <= nd; j++) { if (first == "") first = dl[j]; else union(first, dl[j]) }
             if (first == "") continue
             re = "(^|[^A-Za-z0-9_])" sym "([^A-Za-z0-9_]|$)"
+            m_cnt = 0
+            for (i = 1; i <= nf; i++) {
+                f = files[i]
+                if ((f SUBSEP sym) in defs) continue
+                if (hunk[f] ~ re) m_cnt++
+            }
+            if (nd + m_cnt > sym_max) continue
             for (i = 1; i <= nf; i++) {
                 f = files[i]
                 if ((f SUBSEP sym) in defs) continue
@@ -280,6 +299,30 @@ cluster_staged_files_deterministic() {
         for (k in cpair) {
             split(k, a, SUBSEP)
             if ((a[1] in parent) && (a[2] in parent)) union(a[1], a[2])
+        }
+
+        # Edge 3.5 — relocation families: renames sharing an old->new parent-dir
+        # transform signature bind together (e.g. docs/delivery/* -> docs/platform/*).
+        # Deletes+adds with a basename unique on both sides are treated as one
+        # relocation git could not pair below the similarity threshold.
+        for (i = 1; i <= nf; i++) {
+            f = files[i]
+            if (f in old_path) {
+                d_old = dir2(old_path[f]); d_new = dir2(f)
+                if (d_old != d_new) pair_sig[f] = d_old SUBSEP d_new
+            }
+            else if ((f in status) && status[f] == "D") { bn = basename_of(f); del_f[bn] = f; del_cnt[bn]++ }
+            else if ((f in status) && status[f] == "A") { bn = basename_of(f); add_f[bn] = f; add_cnt[bn]++ }
+        }
+        for (bn in del_cnt) {
+            if (del_cnt[bn] == 1 && (bn in add_cnt) && add_cnt[bn] == 1) {
+                s = dir2(del_f[bn]) SUBSEP dir2(add_f[bn])
+                pair_sig[del_f[bn]] = s; pair_sig[add_f[bn]] = s
+            }
+        }
+        for (f in pair_sig) {
+            if (pair_sig[f] in sig_first) union(sig_first[pair_sig[f]], f)
+            else sig_first[pair_sig[f]] = f
         }
 
         # Edge 4 — same leaf directory, weak: only attaches files still
@@ -347,18 +390,79 @@ build_cochange_cache() {
     } > "$tmp" && mv "$tmp" "$cache"
 }
 
+# Emit a normalized status map of the staged set: STATUS<TAB>path[<TAB>old_path]
+# R/C rows carry the source path in field 3. One git call; statuses feed the
+# grouping prompt and (via the diff headers) the relocation edge.
+staged_status_map() {
+    agit diff --staged --name-status -M 2>/dev/null | awk -F'\t' '{
+        if ($1 == "") next
+        st = $1
+        if (st ~ /^[RC]/ && NF >= 3) printf "%s\t%s\t%s\n", substr(st, 1, 1), $3, $2
+        else if (NF >= 2) printf "%s\t%s\n", substr(st, 1, 1), $2
+    }'
+}
+
+# Canonical cache key for grouping artifacts — the exact staged-state identity
+# plus every input that can change grouping output (grouping prompt, algorithm
+# version, model/backend and all grouping-related knobs). Any difference in the
+# staged set or these inputs produces a different key → cache miss → re-analyze.
+grouping_state_key() {
+    local ssk gprompt_hash run_dir uh_hash=""
+    ssk=$(staged_state_key) || return 1
+    gprompt_hash=$(shasum -a 256 "${AI_GROUPING_PROMPT_FILE:-/dev/null}" 2>/dev/null | awk '{print $1}')
+    run_dir=$(get_aicommit_tmp_dir 2>/dev/null || echo "")
+    if [ -n "$run_dir" ] && [ -s "${run_dir}/USER_HINTS" ]; then
+        uh_hash=$(shasum -a 256 "${run_dir}/USER_HINTS" 2>/dev/null | awk '{print $1}')
+    fi
+    printf '%s\ngprompt:%s\nhints:%s\nalgo:%s\nbackend:%s\nmodel:%s\nseed:%s\nnum_ctx:%s\nnp:%s\nmaxpaths:%s\ndisable:%s\nenable:%s\nnso:%s\n' \
+        "$ssk" "$gprompt_hash" "$uh_hash" "${AICOMMIT_GROUPING_ALGO_VERSION:-v3}" "${AI_BACKEND:-ollama}" \
+        "${AI_MODEL:-$DEFAULT_AI_MODEL}" "${AI_SEED:-42}" "${AI_NUM_CTX:-16384}" \
+        "${AI_GROUPING_NUM_PREDICT:-2048}" "${AI_GROUPING_MAX_PATHS:-1000}" \
+        "${AI_DISABLE_GROUPING:-false}" "${AI_ENABLE_LLM_GROUPING:-true}" \
+        "${AI_NO_STRUCTURED_OUTPUT:-false}" | shasum -a 256 | awk '{print $1}'
+}
+
+# Record how the current grouping was produced (ai / cache / single /
+# deterministic / fallback:<reason>) for dry-run and --verbose display.
+_write_grouping_source() {
+    local run_dir
+    run_dir=$(get_aicommit_tmp_dir 2>/dev/null || echo "")
+    [ -n "$run_dir" ] || return 0
+    printf '%s\n' "$1" > "${run_dir}/GROUPING_SOURCE" 2>/dev/null || true
+}
+
 # Name deterministic components with infer_logical_file_context of the first
 # file; colliding names get a numeric suffix (input order is sorted → stable).
 # Args: $1=comp_lines ("i\tf1\tf2" per line)
 _name_component_lines() {
     local comp_lines="$1"
     local line first_file name base n used_names=" " files_tab=""
+    local common_dir leaf
     while IFS= read -r line; do
         [ -z "$line" ] && continue
         _aicommit_split_tab_line "$line"
         [ ${#_aicommit_split_files[@]} -eq 0 ] && continue
         first_file=$(printf '%s' "$line" | cut -f2)
         name=$(infer_logical_file_context "$first_file")
+        # Generic bucket name + members sharing a deeper common leaf dir →
+        # name the component by that leaf instead of "docs-12".
+        case "$name" in
+            docs|config|scripts|core)
+                if [ ${#_aicommit_split_files[@]} -ge 2 ]; then
+                    common_dir=$(printf '%s\n' "${_aicommit_split_files[@]}" | awk -F/ '
+                        { n = split($0, a, "/")
+                          if (NR == 1) { m = n - 1; for (i = 1; i <= m; i++) c[i] = a[i] }
+                          else { for (i = 1; i <= m && i < n; i++) if (a[i] != c[i]) m = i - 1 }
+                        }
+                        END { s = ""; for (i = 1; i <= m; i++) s = (s == "" ? c[i] : s "/" c[i]); print s }')
+                    leaf="${common_dir##*/}"
+                    case "$leaf" in
+                        docs|doc|src|lib|app|test|tests|"") ;;
+                        *) [ "$common_dir" != "." ] && name="$leaf" ;;
+                    esac
+                fi
+                ;;
+        esac
         [ -z "$name" ] && name="core"
         base="$name"; n=1
         while [[ "$used_names" == *" ${name} "* ]]; do
@@ -382,11 +486,15 @@ group_staged_files_heuristically() {
     _name_component_lines "$comp_lines"
 }
 
-# Ask the LLM to NAME the deterministic groups (and optionally merge them).
-# Schema uses component ids instead of re-listing every file path.
-# Args: $1=comp_lines, $2=staged_files
+# Ask the LLM to name/merge/split the deterministic components into
+# intent-scoped commit groups. Input = component listing with per-file status
+# tags (A/M/D/R:old=>new) — statuses and rename origins are what let the model
+# infer relocation/restructure intent instead of naming by file type.
+# Response = {"groups":[{"name","type","members":[ids],"files":[paths]}]}:
+# members merges whole components, files splits or partitions path-by-path.
+# Args: $1=comp_lines, $2=staged_files, $3=namestatus_file (optional)
 name_groups_with_ai() {
-    local comp_lines="$1" staged_files="$2"
+    local comp_lines="$1" staged_files="$2" namestatus_file="${3:-}"
     local prompt_template="${AI_GROUPING_PROMPT_FILE:-$AICOMMIT_DIR/templates/context-grouping-prompt.txt}"
     [ ! -f "$prompt_template" ] && return 1
     command -v invoke_llm >/dev/null 2>&1 || return 1
@@ -396,39 +504,115 @@ name_groups_with_ai() {
     tmp_dir=$(get_aicommit_tmp_dir) || return 1
     local user_file="${tmp_dir}/GROUPING_USER" schema_file="${tmp_dir}/GROUPING_SCHEMA.json"
     local req="${tmp_dir}/GROUPING_REQUEST.json" resp="${tmp_dir}/GROUPING_RESPONSE" err="${tmp_dir}/GROUPING_ERROR"
+    local comp_lines_file="${tmp_dir}/GROUPING_COMPS"
 
     umask 077
+    printf '%s\n' "$comp_lines" > "$comp_lines_file"
+
+    local comp_count maxpaths per_comp
+    comp_count=$(printf '%s\n' "$comp_lines" | awk 'NF { c++ } END { print c + 0 }')
+    maxpaths="${AI_GROUPING_MAX_PATHS:-1000}"
+    per_comp=$(( maxpaths / (comp_count > 0 ? comp_count : 1) ))
+    [ "$per_comp" -lt 5 ] && per_comp=5
+    [ "$per_comp" -gt 40 ] && per_comp=40
+
+    # Component listing with inline status tags and faceted distribution summaries
     {
-        printf 'Deterministic groups to name (rename each by id; merge only if they serve the same change):\n'
-        printf '%s\n' "$comp_lines" | awk -F'\t' '{ printf "GROUP %s (id: \"%s\"): ", NR, $1; for (i = 2; i <= NF; i++) printf "%s%s", (i>2?", ":""), $i; printf "\n" }'
+        if [ -s "${tmp_dir}/USER_HINTS" ]; then
+            printf '=== USER INTENT HINTS (HIGH PRIORITY) ===\n'
+            while IFS= read -r uh; do
+                [ -n "$uh" ] && printf -- '- %s\n' "$uh"
+            done < "${tmp_dir}/USER_HINTS"
+            printf '\n'
+        fi
+        printf 'Staged files were clustered into structural components. Each file is tagged A=added M=modified D=deleted R=renamed(old=>new).\n'
+        awk -F'\t' -v status_file="$namestatus_file" -v per_comp="$per_comp" \
+            -v sensitive="$_AICOMMIT_SENSITIVE_RE" '
+        BEGIN {
+            if (status_file != "") {
+                while ((getline l < status_file) > 0) {
+                    n = split(l, p, "\t")
+                    if (n >= 3 && (p[1] == "R" || p[1] == "C")) st[p[2]] = p[1] ":" p[3] "=>"
+                    else if (n >= 2) st[p[2]] = p[1] ":"
+                }
+                close(status_file)
+            }
+        }
+        {
+            total = 0; r_cnt = 0; m_cnt = 0; a_cnt = 0; d_cnt = 0
+            for (i = 2; i <= NF; i++) {
+                if ($i == "" || $i ~ sensitive) continue
+                total++
+                s = substr(st[$i], 1, 1)
+                if (s == "R" || s == "C") r_cnt++
+                else if (s == "M") m_cnt++
+                else if (s == "A") a_cnt++
+                else if (s == "D") d_cnt++
+            }
+            if (total == 0) next
+            dist = ""
+            if (r_cnt > 0) dist = dist (dist == "" ? "" : ", ") r_cnt " renamed"
+            if (m_cnt > 0) dist = dist (dist == "" ? "" : ", ") m_cnt " modified"
+            if (a_cnt > 0) dist = dist (dist == "" ? "" : ", ") a_cnt " added"
+            if (d_cnt > 0) dist = dist (dist == "" ? "" : ", ") d_cnt " deleted"
+            if (total > per_comp && dist != "") {
+                printf "GROUP %s (%d files: %s):", $1, total, dist
+            } else {
+                printf "GROUP %s:", $1
+            }
+            shown = 0; rest = 0
+            for (i = 2; i <= NF; i++) {
+                if ($i == "" || $i ~ sensitive) continue
+                if (shown < per_comp) {
+                    printf "%s%s%s", (shown > 0 ? ", " : " "), st[$i], $i
+                    shown++
+                } else rest++
+            }
+            if (rest > 0) printf ", +%d more", rest
+            printf "\n"
+        }' "$comp_lines_file"
     } > "$user_file"
 
-    local comp_ids
+    local comp_ids staged_paths_json n_paths files_item
     comp_ids=$(printf '%s\n' "$comp_lines" | awk -F'\t' 'NF>=1 && $1!="" {print $1}' | jq -R . | jq -sc 'unique')
+    staged_paths_json=$(printf '%s\n' "$staged_files" | jq -R . | jq -sc 'unique')
+    n_paths=$(printf '%s' "$staged_paths_json" | jq 'length' 2>/dev/null || echo 0)
+    files_item='{"type":"string"}'
+    if [ "$n_paths" -gt 0 ] && [ "$n_paths" -le "${AI_GROUPING_MAX_ENUM_PATHS:-300}" ]; then
+        files_item=$(jq -nc --argjson p "$staged_paths_json" '{type:"string", enum:$p}')
+    fi
 
-    jq -n --argjson ids "$comp_ids" \
+    jq -n --argjson ids "$comp_ids" --argjson files_item "$files_item" \
         '{type: "object", additionalProperties: false,
           properties: {groups: {type: "array", items: {
             type: "object", additionalProperties: false,
             properties: {
-                id:         {type: "string", enum: $ids},
-                name:       {type: "string", maxLength: 40},
-                type:       {type: "string", enum: ["feat","fix","docs","style","refactor","perf","test","build","ci","chore","revert"]},
-                merge_into: {type: "string"}
+                name:    {type: "string", maxLength: 60},
+                type:    {type: "string", enum: ["feat","fix","docs","style","refactor","perf","test","build","ci","chore","revert"]},
+                members: {type: "array", items: {type: "string", enum: $ids}},
+                files:   {type: "array", items: $files_item}
             },
-            required: ["id", "name"]}}},
+            required: ["name", "type"]}}},
           required: ["groups"]}' > "$schema_file" || return 1
 
-    if ! build_ollama_request "$req" "${AI_MODEL:-$DEFAULT_AI_MODEL}" "$user_file" "$prompt_template" "$schema_file"; then
+    # The flat AI_NUM_PREDICT cap truncates the response on large group counts —
+    # scale with component count, bounded by the grouping-specific knobs.
+    local np
+    np=$(( comp_count * 48 ))
+    [ "$np" -lt "${AI_GROUPING_NUM_PREDICT:-2048}" ] && np="${AI_GROUPING_NUM_PREDICT:-2048}"
+    [ "$np" -gt "${AI_GROUPING_NUM_PREDICT_MAX:-8192}" ] && np="${AI_GROUPING_NUM_PREDICT_MAX:-8192}"
+
+    if ! build_ollama_request "$req" "${AI_MODEL:-$DEFAULT_AI_MODEL}" "$user_file" "$prompt_template" "$schema_file" "$np"; then
         return 1
     fi
 
     : > "$resp"; : > "$err"
-    if invoke_llm "${AI_MODEL:-$DEFAULT_AI_MODEL}" "$req" "$resp" "$err" "30" "Naming commit groups" >/dev/null 2>&1; then
+    if invoke_llm "${AI_MODEL:-$DEFAULT_AI_MODEL}" "$req" "$resp" "$err" "${AI_GROUPING_TIMEOUT:-60}" "Naming commit groups"; then
         cat "$resp" 2>/dev/null
-    else
-        return 1
+        return 0
     fi
+    _write_grouping_source "fallback:llm-error"
+    return 1
 }
 
 # Reconcile AI naming output against the staged set: files must be staged and
@@ -459,12 +643,21 @@ reconcile_grouping_json() {
             | sed -E 's/[=|`*]//g; s/^[[:space:]#-]+//; s/[[:space:]]+$//' | cut -c1-60)
         [ -z "$name" ] && name="changes"
 
-        id=$(printf '%s' "$raw" | jq -r ".groups[$gi].id // empty" 2>/dev/null)
-        if [ -n "$id" ]; then
-            files=$(awk -F'\t' -v target="$id" '$1 == target { for (i = 2; i <= NF; i++) if ($i != "") print $i }' "$comp_files_file")
-        else
-            files=$(printf '%s' "$raw" | jq -r ".groups[$gi].files[]?" 2>/dev/null)
-        fi
+        # Hybrid contract: members[] expands component ids, files[] lists
+        # explicit paths (split/partition), and legacy "id" aliases members:[id].
+        # Union them, then the staged/exactly-once filter below does the rest.
+        local grp_ids
+        grp_ids=$(printf '%s' "$raw" | jq -r ".groups[$gi] | (.members // [])[], (.id // empty)" 2>/dev/null)
+        files=""
+        local cid cfiles
+        while IFS= read -r cid; do
+            [ -z "$cid" ] && continue
+            cfiles=$(awk -F'\t' -v target="$cid" '$1 == target { for (i = 2; i <= NF; i++) if ($i != "") print $i }' "$comp_files_file")
+            [ -n "$cfiles" ] && files="${files}${files:+$'\n'}${cfiles}"
+        done <<< "$grp_ids"
+        local efiles
+        efiles=$(printf '%s' "$raw" | jq -r ".groups[$gi].files[]?" 2>/dev/null)
+        [ -n "$efiles" ] && files="${files}${files:+$'\n'}${efiles}"
 
         files_tab=""
         while IFS= read -r f; do
@@ -560,28 +753,29 @@ group_staged_files_logically() {
             single_scope=$(infer_logical_file_context "$single_file")
             printf '%s\t%s\n' "$single_scope" "$single_file"
         fi
+        _write_grouping_source "single"
         return 0
     fi
 
-    # Grouping cache — content-addressed by staged files and diff
+    # Grouping cache — keyed by the exact staged state plus all grouping inputs.
+    # Any difference in staged files, statuses, content or grouping config
+    # produces a different key → miss → re-analysis.
     local state_dir="" key="" cdir=""
     state_dir=$(get_aicommit_state_dir 2>/dev/null) || state_dir=""
-    if command -v get_aicommit_cache_key >/dev/null 2>&1; then
-        key=$(get_aicommit_cache_key 2>/dev/null || echo "")
-    else
-        key=$(printf '%s\n' "$staged_files" | sort | shasum -a 256 | awk '{print $1}')
-    fi
+    key=$(grouping_state_key 2>/dev/null || echo "")
     if [ -n "$state_dir" ] && [ -n "$key" ]; then
         cdir="${state_dir}/cache/${key}"
         if [ -s "${cdir}/GROUPS" ]; then
             cat "${cdir}/GROUPS"
+            _write_grouping_source "cache"
             return 0
         fi
     fi
-    if [ -n "$state_dir" ] && [ -f "${state_dir}/GROUPS_KEY" ] \
+    if [ -n "$state_dir" ] && [ -n "$key" ] && [ -f "${state_dir}/GROUPS_KEY" ] \
         && [ "$(cat "${state_dir}/GROUPS_KEY" 2>/dev/null)" = "$key" ] \
         && [ -s "${state_dir}/GROUPS_CACHE" ]; then
         cat "${state_dir}/GROUPS_CACHE"
+        _write_grouping_source "cache"
         return 0
     fi
 
@@ -595,26 +789,44 @@ group_staged_files_logically() {
     else
         agit diff --staged > "$diff_file" 2>/dev/null || : > "$diff_file"
     fi
+    rm -f "${tmp_dir}/GROUPING_SOURCE"
+    # Per-file status map (A/M/D/R + rename origins) — feeds the grouping prompt
+    staged_status_map > "${tmp_dir}/NAMESTATUS" 2>/dev/null || : > "${tmp_dir}/NAMESTATUS"
     if [ -n "$state_dir" ]; then
         build_cochange_cache "$state_dir" >/dev/null 2>&1 && cochange_file="${state_dir}/COCHANGE"
     fi
 
-    local comp_lines result="" comp_count=0
+    local comp_lines result="" comp_count=0 provenance=""
     comp_lines=$(cluster_staged_files_deterministic "$staged_files" "$diff_file" "$cochange_file")
     comp_count=$(printf '%s\n' "$comp_lines" | awk 'NF' | wc -l | tr -d ' ')
 
-    if [ "$comp_count" -gt 1 ] && [ "${AI_ENABLE_LLM_GROUPING:-true}" = "true" ] && [ "${AI_DISABLE_GROUPING:-false}" != "true" ] \
-        && validate_backend_prerequisites >/dev/null 2>&1; then
-        local ai_json
-        ai_json=$(name_groups_with_ai "$comp_lines" "$staged_files")
-        if [ -n "$ai_json" ]; then
-            result=$(reconcile_grouping_json "$ai_json" "$staged_files" "$comp_lines")
+    if [ "$comp_count" -gt 1 ]; then
+        if [ "${AI_ENABLE_LLM_GROUPING:-true}" != "true" ] || [ "${AI_DISABLE_GROUPING:-false}" = "true" ]; then
+            provenance="fallback:disabled"
+        elif ! validate_backend_prerequisites >/dev/null 2>&1; then
+            provenance="fallback:no-backend"
+        else
+            local ai_json
+            ai_json=$(name_groups_with_ai "$comp_lines" "$staged_files" "${tmp_dir}/NAMESTATUS")
+            if [ -n "$ai_json" ]; then
+                result=$(reconcile_grouping_json "$ai_json" "$staged_files" "$comp_lines")
+                if [ -n "$result" ]; then
+                    provenance="ai"
+                else
+                    provenance="fallback:invalid-json"
+                fi
+            else
+                [ -s "${tmp_dir}/GROUPING_SOURCE" ] || provenance="fallback:llm-empty"
+            fi
         fi
     fi
 
     if [ -z "$result" ]; then
         result=$(_name_component_lines "$comp_lines")
     fi
+    # name_groups_with_ai may have already recorded a more specific reason
+    # (e.g. fallback:llm-error) — only write when it hasn't.
+    [ -s "${tmp_dir}/GROUPING_SOURCE" ] || _write_grouping_source "${provenance:-deterministic}"
 
     if [ -n "$state_dir" ] && [ -n "$result" ]; then
         if [ -n "$key" ]; then
@@ -624,9 +836,9 @@ group_staged_files_logically() {
             if [ -d "$cdir" ]; then
                 printf '%s\n' "$result" > "${cdir}/GROUPS.tmp" && mv "${cdir}/GROUPS.tmp" "${cdir}/GROUPS"
             fi
+            printf '%s' "$key" > "${state_dir}/GROUPS_KEY.tmp" && mv "${state_dir}/GROUPS_KEY.tmp" "${state_dir}/GROUPS_KEY"
+            printf '%s\n' "$result" > "${state_dir}/GROUPS_CACHE.tmp" && mv "${state_dir}/GROUPS_CACHE.tmp" "${state_dir}/GROUPS_CACHE"
         fi
-        printf '%s' "$key" > "${state_dir}/GROUPS_KEY.tmp" && mv "${state_dir}/GROUPS_KEY.tmp" "${state_dir}/GROUPS_KEY"
-        printf '%s\n' "$result" > "${state_dir}/GROUPS_CACHE.tmp" && mv "${state_dir}/GROUPS_CACHE.tmp" "${state_dir}/GROUPS_CACHE"
     fi
 
     printf '%s\n' "$result"

@@ -215,6 +215,17 @@ _aicommit_regenerate_flow() {
         display_error "No cached prompt found in $state_dir" "Run aicommit first to build context"
         return 1
     fi
+    # The cached request describes a specific staged set — refuse to replay it
+    # against anything else. MSG_STATE_KEY is the exact staged-state identity
+    # recorded when the request was built.
+    local expected_key current_key=""
+    expected_key=$(cat "${state_dir}/MSG_STATE_KEY" 2>/dev/null)
+    current_key=$(staged_state_key 2>/dev/null || echo "")
+    if [ -z "$expected_key" ] || [ -z "$current_key" ] || [ "$expected_key" != "$current_key" ]; then
+        display_error "Staged changes differ from the cached prompt" \
+            "Run aicommit (or aic) to rebuild the context for the current staged set"
+        return 1
+    fi
     if ! validate_prerequisites; then
         return 1
     fi

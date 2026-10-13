@@ -52,6 +52,7 @@ _aicommit_main() {
     local bump_opt="${AI_SEMVER_BUMP:-false}"
     local bump_level=""
     local tag_opt="${AI_SEMVER_TAG:-true}"
+    local -a user_hints=()
 
     while [ $# -gt 0 ]; do
         case "$1" in
@@ -128,7 +129,31 @@ _aicommit_main() {
                 return $?
                 ;;
             --clean-cache)   clean_cache=true ;;
-            *) echo "Unknown option: $1. Use --help for usage."; return 1 ;;
+            --hint=*|--hints=*)
+                local h_val="${1#*=}"
+                while IFS= read -r h_line; do
+                    [ -n "$h_line" ] && user_hints+=("$h_line")
+                done <<< "$(printf '%s\n' "$h_val" | awk -F',' '{ for (i = 1; i <= NF; i++) { gsub(/^[[:space:]]+|[[:space:]]+$/, "", $i); if ($i != "") print $i } }')"
+                ;;
+            --hint|--hints)
+                shift
+                if [ $# -gt 0 ]; then
+                    local h_val="$1"
+                    while IFS= read -r h_line; do
+                        [ -n "$h_line" ] && user_hints+=("$h_line")
+                    done <<< "$(printf '%s\n' "$h_val" | awk -F',' '{ for (i = 1; i <= NF; i++) { gsub(/^[[:space:]]+|[[:space:]]+$/, "", $i); if ($i != "") print $i } }')"
+                fi
+                ;;
+            --*)
+                echo "Unknown option: $1. Use --help for usage."
+                return 1
+                ;;
+            *)
+                local h_val="$1"
+                while IFS= read -r h_line; do
+                    [ -n "$h_line" ] && user_hints+=("$h_line")
+                done <<< "$(printf '%s\n' "$h_val" | awk -F',' '{ for (i = 1; i <= NF; i++) { gsub(/^[[:space:]]+|[[:space:]]+$/, "", $i); if ($i != "") print $i } }')"
+                ;;
         esac
         shift
     done
@@ -154,6 +179,17 @@ _aicommit_main() {
     local tmp_dir="$_AICOMMIT_RUN_DIR"
     local state_dir
     state_dir=$(get_aicommit_state_dir) || return 1
+
+    if [ ${#user_hints[@]} -gt 0 ]; then
+        printf '%s\n' "${user_hints[@]}" > "${tmp_dir}/USER_HINTS"
+        if [ "$dry_run" = "true" ] || [ "$verbose" = "true" ]; then
+            local hints_str="" h
+            for h in "${user_hints[@]}"; do
+                hints_str="${hints_str:+${hints_str}, }\"$h\""
+            done
+            echo "💡 User hints: ${hints_str}"
+        fi
+    fi
 
     # Remove the run dir on exit and on interrupt — runs/ must be empty after
     # a finished session.

@@ -290,10 +290,30 @@ to_pathspec() {
     printf ':(top,literal)%s' "$1"
 }
 
+# Exact staged-state identity — sha256 of the raw staged diff (per-file old/new
+# mode, old/new blob sha, status letter, rename pair + similarity score).
+# Content-exact: any difference in file names, statuses, content, modes, count,
+# or rename pairing produces a different key. Fails closed — a git error or an
+# empty staged diff returns non-zero so callers never cache a sha-of-empty.
+# Deliberately HEAD-relative: the analysis consumes the staged diff, which is
+# a HEAD-relative artifact — identical index under a moved HEAD is different input.
+staged_state_key() {
+    local raw
+    raw=$(agit diff --staged --raw -z --full-index -M 2>/dev/null) || return 1
+    [ -z "$raw" ] && return 1
+    printf '%s' "$raw" | shasum -a 256 | awk '{print $1}'
+}
+
 # Stable fingerprint of the current staged file set — used to detect whether
 # staging changed between a dry-run preview and a later split-commit execution.
+# Aliased to the grouping-scoped key: the preview artifacts it guards embed
+# grouping config, so a config change must also invalidate the handoff.
 staged_fingerprint() {
-    agit diff --staged -z --name-only | shasum -a 256 | awk '{print $1}'
+    if command -v grouping_state_key >/dev/null 2>&1; then
+        grouping_state_key
+    else
+        staged_state_key
+    fi
 }
 
 # Split a TAB-delimited "scope<TAB>file<TAB>file..." line into
@@ -317,23 +337,35 @@ staged_fingerprint() {
 _aicommit_split_tab_line() {
     local line="$1"
     _aicommit_split_scope=""
+    _aicommit_split_type=""
     _aicommit_split_files=()
     [ -z "$line" ] && return 0
-    local rest="$line" field more=true is_first=true
-    while $more; do
+    local rest="$line" field count=0
+    while [ -n "$rest" ] || [ $count -eq 0 ]; do
         if [[ "$rest" == *$'\t'* ]]; then
             field="${rest%%$'\t'*}"
             rest="${rest#*$'\t'}"
         else
             field="$rest"
-            more=false
+            rest=""
         fi
-        if $is_first; then
+        count=$((count + 1))
+        if [ $count -eq 1 ]; then
             _aicommit_split_scope="$field"
-            is_first=false
+        elif [ $count -eq 2 ]; then
+            case "$field" in
+                feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)
+                    _aicommit_split_type="$field"
+                    ;;
+                *)
+                    _aicommit_split_type=""
+                    _aicommit_split_files+=("$field")
+                    ;;
+            esac
         else
             _aicommit_split_files+=("$field")
         fi
+        [ -z "$rest" ] && break
     done
 }
 
@@ -702,7 +734,26 @@ ${stat_only_stat}"
 === LOGICAL COMMIT SCOPE & FEATURE ===
 This atomic commit is scoped specifically to: ${clean_scope}.
 Generate the commit message type, scope, and description focused on this logical concern."
+        else
+            changes_context="${changes_context}
+
+=== LOGICAL COMMIT INTENT ===
+This atomic commit implements: ${logical_scope}.
+Generate the commit message focused on this intent and outcome."
         fi
+    fi
+
+    if [ -s "${out_dir}/GROUP_TYPE" ]; then
+        local gtype
+        gtype=$(cat "${out_dir}/GROUP_TYPE" 2>/dev/null | tr -d '[:space:]')
+        [ -n "$gtype" ] && printf '%s\n' "$gtype" > "${out_dir}/ALLOWED_TYPES"
+    fi
+
+    if [ -s "${tmp_dir}/USER_HINTS" ]; then
+        changes_context="${changes_context}
+
+=== USER INTENT HINTS ===
+$(cat "${tmp_dir}/USER_HINTS")"
     fi
 
     printf '%s' "$changes_context" > "${out_dir}/CHANGES_CONTEXT"
@@ -1811,7 +1862,7 @@ get_aicommit_cache_key() {
     elif [ -n "$raw_input" ]; then
         staged_raw="$raw_input"
     else
-        staged_raw=$(agit diff --staged --raw -z --full-index 2>/dev/null || git diff --staged --raw -z --full-index 2>/dev/null || true)
+        staged_raw=$(agit diff --staged --raw -z --full-index -M 2>/dev/null || git diff --staged --raw -z --full-index -M 2>/dev/null || true)
     fi
 
     local prompt_hash="" reflect_hash=""
@@ -1897,9 +1948,15 @@ generate_commit_message() {
         return 0
     fi
 
-    # Content-addressed result cache (Lever C)
+    # Content-addressed result cache (Lever C). Group contexts key on their
+    # own DIFF — keying on the whole staged diff made every group share one
+    # cache dir, so a later group could serve an earlier group's message.
     local ckey="" cdir=""
-    ckey=$(get_aicommit_cache_key 2>/dev/null || echo "")
+    if [ -f "${ctx_dir}/DIFF" ]; then
+        ckey=$(get_aicommit_cache_key "${ctx_dir}/DIFF" 2>/dev/null || echo "")
+    else
+        ckey=$(get_aicommit_cache_key 2>/dev/null || echo "")
+    fi
     if [ -n "$ckey" ] && [ -n "$state_dir" ]; then
         cdir="${state_dir}/cache/${ckey}"
         if [ -s "${cdir}/MSG" ]; then
@@ -1952,10 +2009,19 @@ generate_commit_message() {
         fi
     fi
 
-    # Persist legacy cache + replayable request atomically (tmp + mv)
-    printf '%s' "$key" > "${state_dir}/MSG_KEY.tmp" && mv "${state_dir}/MSG_KEY.tmp" "${state_dir}/MSG_KEY"
-    printf '%s\n' "$commit_msg" > "${state_dir}/MSG_CACHE.tmp" && mv "${state_dir}/MSG_CACHE.tmp" "${state_dir}/MSG_CACHE"
-    cp "$request_file" "${state_dir}/MSG_REQUEST.tmp" && mv "${state_dir}/MSG_REQUEST.tmp" "${state_dir}/MSG_REQUEST"
+    # Persist legacy cache + replayable request atomically (tmp + mv).
+    # Only for the single-commit context (ctx_dir == tmp_dir): per-group calls
+    # must not clobber the replay artifacts --regenerate depends on.
+    if [ "$ctx_dir" = "$tmp_dir" ]; then
+        printf '%s' "$key" > "${state_dir}/MSG_KEY.tmp" && mv "${state_dir}/MSG_KEY.tmp" "${state_dir}/MSG_KEY"
+        printf '%s\n' "$commit_msg" > "${state_dir}/MSG_CACHE.tmp" && mv "${state_dir}/MSG_CACHE.tmp" "${state_dir}/MSG_CACHE"
+        cp "$request_file" "${state_dir}/MSG_REQUEST.tmp" && mv "${state_dir}/MSG_REQUEST.tmp" "${state_dir}/MSG_REQUEST"
+        # Exact staged-state identity at request-build time — --regenerate
+        # refuses to replay when the staged set has since changed.
+        staged_state_key 2>/dev/null > "${state_dir}/MSG_STATE_KEY.tmp" \
+            && mv "${state_dir}/MSG_STATE_KEY.tmp" "${state_dir}/MSG_STATE_KEY" \
+            || rm -f "${state_dir}/MSG_STATE_KEY.tmp"
+    fi
 
     echo "$commit_msg"
 }
@@ -1987,12 +2053,16 @@ regenerate_commit_message() {
     raw_resp=$(cat "$resp" 2>/dev/null || true)
     commit_msg=$(_finalize_candidate "$raw_resp" "$tmp_dir")
 
-    # Update cache
+    # Update cache — keep the staged-state identity current so a later
+    # --regenerate still verifies against the same staged set.
     local key
     key=$(shasum -a 256 < "$req" | awk '{print $1}')
     printf '%s' "$key" > "${state_dir}/MSG_KEY.tmp" && mv "${state_dir}/MSG_KEY.tmp" "${state_dir}/MSG_KEY"
     printf '%s\n' "$commit_msg" > "${state_dir}/MSG_CACHE.tmp" && mv "${state_dir}/MSG_CACHE.tmp" "${state_dir}/MSG_CACHE"
     cp "$req" "${state_dir}/MSG_REQUEST.tmp" && mv "${state_dir}/MSG_REQUEST.tmp" "${state_dir}/MSG_REQUEST"
+    staged_state_key 2>/dev/null > "${state_dir}/MSG_STATE_KEY.tmp" \
+        && mv "${state_dir}/MSG_STATE_KEY.tmp" "${state_dir}/MSG_STATE_KEY" \
+        || rm -f "${state_dir}/MSG_STATE_KEY.tmp"
 
     local ckey cdir
     ckey=$(get_aicommit_cache_key 2>/dev/null || echo "")
@@ -2071,6 +2141,9 @@ generate_group_messages() {
         } >> "$index_file"
         printf '%s\n' "${_aicommit_split_files[@]}" > "${gdir}/STAGED_NAMES"
         printf '%s' "$_aicommit_split_scope" > "${gdir}/GROUP_SCOPE"
+        if [ -n "$_aicommit_split_type" ]; then
+            printf '%s' "$_aicommit_split_type" > "${gdir}/GROUP_TYPE"
+        fi
     done <<< "$scope_groups"
 
     local n=$i

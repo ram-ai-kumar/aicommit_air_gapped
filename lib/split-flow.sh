@@ -4,6 +4,26 @@
 
 [ -n "$ZSH_VERSION" ] && setopt localoptions localtraps shwordsplit nonomatch nomonitor nonotify typesetsilent
 
+# Mid-run staged-set guard: every group file must still be staged, and no
+# staged path may exist that wasn't in the original staged set (files aicommit
+# itself staged — semver manifests/changelog — are exempt). Index paths don't
+# move when HEAD advances, so this stays valid across prior group commits.
+# Args: $1=original staged files (newlines), $2=group files (newlines), $3=self-staged (newlines)
+_split_guard_staged_set() {
+    local original_names="$1" grp_files_list="$2" self_staged="${3:-}"
+    local staged_now gf foreign=""
+    staged_now=$(agit diff --staged -z --name-only | tr '\0' '\n')
+    while IFS= read -r gf; do
+        [ -z "$gf" ] && continue
+        printf '%s\n' "$staged_now" | grep -qxF "$gf" || return 1
+    done <<< "$grp_files_list"
+    local allowed
+    allowed=$( { printf '%s\n' "$original_names"; printf '%s\n' "$self_staged"; } | awk 'NF' )
+    foreign=$(printf '%s\n' "$staged_now" | awk 'NF' | grep -vxF -f <(printf '%s\n' "$allowed") | head -1)
+    [ -n "$foreign" ] && return 1
+    return 0
+}
+
 _aicommit_split_flow() {
     local tmp_dir="$1"
     local state_dir="$2"
@@ -53,7 +73,15 @@ _aicommit_split_flow() {
         printf '%s\n' "$scope_groups" > "${state_dir}/SCOPE_GROUPS"
         staged_fingerprint > "${state_dir}/STAGED_FINGERPRINT"
 
-        echo "🔍 Dry run — detected $num_scopes atomic commit groups:"
+        local gsrc=""
+        gsrc=$(cat "${tmp_dir}/GROUPING_SOURCE" 2>/dev/null || echo "")
+        local hint_info=""
+        if [ -s "${tmp_dir}/USER_HINTS" ]; then
+            local hc
+            hc=$(count_lines < "${tmp_dir}/USER_HINTS")
+            [ "$hc" -gt 0 ] && hint_info=", hints: $hc"
+        fi
+        echo "🔍 Dry run — detected $num_scopes atomic commit groups (grouping: ${gsrc:-deterministic}${hint_info}):"
         display_resolved_atomic_groups "$scope_groups"
         if [ "$bump_opt" = "true" ]; then
             echo ""
@@ -70,6 +98,17 @@ _aicommit_split_flow() {
     else
         echo "📋 Resolved $num_scopes atomic commit group(s):"
     fi
+    if [ "$verbose" = "true" ]; then
+        local gsrc=""
+        gsrc=$(cat "${tmp_dir}/GROUPING_SOURCE" 2>/dev/null || echo "")
+        local hint_info=""
+        if [ -s "${tmp_dir}/USER_HINTS" ]; then
+            local hc
+            hc=$(count_lines < "${tmp_dir}/USER_HINTS")
+            [ "$hc" -gt 0 ] && hint_info=", hints: $hc"
+        fi
+        echo "   Grouping: ${gsrc:-deterministic}${hint_info}"
+    fi
     display_resolved_atomic_groups "$scope_groups"
 
     if ! generate_group_messages "$scope_groups" "$tmp_dir"; then
@@ -78,6 +117,7 @@ _aicommit_split_flow() {
 
     local idx=1 committed_count=0 group_line=""
     local grp_scope="" subset_changes="" grp_commit_msg="" grp_resp="y"
+    local _aicommit_self_staged=""
     local -a grp_file_array=()
 
     while IFS= read -r -u 3 group_line; do
@@ -134,7 +174,13 @@ _aicommit_split_flow() {
                         while IFS= read -r uf; do
                             [ -n "$uf" ] && grp_file_array+=("$uf")
                         done <<< "$grp_updated_files"
+                        _aicommit_self_staged="${_aicommit_self_staged}${grp_updated_files}"$'\n'
                     fi
+                fi
+                if ! _split_guard_staged_set "$staged_files" "$(printf '%s\n' "${grp_file_array[@]}")" "$_aicommit_self_staged"; then
+                    display_error "Staged set changed since grouping" "Re-run to re-group and commit the current staged set"
+                    cleanup_aicommit_all
+                    return 1
                 fi
                 if commit_staged_subset "$grp_commit_msg" "${grp_file_array[@]}"; then
                     display_scope_success "$grp_scope"
@@ -179,7 +225,13 @@ _aicommit_split_flow() {
                             while IFS= read -r uf; do
                                 [ -n "$uf" ] && grp_file_array+=("$uf")
                             done <<< "$grp_updated_files"
+                            _aicommit_self_staged="${_aicommit_self_staged}${grp_updated_files}"$'\n'
                         fi
+                    fi
+                    if ! _split_guard_staged_set "$staged_files" "$(printf '%s\n' "${grp_file_array[@]}")" "$_aicommit_self_staged"; then
+                        display_error "Staged set changed since grouping" "Re-run to re-group and commit the current staged set"
+                        cleanup_aicommit_all
+                        return 1
                     fi
                     if commit_staged_subset "$edited_msg" "${grp_file_array[@]}"; then
                         display_scope_success "$grp_scope"

@@ -257,6 +257,8 @@ teardown() {
 @test "aic --dry-run produces both FULL_PROMPT and REFLECTION_PROMPT audit files" {
     echo "content" > app.sh
     git add app.sh
+    export AI_MODEL="test-model"
+    mock_ollama_api '{"type":"feat","scope":"app","breaking":false,"subject":"implement initial shell app","body":["add basic application entry point"]}'
     run aic --dry-run
     [ "$status" -eq 0 ]
     local state_dir
