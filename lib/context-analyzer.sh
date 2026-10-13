@@ -582,9 +582,13 @@ name_groups_with_ai() {
         files_item=$(jq -nc --argjson p "$staged_paths_json" '{type:"string", enum:$p}')
     fi
 
-    jq -n --argjson ids "$comp_ids" --argjson files_item "$files_item" \
+    local n_comp_ids min_groups=1
+    n_comp_ids=$(printf '%s\n' "$comp_ids" | jq 'length' 2>/dev/null || echo 0)
+    [ "$n_comp_ids" -ge 2 ] && min_groups=2
+
+    jq -n --argjson ids "$comp_ids" --argjson files_item "$files_item" --argjson min_g "$min_groups" \
         '{type: "object", additionalProperties: false,
-          properties: {groups: {type: "array", items: {
+          properties: {groups: {type: "array", minItems: $min_g, items: {
             type: "object", additionalProperties: false,
             properties: {
                 name:    {type: "string", maxLength: 60},
@@ -811,7 +815,14 @@ group_staged_files_logically() {
             if [ -n "$ai_json" ]; then
                 result=$(reconcile_grouping_json "$ai_json" "$staged_files" "$comp_lines")
                 if [ -n "$result" ]; then
-                    provenance="ai"
+                    local res_count
+                    res_count=$(printf '%s\n' "$result" | count_lines)
+                    if [ "$comp_count" -ge 2 ] && [ "$res_count" -lt 2 ]; then
+                        result=$(_name_component_lines "$comp_lines")
+                        provenance="fallback:collapsed-single"
+                    else
+                        provenance="ai"
+                    fi
                 else
                     provenance="fallback:invalid-json"
                 fi

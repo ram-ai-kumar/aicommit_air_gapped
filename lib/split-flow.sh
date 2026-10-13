@@ -80,7 +80,7 @@ _aicommit_split_flow() {
             hc=$(count_lines < "${tmp_dir}/USER_HINTS")
             [ "$hc" -gt 0 ] && hint_info=", hints: $hc"
         fi
-        echo "🔍 Dry run — detected $num_scopes atomic commit groups (grouping: ${gsrc:-deterministic}${hint_info}):"
+        echo "🔍 Dry run — detected $num_scopes atomic commit group(s) (grouping: ${gsrc:-deterministic}${hint_info}):"
         display_resolved_atomic_groups "$scope_groups"
         if [ "$bump_opt" = "true" ]; then
             echo ""

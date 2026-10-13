@@ -3,24 +3,23 @@ commits. The staged files were pre-clustered into structural components; each
 file is tagged with its change status: A=added, M=modified, D=deleted,
 R=renamed(old=>new).
 
-Your job: group components into 3-8 logical commits by the OUTCOME or INTENT
+Your job: group components into 2-8 logical atomic commits by the OUTCOME or INTENT
 the change achieves — what a reviewer would call the change.
 
 USER INTENT HINTS (HIGH PRIORITY)
 User hints point the analysis in the appropriate direction and provide context for correct grouping:
 1. Identify components and files directly relevant to each user hint.
-2. Form cohesive commit groups around each user hint. Do NOT use hints as-is or copy them verbatim.
-   Synthesize a formal, concise, grammatically correct 2-5 word lowercase phrase for the group "name"
-   (e.g., "enhance multi-commit grouping with user hints", "resolve export bug"). Fix any typos or informal phrasing.
-3. Treat un-hinted changes as independent: do NOT force unrelated files into a
-   hint group. Partition remaining files into separate conventional commit groups
-   (e.g., chores, build configs, or standalone fixes).
+2. Form cohesive commit groups around each user hint. When multiple hints are provided, partition changes into distinct groups corresponding to each intent. Do NOT collapse multiple hints or distinct concerns into a single commit.
+3. Keep test suites (test/*, spec/*, *.bats) in their own dedicated 'test' commit group rather than bundling them into code feature groups, so reviewers can inspect test coverage independently.
+4. Do NOT use hints as-is or copy them verbatim. Synthesize a formal, concise, grammatically correct 2-5 word lowercase phrase for the group "name" (e.g., "enhance multi-commit grouping with user hints", "resolve export bug"). Fix any typos or informal phrasing.
+5. Treat un-hinted changes as independent: do NOT force unrelated files into a hint group. Partition remaining files into separate conventional commit groups (e.g., chores, build configs, or standalone fixes).
 
 REVIEWER COMMIT ARCHETYPES
 1. Relocations & Cleanups (refactor/chore): pure file moves, directory restructuring, deleted obsolete assets.
 2. Tooling & Dependencies (build/ci/chore): package manager manifests, lockfiles, CI workflows, tooling configs.
-3. Domain Features & Fixes (feat/fix): business logic, components, APIs paired with their respective tests.
-4. Documentation & Releases (docs): READMEs, ADRs, specifications, release notes.
+3. Domain Features & Fixes (feat/fix): core business logic, scripts, components, APIs.
+4. Test Suites & Verifications (test): unit tests, integration tests, test fixtures, bats scripts (separate from implementation logic).
+5. Documentation & Releases (docs): READMEs, ADRs, specifications, release notes.
 
 RULES
 - Return ONLY JSON: {"groups":[{"name":"...","type":"...","members":["..."],"files":["..."]}]}
@@ -30,13 +29,14 @@ RULES
   synthesize a formal phrase capturing the intent — NEVER copy raw informal hints as-is,
   and NEVER use bare names like "docs", "models", "config", "geojson".
 - "type": the conventional commit type that best fits the group (feat, fix, docs,
-  style, refactor, perf, test, build, ci, chore, revert) — keeps feat/docs/chore
+  style, refactor, perf, test, build, ci, chore, revert) — keeps feat/docs/chore/test
   intents in separate commits.
 - "members": array of component ids (e.g. "3","7") that implement one logical
   change — PREFER members, it is compact and merges whole components.
 - "files": array of explicit staged paths — use ONLY to split a mixed
   component or express a partition members cannot express. Paths must be
   staged exactly as listed.
+- ATOMIC SPLIT GOAL: Never collapse all components into a single group when multiple components exist. Return at least 2 distinct groups.
 - Every staged file must end up in exactly one group; you may omit components
   or files — leftovers are attached automatically, but coverage is better.
 - Order groups in logical commit order (moves/layout changes before dependents).
