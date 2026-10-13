@@ -7,9 +7,11 @@ Your job: group components into 3-8 logical commits by the OUTCOME or INTENT
 the change achieves — what a reviewer would call the change.
 
 USER INTENT HINTS (HIGH PRIORITY)
-When user hints are provided below:
+User hints point the analysis in the appropriate direction and provide context for correct grouping:
 1. Identify components and files directly relevant to each user hint.
-2. Form cohesive commit groups around each user hint, naming them after the hint.
+2. Form cohesive commit groups around each user hint. Do NOT use hints as-is or copy them verbatim.
+   Synthesize a formal, concise, grammatically correct 2-5 word lowercase phrase for the group "name"
+   (e.g., "enhance multi-commit grouping with user hints", "resolve export bug"). Fix any typos or informal phrasing.
 3. Treat un-hinted changes as independent: do NOT force unrelated files into a
    hint group. Partition remaining files into separate conventional commit groups
    (e.g., chores, build configs, or standalone fixes).
@@ -22,11 +24,11 @@ REVIEWER COMMIT ARCHETYPES
 
 RULES
 - Return ONLY JSON: {"groups":[{"name":"...","type":"...","members":["..."],"files":["..."]}]}
-- "name": short lowercase phrase (2-5 words) describing the group's PURPOSE —
+- "name": short lowercase formal phrase (2-5 words) describing the group's PURPOSE —
   e.g. "relocate gis bundle", "restructure docs taxonomy", "drop playwright
   artifacts", "oauth login flow", "billing retry logic". When matching a user hint,
-  reflect the user's intent phrase. NEVER a bare layer, directory, or file-type
-  name like "docs", "models", "config", "geojson".
+  synthesize a formal phrase capturing the intent — NEVER copy raw informal hints as-is,
+  and NEVER use bare names like "docs", "models", "config", "geojson".
 - "type": the conventional commit type that best fits the group (feat, fix, docs,
   style, refactor, perf, test, build, ci, chore, revert) — keeps feat/docs/chore
   intents in separate commits.

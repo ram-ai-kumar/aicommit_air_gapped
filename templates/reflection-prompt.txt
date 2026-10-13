@@ -35,3 +35,6 @@ REFLECTION CHECKLIST:
 3. DETERMINISM & CONCISENESS:
    - State facts clearly and plainly without fluff, buzzwords, or marketing tone.
    - Prefer fewer, highly accurate bullet points over speculative descriptions.
+
+4. NO RAW HINT ECHOING:
+   - User hints are directional cues, not verbatim text. If the draft echoed a user hint as is or kept typos/informal wording, refine it into a formal imperative commit header and construct a proper descriptive body section based on the diff.

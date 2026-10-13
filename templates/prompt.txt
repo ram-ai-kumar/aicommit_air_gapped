@@ -25,6 +25,14 @@ RULES:
 - release: pick from ["major","minor","patch","none"]. Use 'major' for breaking changes,
   'minor' for new features, 'patch' for fixes/refactor/tooling, 'none' if unsure.
 
+USER HINTS & INTENT:
+- When user hints or logical commit intents are present in the context, treat them
+  as directional guidance to point analysis in the appropriate direction and give context.
+- NEVER use or copy user hints as is. Fix any typos or informal phrasing.
+- Make the subject a formal, grammatically correct commit header in imperative mood (<= 60 chars).
+- Always generate a proper body section (1-6 bullets in 'body' array) detailing the
+  concrete changes and reasons observed in the diff, following Conventional Commits format.
+- Add footer details (breaking_change) as needed when backward compatibility is affected.
 
 GROUNDING — strictly enforced:
 - Describe ONLY changes and facts present in the user message.

@@ -144,7 +144,7 @@ _aicommit_main() {
                     done <<< "$(printf '%s\n' "$h_val" | awk -F',' '{ for (i = 1; i <= NF; i++) { gsub(/^[[:space:]]+|[[:space:]]+$/, "", $i); if ($i != "") print $i } }')"
                 fi
                 ;;
-            --*)
+            -*)
                 echo "Unknown option: $1. Use --help for usage."
                 return 1
                 ;;

@@ -738,8 +738,8 @@ Generate the commit message type, scope, and description focused on this logical
             changes_context="${changes_context}
 
 === LOGICAL COMMIT INTENT ===
-This atomic commit implements: ${logical_scope}.
-Generate the commit message focused on this intent and outcome."
+Directional intent: ${logical_scope}.
+(Directional guidance: do NOT use this hint as-is. Formulate a formal conventional commit header, a proper body section describing observed diff changes, and footers as needed.)"
         fi
     fi
 
@@ -753,7 +753,8 @@ Generate the commit message focused on this intent and outcome."
         changes_context="${changes_context}
 
 === USER INTENT HINTS ===
-$(cat "${tmp_dir}/USER_HINTS")"
+$(cat "${tmp_dir}/USER_HINTS")
+(Directional guidance: do NOT copy hints verbatim or use as-is. Synthesize a formal conventional commit header, a detailed body section detailing the diff changes, and footers as needed.)"
     fi
 
     printf '%s' "$changes_context" > "${out_dir}/CHANGES_CONTEXT"

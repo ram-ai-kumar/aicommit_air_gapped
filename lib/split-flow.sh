@@ -53,7 +53,6 @@ _aicommit_split_flow() {
             scope_names=$(printf '%s\n' "$scope_groups" | awk -F'\t' '{printf (NR>1?", ":"") $1} END{print ""}')
             groups_source="reused"
         else
-            [ -f "${state_dir}/SCOPE_GROUPS" ] && echo "⚠️  Staged set changed since preview — regrouping"
             scope_groups=$(group_staged_files_by_scope "$staged_files" "$changes" "$numstat_data")
             scope_groups=$(printf '%s\n' "$scope_groups" | awk -F'\t' 'NF>=2 && $1!="" && $2!="" && $1 !~ /=/ && $1 !~ /^(joined_files|staged_files|files)/ {print $0}')
             num_scopes=$(printf '%s\n' "$scope_groups" | count_lines)
