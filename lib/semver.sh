@@ -404,16 +404,16 @@ detect_version_files() {
     local -a files=()
 
     # Node.js
-    [ -f "package.json" ] && files+=("package.json")
-    [ -f "package-lock.json" ] && files+=("package-lock.json")
+    [ -f "package.json" ] && grep -q '"version"' package.json 2>/dev/null && files+=("package.json")
+    [ -f "package-lock.json" ] && grep -q '"version"' package-lock.json 2>/dev/null && files+=("package-lock.json")
 
     # Rust
-    [ -f "Cargo.toml" ] && files+=("Cargo.toml")
+    [ -f "Cargo.toml" ] && grep -qE '^[[:space:]]*version[[:space:]]*=' Cargo.toml 2>/dev/null && files+=("Cargo.toml")
 
     # Python
-    [ -f "pyproject.toml" ] && files+=("pyproject.toml")
-    [ -f "setup.py" ] && files+=("setup.py")
-    [ -f "setup.cfg" ] && files+=("setup.cfg")
+    [ -f "pyproject.toml" ] && grep -qE '^[[:space:]]*version[[:space:]]*=' pyproject.toml 2>/dev/null && files+=("pyproject.toml")
+    [ -f "setup.py" ] && grep -qE 'version[[:space:]]*=' setup.py 2>/dev/null && files+=("setup.py")
+    [ -f "setup.cfg" ] && grep -qE 'version[[:space:]]*=' setup.cfg 2>/dev/null && files+=("setup.cfg")
     while IFS= read -r f; do
         [ -n "$f" ] && files+=("$f")
     done < <(find . -maxdepth 3 \( -name "__init__.py" -o -name "_version.py" -o -name "version.py" \) ! -path '*/.*' 2>/dev/null | sed 's|^\./||' | while IFS= read -r pyf; do
@@ -423,7 +423,7 @@ detect_version_files() {
     done)
 
     # Dart / Flutter
-    [ -f "pubspec.yaml" ] && files+=("pubspec.yaml")
+    [ -f "pubspec.yaml" ] && grep -qE '^[[:space:]]*version[[:space:]]*:' pubspec.yaml 2>/dev/null && files+=("pubspec.yaml")
 
     # Ruby / Rails
     while IFS= read -r f; do
@@ -448,7 +448,7 @@ detect_version_files() {
     done)
 
     # Java
-    [ -f "pom.xml" ] && files+=("pom.xml")
+    [ -f "pom.xml" ] && grep -q '<version>' pom.xml 2>/dev/null && files+=("pom.xml")
     if [ -f "build.gradle" ] && grep -qE '^[[:space:]]*version[[:space:]]*=' build.gradle 2>/dev/null; then
         files+=("build.gradle")
     fi
@@ -679,6 +679,8 @@ update_version_in_file() {
 # Echoes list of updated files
 apply_semver_file_updates() {
     local old_ver="$1" new_ver="$2"
+    [ -z "$new_ver" ] || [ "$old_ver" = "$new_ver" ] && return 0
+
     local files file
     files=$(detect_version_files)
 
@@ -687,7 +689,9 @@ apply_semver_file_updates() {
         [ -z "$file" ] && continue
         if update_version_in_file "$file" "$old_ver" "$new_ver"; then
             agit add "$file" 2>/dev/null || git add "$file" 2>/dev/null || true
-            updated_files+=("$file")
+            if [ -n "$(agit diff --staged -z --name-only -- "$file" 2>/dev/null | tr '\0' '\n')" ]; then
+                updated_files+=("$file")
+            fi
         fi
     done <<< "$files"
 
@@ -1281,7 +1285,9 @@ apply_semver_release() {
             while IFS= read -r f; do
                 if [ -n "$f" ]; then
                     agit add "$f" 2>/dev/null || git add "$f" 2>/dev/null || true
-                    files_updated+=("$f")
+                    if [ -n "$(agit diff --staged -z --name-only -- "$f" 2>/dev/null | tr '\0' '\n')" ]; then
+                        files_updated+=("$f")
+                    fi
                 fi
             done <<< "$v_files"
         fi
@@ -1291,7 +1297,7 @@ apply_semver_release() {
     if [ "${AI_SEMVER_CHANGELOG:-true}" = "true" ]; then
         local cl_file
         cl_file=$(update_changelog "$target_ver" "$commit_msg")
-        if [ -n "$cl_file" ]; then
+        if [ -n "$cl_file" ] && [ -n "$(agit diff --staged -z --name-only -- "$cl_file" 2>/dev/null | tr '\0' '\n')" ]; then
             files_updated+=("$cl_file")
         fi
     fi

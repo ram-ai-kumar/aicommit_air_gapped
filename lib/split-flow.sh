@@ -8,13 +8,16 @@
 # staged path may exist that wasn't in the original staged set (files aicommit
 # itself staged — semver manifests/changelog — are exempt). Index paths don't
 # move when HEAD advances, so this stays valid across prior group commits.
-# Args: $1=original staged files (newlines), $2=group files (newlines), $3=self-staged (newlines)
+# Args: $1=original staged files (newlines), $2=group files (newlines), $3=self-staged (newlines), $4=already-committed (newlines)
 _split_guard_staged_set() {
-    local original_names="$1" grp_files_list="$2" self_staged="${3:-}"
+    local original_names="$1" grp_files_list="$2" self_staged="${3:-}" already_committed="${4:-}"
     local staged_now gf foreign=""
     staged_now=$(agit diff --staged -z --name-only | tr '\0' '\n')
     while IFS= read -r gf; do
         [ -z "$gf" ] && continue
+        if [ -n "$already_committed" ] && printf '%s\n' "$already_committed" | grep -qxF "$gf"; then
+            continue
+        fi
         printf '%s\n' "$staged_now" | grep -qxF "$gf" || return 1
     done <<< "$grp_files_list"
     local allowed
@@ -117,14 +120,26 @@ _aicommit_split_flow() {
     local idx=1 committed_count=0 group_line=""
     local grp_scope="" subset_changes="" grp_commit_msg="" grp_resp="y"
     local _aicommit_self_staged=""
+    local _aicommit_already_committed=""
     local -a grp_file_array=()
 
     while IFS= read -r -u 3 group_line; do
         _aicommit_split_tab_line "$group_line"
         [ -z "$_aicommit_split_scope" ] && continue
         grp_scope="$_aicommit_split_scope"
-        grp_file_array=("${_aicommit_split_files[@]}")
-        [ ${#grp_file_array[@]} -eq 0 ] && continue
+        grp_file_array=()
+        for f in "${_aicommit_split_files[@]}"; do
+            [ -z "$f" ] && continue
+            if [ -n "$_aicommit_already_committed" ] && printf '%s\n' "$_aicommit_already_committed" | grep -qxF "$f"; then
+                continue
+            fi
+            grp_file_array+=("$f")
+        done
+        if [ ${#grp_file_array[@]} -eq 0 ]; then
+            committed_count=$((committed_count + 1))
+            idx=$((idx + 1))
+            continue
+        fi
 
         grp_commit_msg="${_AICOMMIT_GRP_MSGS[$idx]:-}"
         if [ -z "$grp_commit_msg" ]; then
@@ -140,11 +155,11 @@ _aicommit_split_flow() {
         grp_cur_ver=$(get_last_version)
         if [ "$bump_opt" = "true" ]; then
             local grp_eval_bump
-            grp_eval_bump=$(evaluate_commit_semver "$grp_commit_msg" "$bump_level" "${tmp_dir}/groups/${g}/RELEASE_HINT" "${tmp_dir}/groups/${g}")
+            grp_eval_bump=$(evaluate_commit_semver "$grp_commit_msg" "$bump_level" "${tmp_dir}/groups/${idx}/RELEASE_HINT" "${tmp_dir}/groups/${idx}")
             _aicommit_semver_plan "$grp_cur_ver" "$grp_eval_bump" true
         elif [ "$auto_yes" != "true" ]; then
             local grp_rec_bump grp_rec_next
-            grp_rec_bump=$(evaluate_commit_semver "$grp_commit_msg" "" "${tmp_dir}/groups/${g}/RELEASE_HINT" "${tmp_dir}/groups/${g}")
+            grp_rec_bump=$(evaluate_commit_semver "$grp_commit_msg" "" "${tmp_dir}/groups/${idx}/RELEASE_HINT" "${tmp_dir}/groups/${idx}")
             grp_rec_next=$(calculate_next_semver "$grp_cur_ver" "$grp_rec_bump")
             grp_rec_summary="${grp_rec_bump}: ${grp_cur_ver} -> ${grp_rec_next}"
         fi
@@ -176,12 +191,15 @@ _aicommit_split_flow() {
                         _aicommit_self_staged="${_aicommit_self_staged}${grp_updated_files}"$'\n'
                     fi
                 fi
-                if ! _split_guard_staged_set "$staged_files" "$(printf '%s\n' "${grp_file_array[@]}")" "$_aicommit_self_staged"; then
+                if ! _split_guard_staged_set "$staged_files" "$(printf '%s\n' "${grp_file_array[@]}")" "$_aicommit_self_staged" "$_aicommit_already_committed"; then
                     display_error "Staged set changed since grouping" "Re-run to re-group and commit the current staged set"
                     cleanup_aicommit_all
                     return 1
                 fi
                 if commit_staged_subset "$grp_commit_msg" "${grp_file_array[@]}"; then
+                    for cf in "${grp_file_array[@]}"; do
+                        _aicommit_already_committed="${_aicommit_already_committed}${cf}"$'\n'
+                    done
                     display_scope_success "$grp_scope"
                     if [ "$grp_bump_active" = "true" ]; then
                         local applied_tag=""
@@ -217,7 +235,7 @@ _aicommit_split_flow() {
                     local grp_updated_files=""
                     if [ "$bump_opt" = "true" ]; then
                         local e_eval_bump
-                        e_eval_bump=$(evaluate_commit_semver "$edited_msg" "$bump_level" "${tmp_dir}/groups/${g}/RELEASE_HINT" "${tmp_dir}/groups/${g}")
+                        e_eval_bump=$(evaluate_commit_semver "$edited_msg" "$bump_level" "${tmp_dir}/groups/${idx}/RELEASE_HINT" "${tmp_dir}/groups/${idx}")
                         _aicommit_semver_plan "$grp_cur_ver" "$e_eval_bump" false
                         grp_updated_files=$(apply_semver_release "$grp_cur_ver" "$_SEMVER_NEXT_VER" "$edited_msg" "$_SEMVER_EVAL_NEXT")
                         if [ -n "$grp_updated_files" ]; then
@@ -227,12 +245,15 @@ _aicommit_split_flow() {
                             _aicommit_self_staged="${_aicommit_self_staged}${grp_updated_files}"$'\n'
                         fi
                     fi
-                    if ! _split_guard_staged_set "$staged_files" "$(printf '%s\n' "${grp_file_array[@]}")" "$_aicommit_self_staged"; then
+                    if ! _split_guard_staged_set "$staged_files" "$(printf '%s\n' "${grp_file_array[@]}")" "$_aicommit_self_staged" "$_aicommit_already_committed"; then
                         display_error "Staged set changed since grouping" "Re-run to re-group and commit the current staged set"
                         cleanup_aicommit_all
                         return 1
                     fi
                     if commit_staged_subset "$edited_msg" "${grp_file_array[@]}"; then
+                        for cf in "${grp_file_array[@]}"; do
+                            _aicommit_already_committed="${_aicommit_already_committed}${cf}"$'\n'
+                        done
                         display_scope_success "$grp_scope"
                         if [ "$bump_opt" = "true" ]; then
                             local applied_tag=""

@@ -341,3 +341,48 @@ teardown() {
         fi
     done
 }
+
+# ─── 6. Multi-Commit Reliability Tests ────────────────────────────────────────
+
+@test "MC-01: multi-commit split flow does not error in between groups with unbumped or private manifests" {
+    printf '{\n  "name": "private-app",\n  "private": true\n}\n' > package.json
+    echo "1.0.0" > VERSION
+    echo "# Changelog" > CHANGELOG.md
+    git add package.json VERSION CHANGELOG.md
+    git commit -m "chore: initial" >/dev/null 2>&1
+    git tag v1.0.0
+
+    mkdir -p src test
+    echo "function feature() {}" > src/feature.js
+    echo "test feature" > test/feature_test.js
+    git add src/feature.js test/feature_test.js
+
+    export AI_MODEL="test-model"
+    mock_ollama_api 'feat(feature): add new feature'
+
+    run aiccs
+    [ "$status" -eq 0 ]
+    refute_output_contains "Staged set changed since grouping"
+    assert_output_contains "All atomic commits completed!"
+}
+
+@test "MC-02: multi-commit gracefully handles changelog assigned to later group after earlier group commits it" {
+    echo "1.0.0" > VERSION
+    echo "# Changelog" > CHANGELOG.md
+    git add VERSION CHANGELOG.md
+    git commit -m "chore: initial" >/dev/null 2>&1
+    git tag v1.0.0
+
+    echo "code" > app.js
+    echo "updated changelog" >> CHANGELOG.md
+    git add app.js CHANGELOG.md
+
+    export AI_MODEL="test-model"
+    mock_ollama_api 'feat: add app feature'
+
+    run aiccs
+    [ "$status" -eq 0 ]
+    refute_output_contains "Staged set changed since grouping"
+    assert_output_contains "All atomic commits completed!"
+}
+
