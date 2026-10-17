@@ -1451,10 +1451,19 @@ EOF
         return 0
     fi
 
-    local tmp="${cl_file}.tmp.$$"
-    local notes_tmp="${tmp}.notes"
+    # Clean up any stale temp/notes files from previous interrupted runs
+    rm -f "${cl_file}.tmp."*".notes" "${cl_file}.tmp."* 2>/dev/null || true
+
+    local tmp="${cl_file}.tmp.$$.$RANDOM"
+    local notes_tmp
+    if [ -n "${_AICOMMIT_RUN_DIR:-}" ] && [ -d "${_AICOMMIT_RUN_DIR}" ]; then
+        notes_tmp="${_AICOMMIT_RUN_DIR}/cl_notes.$$.$RANDOM.tmp"
+    else
+        notes_tmp="${TMPDIR:-/tmp}/aicommit_cl_notes.$$.$RANDOM.tmp"
+    fi
     printf '%s\n' "$bullet" > "$notes_tmp"
 
+    local awk_rc=0
     awk -v ver="$clean_ver" -v rel_date="$rel_date" -v notes_file="$notes_tmp" -v line_match="$first_line" '
         function print_notes() {
             while ((getline nl < notes_file) > 0) print nl
@@ -1517,7 +1526,21 @@ EOF
                 print_notes()
             }
         }
-    ' "$cl_file" > "$tmp" && mv "$tmp" "$cl_file"
+    ' "$cl_file" > "$tmp" || awk_rc=$?
+
+    # Immediately remove temporary notes file
+    rm -f "$notes_tmp" 2>/dev/null || true
+
+    if [ "$awk_rc" -ne 0 ] || [ ! -f "$tmp" ]; then
+        rm -f "$tmp" 2>/dev/null || true
+        return 1
+    fi
+
+    if ! mv "$tmp" "$cl_file"; then
+        rm -f "$tmp" 2>/dev/null || true
+        return 1
+    fi
+
     if [ "$stage_changelog" = "true" ]; then
         agit add "$cl_file" 2>/dev/null || git add "$cl_file" 2>/dev/null || true
     fi

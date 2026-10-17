@@ -769,6 +769,51 @@ EOF
     [ $(grep -c -- "- fix: resolve token expiration" CHANGELOG.md) -eq 1 ]
 }
 
+@test "update_changelog leaves no tmp or notes files in repository" {
+    cat <<EOF > CHANGELOG.md
+# Changelog
+
+## [1.0.0] - 2026-10-01
+
+- feat: v1 release
+EOF
+    git add CHANGELOG.md
+    git commit -qm "add changelog"
+
+    run update_changelog "1.1.0" "feat: new feature" "2026-10-18"
+    [ "$status" -eq 0 ]
+
+    # Assert no .tmp or .notes files exist in working directory
+    local leftover_files
+    leftover_files=$(find . -maxdepth 2 -name "*CHANGELOG.md.tmp*" -o -name "*notes*" -o -name "*.tmp*" | grep -v '\.git' || true)
+    [ -z "$leftover_files" ]
+}
+
+@test "update_changelog cleans up any preexisting stale changelog tmp notes files" {
+    cat <<EOF > CHANGELOG.md
+# Changelog
+
+## [1.0.0] - 2026-10-01
+
+- feat: v1 release
+EOF
+    git add CHANGELOG.md
+    git commit -qm "add changelog"
+
+    # Simulate stale leftover files from previous interrupted or older buggy runs
+    touch "CHANGELOG.md.tmp.1234.notes"
+    touch "CHANGELOG.md.tmp.5678"
+
+    run update_changelog "1.1.0" "feat: new feature" "2026-10-18"
+    [ "$status" -eq 0 ]
+
+    [ ! -f "CHANGELOG.md.tmp.1234.notes" ]
+    [ ! -f "CHANGELOG.md.tmp.5678" ]
+    local leftover_files
+    leftover_files=$(find . -maxdepth 2 -name "*CHANGELOG.md.tmp*" | grep -v '\.git' || true)
+    [ -z "$leftover_files" ]
+}
+
 # ─── resolve_effective_semver & apply_semver_release ─────────────────────────
 
 @test "resolve_effective_semver detects when working tree version is strictly higher" {
