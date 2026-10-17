@@ -12,8 +12,8 @@ teardown() {
 
 # ─── File Existence, Non-Emptiness & Permissions ─────────────────────────────
 
-@test "all 9 bin commands exist, are non-empty, and executable" {
-    local commands=("aicommit" "aic" "aicc" "aicx" "aiccx" "aics" "aiccs" "aicsx" "aiccsx")
+@test "all 12 bin commands exist, are non-empty, and executable" {
+    local commands=("aicommit" "aic" "aicc" "aicx" "aiccx" "aics" "aiccs" "aicsx" "aiccsx" "ais" "aisemver" "aisx")
     for cmd in "${commands[@]}"; do
         local bin_path="$AICOMMIT_DIR/bin/$cmd"
         [ -f "$bin_path" ] || { echo "Missing bin file: $bin_path"; return 1; }
@@ -22,8 +22,8 @@ teardown() {
     done
 }
 
-@test "all 9 bin commands have valid bash syntax" {
-    local commands=("aicommit" "aic" "aicc" "aicx" "aiccx" "aics" "aiccs" "aicsx" "aiccsx")
+@test "all 12 bin commands have valid bash syntax" {
+    local commands=("aicommit" "aic" "aicc" "aicx" "aiccx" "aics" "aiccs" "aicsx" "aiccsx" "ais" "aisemver" "aisx")
     for cmd in "${commands[@]}"; do
         run bash -n "$AICOMMIT_DIR/bin/$cmd"
         [ "$status" -eq 0 ]
@@ -84,6 +84,24 @@ teardown() {
     run "$AICOMMIT_DIR/bin/aiccsx" --help
     [ "$status" -eq 0 ]
     assert_output_contains "Usage: aicommit [OPTIONS]"
+}
+
+@test "bin/ais executes directly and displays help when --help passed" {
+    run "$AICOMMIT_DIR/bin/ais" --help
+    [ "$status" -eq 0 ]
+    assert_output_contains "Usage: ais"
+}
+
+@test "bin/aisemver executes directly and displays help when --help passed" {
+    run "$AICOMMIT_DIR/bin/aisemver" --help
+    [ "$status" -eq 0 ]
+    assert_output_contains "Usage: ais"
+}
+
+@test "bin/aisx executes directly and displays help when --help passed" {
+    run "$AICOMMIT_DIR/bin/aisx" --help
+    [ "$status" -eq 0 ]
+    assert_output_contains "Usage: ais"
 }
 
 # ─── Direct CLI Execution: Dry-Run Workflows ─────────────────────────────────
@@ -176,4 +194,40 @@ teardown() {
     assert_output_contains "Tagged release: v2.0.1"
     run git tag -l
     assert_output_contains "v2.0.1"
+}
+
+@test "bin/aisx executes standalone SemVer dry-run preview with 0 changes made" {
+    printf '{\n  "name": "aisx-bin-pkg",\n  "version": "1.4.0"\n}\n' > package.json
+    git add package.json
+    git commit -m "chore: initial commit"
+    run "$AICOMMIT_DIR/bin/aisx" patch
+    [ "$status" -eq 0 ]
+    assert_output_contains "aisemver Dry-Run Preview"
+    assert_output_contains "1.4.0 -> 1.4.1"
+    # Verify no commits or tags were made and file was not modified
+    run git status --porcelain
+    [ "$output" = "" ]
+    run git tag -l
+    [ "$output" = "" ]
+}
+
+@test "bin/ais executes standalone SemVer bump non-interactively with tag and commit" {
+    printf '{\n  "name": "ais-bin-pkg",\n  "version": "3.1.0"\n}\n' > package.json
+    git add package.json
+    git commit -m "chore: initial pkg"
+    run "$AICOMMIT_DIR/bin/ais" minor -y
+    [ "$status" -eq 0 ]
+    assert_output_contains "SemVer Release Successful!"
+    assert_output_contains "v3.2.0"
+    run git tag -l
+    assert_output_contains "v3.2.0"
+    run git log -1 --pretty=%B
+    assert_output_contains "chore(release): v3.2.0"
+    # Verify package.json updated
+    run grep '"version": "3.2.0"' package.json
+    [ "$status" -eq 0 ]
+    # Verify CHANGELOG.md updated
+    [ -f CHANGELOG.md ]
+    run grep '\[3.2.0\]' CHANGELOG.md
+    [ "$status" -eq 0 ]
 }

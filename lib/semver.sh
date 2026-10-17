@@ -92,12 +92,59 @@ get_current_version() {
         fi
     fi
 
-    # 11. Generic: VERSION or .version file
+    # 11. Deno / JSR
+    if [ -z "$ver" ]; then
+        for jf in "deno.json" "deno.jsonc" "jsr.json"; do
+            if [ -f "$jf" ]; then
+                ver=$(grep -m1 '"version"' "$jf" 2>/dev/null | sed -E 's/.*"version"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/' || true)
+                [ -n "$ver" ] && break
+            fi
+        done
+    fi
+
+    # 12. Gradle properties
+    if [ -z "$ver" ] && [ -f "gradle.properties" ]; then
+        ver=$(grep -E '^[[:space:]]*(version|appVersion)[[:space:]]*=' gradle.properties 2>/dev/null | head -n1 | sed -E 's/.*=[[:space:]]*([^[:space:]]+).*/\1/' || true)
+    fi
+
+    # 13. Elixir mix.exs
+    if [ -z "$ver" ] && [ -f "mix.exs" ]; then
+        ver=$(grep -E 'version:[[:space:]]*["\x27]' mix.exs 2>/dev/null | head -n1 | sed -E 's/.*version:[[:space:]]*["\x27]([^"\x27]+)["\x27].*/\1/' || true)
+    fi
+
+    # 14. Helm Chart.yaml
+    if [ -z "$ver" ] && [ -f "Chart.yaml" ]; then
+        ver=$(grep -E '^version:[[:space:]]*' Chart.yaml 2>/dev/null | head -n1 | sed -E 's/^version:[[:space:]]*([^[:space:]]+).*/\1/' || true)
+    fi
+
+    # 15. Generic: VERSION or .version file
     if [ -z "$ver" ]; then
         if [ -f "VERSION" ]; then
             ver=$(head -n1 VERSION 2>/dev/null | tr -d '[:space:]' || true)
         elif [ -f ".version" ]; then
             ver=$(head -n1 .version 2>/dev/null | tr -d '[:space:]' || true)
+        fi
+    fi
+
+    # 16. Fallback: inspect any detected version file across nested subpackages
+    if [ -z "$ver" ]; then
+        local first_vfile
+        first_vfile=$(detect_version_files 2>/dev/null | head -n1 || true)
+        if [ -n "$first_vfile" ] && [ -f "$first_vfile" ]; then
+            case "$first_vfile" in
+                *package.json|*deno.json*|*jsr.json)
+                    ver=$(grep -m1 '"version"' "$first_vfile" 2>/dev/null | sed -E 's/.*"version"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/' || true) ;;
+                *Cargo.toml)
+                    ver=$(awk '/^\[package\]/{flag=1;next}/^\[/{flag=0}flag && /^version/{print}' "$first_vfile" 2>/dev/null | head -n1 | sed -E 's/.*=[[:space:]]*"([^"]+)".*/\1/' || true) ;;
+                *pyproject.toml)
+                    ver=$(grep -E '^[[:space:]]*version[[:space:]]*=' "$first_vfile" 2>/dev/null | head -n1 | sed -E 's/.*=[[:space:]]*["'\'']([^"'\'']+)["'\''].*/\1/' || true) ;;
+                *pubspec.yaml)
+                    ver=$(grep -E '^[[:space:]]*version:' "$first_vfile" 2>/dev/null | head -n1 | sed -E 's/^[[:space:]]*version:[[:space:]]*([^[:space:]]+).*/\1/' || true) ;;
+                *pom.xml)
+                    ver=$(awk '/<version>/{print; exit}' "$first_vfile" 2>/dev/null | sed -E 's/.*<version>([^<]+)<\/version>.*/\1/' || true) ;;
+                *VERSION|*.version)
+                    ver=$(head -n1 "$first_vfile" 2>/dev/null | tr -d '[:space:]' || true) ;;
+            esac
         fi
     fi
 
@@ -399,77 +446,120 @@ calculate_next_semver() {
 }
 
 # Detect all files containing version declarations in the current repo
+# Searches root and nested directories (up to depth 4, excluding caches/builds/deps)
 # Echoes space- or newline-delimited list of relative paths
 detect_version_files() {
     local -a files=()
 
-    # Node.js
+    # 1. Direct root checks (fast path)
     [ -f "package.json" ] && grep -q '"version"' package.json 2>/dev/null && files+=("package.json")
     [ -f "package-lock.json" ] && grep -q '"version"' package-lock.json 2>/dev/null && files+=("package-lock.json")
-
-    # Rust
+    [ -f "deno.json" ] && grep -q '"version"' deno.json 2>/dev/null && files+=("deno.json")
+    [ -f "deno.jsonc" ] && grep -q '"version"' deno.jsonc 2>/dev/null && files+=("deno.jsonc")
+    [ -f "jsr.json" ] && grep -q '"version"' jsr.json 2>/dev/null && files+=("jsr.json")
     [ -f "Cargo.toml" ] && grep -qE '^[[:space:]]*version[[:space:]]*=' Cargo.toml 2>/dev/null && files+=("Cargo.toml")
-
-    # Python
     [ -f "pyproject.toml" ] && grep -qE '^[[:space:]]*version[[:space:]]*=' pyproject.toml 2>/dev/null && files+=("pyproject.toml")
     [ -f "setup.py" ] && grep -qE 'version[[:space:]]*=' setup.py 2>/dev/null && files+=("setup.py")
     [ -f "setup.cfg" ] && grep -qE 'version[[:space:]]*=' setup.cfg 2>/dev/null && files+=("setup.cfg")
+    [ -f "pubspec.yaml" ] && grep -qE '^[[:space:]]*version[[:space:]]*:' pubspec.yaml 2>/dev/null && files+=("pubspec.yaml")
+    [ -f "composer.json" ] && grep -q '"version"' composer.json 2>/dev/null && files+=("composer.json")
+    [ -f "pom.xml" ] && grep -q '<version>' pom.xml 2>/dev/null && files+=("pom.xml")
+    [ -f "build.gradle" ] && grep -qE '^[[:space:]]*(version|versionName)[[:space:]]*[= ]' build.gradle 2>/dev/null && files+=("build.gradle")
+    [ -f "build.gradle.kts" ] && grep -qE '^[[:space:]]*(version|versionName)[[:space:]]*[= ]' build.gradle.kts 2>/dev/null && files+=("build.gradle.kts")
+    [ -f "gradle.properties" ] && grep -qE '^[[:space:]]*(version|appVersion)[[:space:]]*=' gradle.properties 2>/dev/null && files+=("gradle.properties")
+    [ -f "mix.exs" ] && grep -qE 'version:[[:space:]]*["\x27]' mix.exs 2>/dev/null && files+=("mix.exs")
+    [ -f "Chart.yaml" ] && grep -qE '^(version|appVersion):' Chart.yaml 2>/dev/null && files+=("Chart.yaml")
+    [ -f "CMakeLists.txt" ] && grep -qE '(VERSION[[:space:]]+[0-9.]+|PROJECT_VERSION)' CMakeLists.txt 2>/dev/null && files+=("CMakeLists.txt")
+    [ -f "Package.swift" ] && grep -qE 'version:[[:space:]]*["\x27]' Package.swift 2>/dev/null && files+=("Package.swift")
+    [ -f "VERSION" ] && [ -s "VERSION" ] && files+=("VERSION")
+    [ -f ".version" ] && [ -s ".version" ] && files+=(".version")
+
+    # 2. Nested manifest scan (depth 2 to 4, prune non-project folders)
+    local raw_found
+    raw_found=$(find . -maxdepth 4 \( -name .git -o -name node_modules -o -name vendor -o -name target -o -name build -o -name dist -o -name .venv -o -name venv -o -name env -o -name __pycache__ -o -name .tox -o -name .mypy_cache -o -name .pytest_cache -o -name .cache -o -name Pods -o -name .gradle -o -name .idea -o -name .vscode \) -prune -o -type f \( \
+        -name "package.json" -o -name "package-lock.json" -o -name "deno.json" -o -name "deno.jsonc" -o -name "jsr.json" -o \
+        -name "Cargo.toml" -o -name "pyproject.toml" -o -name "setup.py" -o -name "setup.cfg" -o \
+        -name "pubspec.yaml" -o -name "composer.json" -o -name "pom.xml" -o -name "build.gradle" -o \
+        -name "build.gradle.kts" -o -name "gradle.properties" -o -name "mix.exs" -o -name "Chart.yaml" -o \
+        -name "CMakeLists.txt" -o -name "Package.swift" -o -name "*.gemspec" -o -name "*.csproj" -o \
+        -name "*.fsproj" -o -name "Directory.Build.props" -o -name "*.pbxproj" -o -name "VERSION" -o -name ".version" \
+    \) -print 2>/dev/null | sed 's|^\./||')
+
+    if [ -n "$raw_found" ]; then
+        local nf
+        while IFS= read -r nf; do
+            [ -z "$nf" ] && continue
+            case "$nf" in
+                package.json|*/package.json)
+                    grep -q '"version"' "$nf" 2>/dev/null && files+=("$nf") ;;
+                package-lock.json|*/package-lock.json)
+                    grep -q '"version"' "$nf" 2>/dev/null && files+=("$nf") ;;
+                deno.json|*/deno.json|deno.jsonc|*/deno.jsonc|jsr.json|*/jsr.json)
+                    grep -q '"version"' "$nf" 2>/dev/null && files+=("$nf") ;;
+                Cargo.toml|*/Cargo.toml)
+                    grep -qE '^[[:space:]]*version[[:space:]]*=' "$nf" 2>/dev/null && files+=("$nf") ;;
+                pyproject.toml|*/pyproject.toml)
+                    grep -qE '^[[:space:]]*version[[:space:]]*=' "$nf" 2>/dev/null && files+=("$nf") ;;
+                setup.py|*/setup.py)
+                    grep -qE 'version[[:space:]]*=' "$nf" 2>/dev/null && files+=("$nf") ;;
+                setup.cfg|*/setup.cfg)
+                    grep -qE 'version[[:space:]]*=' "$nf" 2>/dev/null && files+=("$nf") ;;
+                pubspec.yaml|*/pubspec.yaml)
+                    grep -qE '^[[:space:]]*version[[:space:]]*:' "$nf" 2>/dev/null && files+=("$nf") ;;
+                composer.json|*/composer.json)
+                    grep -q '"version"' "$nf" 2>/dev/null && files+=("$nf") ;;
+                pom.xml|*/pom.xml)
+                    grep -q '<version>' "$nf" 2>/dev/null && files+=("$nf") ;;
+                build.gradle|*/build.gradle|build.gradle.kts|*/build.gradle.kts)
+                    grep -qE '^[[:space:]]*(version|versionName)[[:space:]]*[= ]' "$nf" 2>/dev/null && files+=("$nf") ;;
+                gradle.properties|*/gradle.properties)
+                    grep -qE '^[[:space:]]*(version|appVersion)[[:space:]]*=' "$nf" 2>/dev/null && files+=("$nf") ;;
+                mix.exs|*/mix.exs)
+                    grep -qE 'version:[[:space:]]*["\x27]' "$nf" 2>/dev/null && files+=("$nf") ;;
+                Chart.yaml|*/Chart.yaml)
+                    grep -qE '^(version|appVersion):' "$nf" 2>/dev/null && files+=("$nf") ;;
+                CMakeLists.txt|*/CMakeLists.txt)
+                    grep -qE '(VERSION[[:space:]]+[0-9.]+|PROJECT_VERSION)' "$nf" 2>/dev/null && files+=("$nf") ;;
+                Package.swift|*/Package.swift)
+                    grep -qE 'version:[[:space:]]*["\x27]' "$nf" 2>/dev/null && files+=("$nf") ;;
+                *.gemspec)
+                    grep -qE '\.version[[:space:]]*=' "$nf" 2>/dev/null && files+=("$nf") ;;
+                *.csproj|*.fsproj|Directory.Build.props|*/Directory.Build.props)
+                    grep -qE '<(Version|PackageVersion)>' "$nf" 2>/dev/null && files+=("$nf") ;;
+                *.pbxproj)
+                    grep -qE 'MARKETING_VERSION[[:space:]]*=' "$nf" 2>/dev/null && files+=("$nf") ;;
+                VERSION|*/VERSION|.version|*/.version)
+                    [ -s "$nf" ] && files+=("$nf") ;;
+            esac
+        done <<< "$raw_found"
+    fi
+
+    # 3. Source code version files (Python __init__.py/_version.py, Ruby version.rb, Go *version*.go)
     while IFS= read -r f; do
         [ -n "$f" ] && files+=("$f")
-    done < <(find . -maxdepth 3 \( -name "__init__.py" -o -name "_version.py" -o -name "version.py" \) ! -path '*/.*' 2>/dev/null | sed 's|^\./||' | while IFS= read -r pyf; do
-        if grep -qE '^[[:space:]]*__version__[[:space:]]*=' "$pyf" 2>/dev/null; then
+    done < <(find . -maxdepth 4 \( -name .git -o -name node_modules -o -name vendor -o -name target -o -name build -o -name dist -o -name .venv -o -name venv -o -name env -o -name __pycache__ \) -prune -o -type f \( -name "__init__.py" -o -name "_version.py" -o -name "version.py" \) -print 2>/dev/null | sed 's|^\./||' | while IFS= read -r pyf; do
+        if grep -qE '^[[:space:]]*(__version__|VERSION)[[:space:]]*=' "$pyf" 2>/dev/null; then
             echo "$pyf"
         fi
     done)
 
-    # Dart / Flutter
-    [ -f "pubspec.yaml" ] && grep -qE '^[[:space:]]*version[[:space:]]*:' pubspec.yaml 2>/dev/null && files+=("pubspec.yaml")
-
-    # Ruby / Rails
     while IFS= read -r f; do
         [ -n "$f" ] && files+=("$f")
-    done < <(find . -maxdepth 2 -name "*.gemspec" ! -path '*/.*' 2>/dev/null | sed 's|^\./||')
-    while IFS= read -r f; do
-        [ -n "$f" ] && files+=("$f")
-    done < <(find lib config -maxdepth 3 -name "version.rb" ! -path '*/.*' 2>/dev/null | sed 's|^\./||')
-
-    # PHP
-    if [ -f "composer.json" ] && grep -q '"version"' composer.json 2>/dev/null; then
-        files+=("composer.json")
-    fi
-
-    # .NET
-    while IFS= read -r f; do
-        [ -n "$f" ] && files+=("$f")
-    done < <(find . -maxdepth 2 \( -name "*.csproj" -o -name "*.fsproj" -o -name "Directory.Build.props" \) ! -path '*/.*' 2>/dev/null | sed 's|^\./||' | while IFS= read -r pf; do
-        if grep -qE '<(Version|PackageVersion)>' "$pf" 2>/dev/null; then
-            echo "$pf"
+    done < <(find . -maxdepth 4 \( -name .git -o -name node_modules -o -name vendor \) -prune -o -type f -name "version.rb" -print 2>/dev/null | sed 's|^\./||' | while IFS= read -r rbf; do
+        if grep -qE 'VERSION[[:space:]]*=' "$rbf" 2>/dev/null; then
+            echo "$rbf"
         fi
     done)
 
-    # Java
-    [ -f "pom.xml" ] && grep -q '<version>' pom.xml 2>/dev/null && files+=("pom.xml")
-    if [ -f "build.gradle" ] && grep -qE '^[[:space:]]*version[[:space:]]*=' build.gradle 2>/dev/null; then
-        files+=("build.gradle")
-    fi
-    if [ -f "build.gradle.kts" ] && grep -qE '^[[:space:]]*version[[:space:]]*=' build.gradle.kts 2>/dev/null; then
-        files+=("build.gradle.kts")
-    fi
-
-    # Go
     while IFS= read -r f; do
         [ -n "$f" ] && files+=("$f")
-    done < <(find . -maxdepth 3 -name "*version*.go" ! -path '*/.*' 2>/dev/null | sed 's|^\./||' | while IFS= read -r gf; do
+    done < <(find . -maxdepth 4 \( -name .git -o -name node_modules -o -name vendor -o -name target -o -name build \) -prune -o -type f -name "*version*.go" -print 2>/dev/null | sed 's|^\./||' | while IFS= read -r gf; do
         if grep -qE '(var|const)[[:space:]]+(Version|version)[[:space:]]*=' "$gf" 2>/dev/null; then
             echo "$gf"
         fi
     done)
 
-    # Generic
-    [ -f "VERSION" ] && files+=("VERSION")
-    [ -f ".version" ] && files+=(".version")
-
-    # Output unique list
+    # Output unique sorted list
     if [ ${#files[@]} -gt 0 ]; then
         printf '%s\n' "${files[@]}" | sort -u
     fi
@@ -484,7 +574,7 @@ update_version_in_file() {
     local tmp="${file}.tmp.$$"
 
     case "$file" in
-        package.json)
+        package.json|*/package.json|deno.json|*/deno.json|deno.jsonc|*/deno.jsonc|jsr.json|*/jsr.json)
             # Replace the first occurrence of "version": "..."
             awk -v old="$old_ver" -v new="$new_ver" '
                 BEGIN { done = 0 }
@@ -496,7 +586,7 @@ update_version_in_file() {
             ' "$file" > "$tmp" && mv "$tmp" "$file"
             ;;
 
-        package-lock.json)
+        package-lock.json|*/package-lock.json)
             # In package-lock.json, update top-level version and packages[""] version
             awk -v new="$new_ver" '
                 BEGIN { count = 0 }
@@ -508,7 +598,7 @@ update_version_in_file() {
             ' "$file" > "$tmp" && mv "$tmp" "$file"
             ;;
 
-        Cargo.toml)
+        Cargo.toml|*/Cargo.toml)
             # Replace version under [package]
             awk -v new="$new_ver" '
                 BEGIN { in_pkg = 0; done = 0 }
@@ -522,7 +612,7 @@ update_version_in_file() {
             ' "$file" > "$tmp" && mv "$tmp" "$file"
             ;;
 
-        pyproject.toml)
+        pyproject.toml|*/pyproject.toml)
             awk -v new="$new_ver" '
                 BEGIN { done = 0 }
                 !done && /^[[:space:]]*version[[:space:]]*=[[:space:]]*["\x27]/ {
@@ -533,7 +623,7 @@ update_version_in_file() {
             ' "$file" > "$tmp" && mv "$tmp" "$file"
             ;;
 
-        setup.py)
+        setup.py|*/setup.py)
             awk -v new="$new_ver" '
                 BEGIN { done = 0 }
                 !done && /version[[:space:]]*=[[:space:]]*["\x27]/ {
@@ -544,7 +634,7 @@ update_version_in_file() {
             ' "$file" > "$tmp" && mv "$tmp" "$file"
             ;;
 
-        setup.cfg)
+        setup.cfg|*/setup.cfg)
             awk -v new="$new_ver" '
                 BEGIN { done = 0 }
                 !done && /^[[:space:]]*version[[:space:]]*=/ {
@@ -556,16 +646,16 @@ update_version_in_file() {
             ;;
 
         *.py)
-            # Python __init__.py / _version.py
+            # Python __init__.py / _version.py / version.py
             awk -v new="$new_ver" '
-                /^[[:space:]]*__version__[[:space:]]*=/ {
-                    sub(/__version__[[:space:]]*=[[:space:]]*["\x27][^"\x27]+["\x27]/, "__version__ = \"" new "\"")
+                /^[[:space:]]*(__version__|VERSION)[[:space:]]*=/ {
+                    sub(/(__version__|VERSION)[[:space:]]*=[[:space:]]*["\x27][^"\x27]+["\x27]/, "__version__ = \"" new "\"")
                 }
                 { print }
             ' "$file" > "$tmp" && mv "$tmp" "$file"
             ;;
 
-        pubspec.yaml)
+        pubspec.yaml|*/pubspec.yaml)
             awk -v new="$new_ver" '
                 BEGIN { done = 0 }
                 !done && /^[[:space:]]*version:[[:space:]]*/ {
@@ -596,7 +686,7 @@ update_version_in_file() {
             ' "$file" > "$tmp" && mv "$tmp" "$file"
             ;;
 
-        composer.json)
+        composer.json|*/composer.json)
             awk -v new="$new_ver" '
                 BEGIN { done = 0 }
                 !done && /"version"[[:space:]]*:[[:space:]]*"/ {
@@ -607,7 +697,7 @@ update_version_in_file() {
             ' "$file" > "$tmp" && mv "$tmp" "$file"
             ;;
 
-        *.csproj|*.fsproj|Directory.Build.props)
+        *.csproj|*.fsproj|Directory.Build.props|*/Directory.Build.props)
             awk -v new="$new_ver" '
                 /<Version>[^<]+<\/Version>/ {
                     sub(/<Version>[^<]+<\/Version>/, "<Version>" new "</Version>")
@@ -619,7 +709,7 @@ update_version_in_file() {
             ' "$file" > "$tmp" && mv "$tmp" "$file"
             ;;
 
-        pom.xml)
+        pom.xml|*/pom.xml)
             # Replace root <version> (first occurrence)
             awk -v new="$new_ver" '
                 BEGIN { done = 0 }
@@ -631,12 +721,83 @@ update_version_in_file() {
             ' "$file" > "$tmp" && mv "$tmp" "$file"
             ;;
 
-        build.gradle|build.gradle.kts)
+        build.gradle|*/build.gradle|build.gradle.kts|*/build.gradle.kts)
             awk -v new="$new_ver" '
                 BEGIN { done = 0 }
                 !done && /^[[:space:]]*version[[:space:]]*=[[:space:]]*["\x27]/ {
                     sub(/version[[:space:]]*=[[:space:]]*["\x27][^"\x27]+["\x27]/, "version = \"" new "\"")
                     done = 1
+                }
+                !done && /^[[:space:]]*versionName[[:space:]]*[= ]/ {
+                    sub(/versionName[[:space:]]*[= ]*["\x27][^"\x27]+["\x27]/, "versionName \"" new "\"")
+                    done = 1
+                }
+                { print }
+            ' "$file" > "$tmp" && mv "$tmp" "$file"
+            ;;
+
+        gradle.properties|*/gradle.properties)
+            awk -v new="$new_ver" '
+                BEGIN { done = 0 }
+                !done && /^[[:space:]]*(version|appVersion)[[:space:]]*=/ {
+                    sub(/=[[:space:]]*[^[:space:]]+/, "= " new)
+                    done = 1
+                }
+                { print }
+            ' "$file" > "$tmp" && mv "$tmp" "$file"
+            ;;
+
+        mix.exs|*/mix.exs)
+            awk -v new="$new_ver" '
+                BEGIN { done = 0 }
+                !done && /version:[[:space:]]*["\x27][^"\x27]+["\x27]/ {
+                    sub(/version:[[:space:]]*["\x27][^"\x27]+["\x27]/, "version: \"" new "\"")
+                    done = 1
+                }
+                { print }
+            ' "$file" > "$tmp" && mv "$tmp" "$file"
+            ;;
+
+        Chart.yaml|*/Chart.yaml)
+            awk -v new="$new_ver" '
+                /^[[:space:]]*version:[[:space:]]*/ {
+                    sub(/version:[[:space:]]*[^[:space:]]+/, "version: " new)
+                }
+                /^[[:space:]]*appVersion:[[:space:]]*/ {
+                    sub(/appVersion:[[:space:]]*["\x27]?[^"\x27[:space:]]+["\x27]?/, "appVersion: \"" new "\"")
+                }
+                { print }
+            ' "$file" > "$tmp" && mv "$tmp" "$file"
+            ;;
+
+        CMakeLists.txt|*/CMakeLists.txt)
+            awk -v new="$new_ver" '
+                BEGIN { done = 0 }
+                !done && /project\([[:space:]]*[^)]*VERSION[[:space:]]+[0-9.]+/ {
+                    sub(/VERSION[[:space:]]+[0-9.]+/, "VERSION " new)
+                    done = 1
+                }
+                !done && /set\([[:space:]]*(PROJECT_VERSION|[A-Za-z_]+_VERSION)[[:space:]]+["\x27]?[0-9.]+["\x27]?\)/ {
+                    sub(/["\x27]?[0-9.]+["\x27]?\)/, "\"" new "\")")
+                    done = 1
+                }
+                { print }
+            ' "$file" > "$tmp" && mv "$tmp" "$file"
+            ;;
+
+        Package.swift|*/Package.swift)
+            awk -v new="$new_ver" '
+                /version:[[:space:]]*["\x27][^"\x27]+["\x27]/ {
+                    sub(/version:[[:space:]]*["\x27][^"\x27]+["\x27]/, "version: \"" new "\"")
+                }
+                { print }
+            ' "$file" > "$tmp" && mv "$tmp" "$file"
+            ;;
+
+        *.pbxproj)
+            awk -v new="$new_ver" '
+                /MARKETING_VERSION[[:space:]]*=[[:space:]]*[^;]+;/ {
+                    sub(/MARKETING_VERSION[[:space:]]*=[[:space:]]*[^;]+;/, "MARKETING_VERSION = " new ";")
                 }
                 { print }
             ' "$file" > "$tmp" && mv "$tmp" "$file"
@@ -651,7 +812,7 @@ update_version_in_file() {
             ' "$file" > "$tmp" && mv "$tmp" "$file"
             ;;
 
-        VERSION|.version)
+        VERSION|.version|*/VERSION|*/.version)
             printf '%s\n' "$new_ver" > "$file"
             ;;
 
@@ -1133,13 +1294,116 @@ detect_changelog_file() {
     return 1
 }
 
+# Generate categorized Keep a Changelog release notes from conventional commits since last tag
+# Args: $1=target_ver, $2=custom_msg (optional), $3=last_tag (optional)
+# Echoes markdown formatted notes
+generate_changelog_release_notes() {
+    local target_ver="$1" custom_msg="${2:-}" last_tag="${3:-}"
+    local -a breaking=() feat=() fix=() perf=() docs=() maint=() other=()
+
+    # Determine git log range
+    if [ -z "$last_tag" ]; then
+        last_tag=$(git tag -l "v*" "*.*.*" 2>/dev/null | grep -E '^v?[0-9]+\.[0-9]+' | sort -V 2>/dev/null | tail -n1 || true)
+    fi
+
+    local range="HEAD"
+    if [ -n "$last_tag" ] && git rev-parse -q --verify "$last_tag" >/dev/null 2>&1; then
+        range="${last_tag}..HEAD"
+    fi
+
+    local log_lines=""
+    if git rev-parse --verify HEAD >/dev/null 2>&1; then
+        log_lines=$(git log "$range" --oneline --no-merges 2>/dev/null || true)
+    fi
+
+    if [ -n "$log_lines" ]; then
+        local line subj
+        while IFS= read -r line; do
+            [ -z "$line" ] && continue
+            subj="${line#* }"
+            [ -z "$subj" ] && continue
+
+            # Filter out version bump / release commits
+            if printf '%s\n' "$subj" | grep -qE '^(chore\(release\):|Version updated|Release v?[0-9])'; then
+                continue
+            fi
+
+            if printf '%s\n' "$subj" | grep -qE 'BREAKING[ -]CHANGE:|^[a-z]+(\([^)]+\))?!:'; then
+                breaking+=("- ${subj}")
+            elif printf '%s\n' "$subj" | grep -qE '^feat(\([^)]+\))?:'; then
+                feat+=("- ${subj}")
+            elif printf '%s\n' "$subj" | grep -qE '^fix(\([^)]+\))?:'; then
+                fix+=("- ${subj}")
+            elif printf '%s\n' "$subj" | grep -qE '^perf(\([^)]+\))?:'; then
+                perf+=("- ${subj}")
+            elif printf '%s\n' "$subj" | grep -qE '^docs(\([^)]+\))?:'; then
+                docs+=("- ${subj}")
+            elif printf '%s\n' "$subj" | grep -qE '^(refactor|chore|test|ci|style|build)(\([^)]+\))?:'; then
+                maint+=("- ${subj}")
+            else
+                other+=("- ${subj}")
+            fi
+        done <<< "$log_lines"
+    fi
+
+    local -a sections=()
+    if [ -n "$custom_msg" ]; then
+        sections+=("- ${custom_msg}")
+    fi
+
+    if [ ${#breaking[@]} -gt 0 ]; then
+        sections+=("### Breaking Changes" "$(printf '%s\n' "${breaking[@]}")")
+    fi
+    if [ ${#feat[@]} -gt 0 ]; then
+        sections+=("### Added" "$(printf '%s\n' "${feat[@]}")")
+    fi
+    if [ ${#fix[@]} -gt 0 ]; then
+        sections+=("### Fixed" "$(printf '%s\n' "${fix[@]}")")
+    fi
+    if [ ${#perf[@]} -gt 0 ]; then
+        sections+=("### Performance" "$(printf '%s\n' "${perf[@]}")")
+    fi
+    if [ ${#docs[@]} -gt 0 ]; then
+        sections+=("### Documentation" "$(printf '%s\n' "${docs[@]}")")
+    fi
+    if [ ${#maint[@]} -gt 0 ]; then
+        sections+=("### Maintenance" "$(printf '%s\n' "${maint[@]}")")
+    fi
+    if [ ${#other[@]} -gt 0 ] && [ ${#feat[@]} -eq 0 ] && [ ${#fix[@]} -eq 0 ]; then
+        sections+=("### Changes" "$(printf '%s\n' "${other[@]}")")
+    fi
+
+    if [ ${#sections[@]} -eq 0 ]; then
+        echo "- Release v${target_ver}"
+    else
+        local s
+        for s in "${sections[@]}"; do
+            printf '%s\n\n' "$s"
+        done | sed -e :a -e '/^\n*$/{$d;N;};/\n$/ba'
+    fi
+}
+
 # Update or create project changelog idempotently
-# Args: $1=version, $2=commit_msg, $3=date (optional: YYYY-MM-DD)
+# Args: $1=version, $2=commit_msg_or_notes, $3=date (optional: YYYY-MM-DD)
 # Echoes changelog filename
 update_changelog() {
     local version="$1"
     local commit_msg="$2"
-    local rel_date="${3:-$(date +%Y-%m-%d)}"
+    local rel_date=""
+    local stage_changelog=true
+
+    if [ "$3" = "false" ]; then
+        stage_changelog=false
+        rel_date="$(date +%Y-%m-%d)"
+    elif [ "$3" = "true" ]; then
+        stage_changelog=true
+        rel_date="$(date +%Y-%m-%d)"
+    elif [ -n "$3" ]; then
+        rel_date="$3"
+        [ "$4" = "false" ] && stage_changelog=false
+    else
+        rel_date="$(date +%Y-%m-%d)"
+    fi
 
     if [ "${AI_SEMVER_CHANGELOG:-true}" != "true" ]; then
         return 0
@@ -1153,10 +1417,17 @@ update_changelog() {
         cl_file="${AI_SEMVER_CHANGELOG_FILE:-CHANGELOG.md}"
     fi
 
+    local content="$commit_msg"
     local first_line
-    first_line=$(printf '%s\n' "$commit_msg" | head -n 1 | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')
-    [ -z "$first_line" ] && first_line="Release v${clean_ver}"
-    local bullet="- ${first_line}"
+    if [[ "$content" == "-"* ]] || [[ "$content" == "###"* ]]; then
+        first_line=$(printf '%s\n' "$content" | grep -m1 '^[[:space:]]*-' | sed -E 's/^[[:space:]]*-[[:space:]]*//' || true)
+        [ -z "$first_line" ] && first_line="Release v${clean_ver}"
+    else
+        first_line=$(printf '%s\n' "$content" | head -n 1 | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')
+        [ -z "$first_line" ] && first_line="Release v${clean_ver}"
+        content="- ${first_line}"
+    fi
+    local bullet="$content"
 
     if [ ! -f "$cl_file" ]; then
         cat <<EOF > "$cl_file"
@@ -1164,17 +1435,31 @@ update_changelog() {
 
 All notable changes to this project will be documented in this file.
 
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased]
+
 ## [${clean_ver}] - ${rel_date}
 
 ${bullet}
 EOF
-        agit add "$cl_file" 2>/dev/null || git add "$cl_file" 2>/dev/null || true
+        if [ "$stage_changelog" = "true" ]; then
+            agit add "$cl_file" 2>/dev/null || git add "$cl_file" 2>/dev/null || true
+        fi
         echo "$cl_file"
         return 0
     fi
 
     local tmp="${cl_file}.tmp.$$"
-    awk -v ver="$clean_ver" -v rel_date="$rel_date" -v bullet="$bullet" -v line_match="$first_line" '
+    local notes_tmp="${tmp}.notes"
+    printf '%s\n' "$bullet" > "$notes_tmp"
+
+    awk -v ver="$clean_ver" -v rel_date="$rel_date" -v notes_file="$notes_tmp" -v line_match="$first_line" '
+        function print_notes() {
+            while ((getline nl < notes_file) > 0) print nl
+            close(notes_file)
+        }
         BEGIN {
             target_found = 0
             in_target_section = 0
@@ -1191,7 +1476,7 @@ EOF
         # Transition out of target section when next ## header arrives
         in_target_section && /^## / {
             if (!bullet_found) {
-                print bullet
+                print_notes()
                 print ""
                 bullet_found = 1
             }
@@ -1202,28 +1487,40 @@ EOF
                 bullet_found = 1
             }
         }
+        # If Unreleased header exists and target not found, insert new version right under Unreleased
+        !target_found && !inserted_new && /^## \[[Uu]nreleased\]/ {
+            print $0
+            print ""
+            print "## [" ver "] - " rel_date
+            print ""
+            print_notes()
+            print ""
+            inserted_new = 1
+            next
+        }
         # Prepend new section before the first existing release header if not target_found
         !target_found && !inserted_new && /^## / {
             print "## [" ver "] - " rel_date
             print ""
-            print bullet
+            print_notes()
             print ""
             inserted_new = 1
         }
         { print }
         END {
             if (target_found && in_target_section && !bullet_found) {
-                print bullet
+                print_notes()
             } else if (!target_found && !inserted_new) {
                 print ""
                 print "## [" ver "] - " rel_date
                 print ""
-                print bullet
+                print_notes()
             }
         }
     ' "$cl_file" > "$tmp" && mv "$tmp" "$cl_file"
-
-    agit add "$cl_file" 2>/dev/null || git add "$cl_file" 2>/dev/null || true
+    if [ "$stage_changelog" = "true" ]; then
+        agit add "$cl_file" 2>/dev/null || git add "$cl_file" 2>/dev/null || true
+    fi
     echo "$cl_file"
     return 0
 }
@@ -1306,5 +1603,357 @@ apply_semver_release() {
         printf '%s\n' "${files_updated[@]}" | sort -u
     fi
 }
+
+# ─── Standalone SemVer Engine (ais / aisemver) ─────────────────────────────────
+
+# Standalone Semantic Versioning bump command implementation
+_aisemver_main() {
+    [ -n "$ZSH_VERSION" ] && setopt localoptions localtraps shwordsplit nonomatch nomonitor nonotify typesetsilent
+
+    local dry_run=false verbose=false auto_yes=false
+    local commit_opt=true tag_opt=true stage_opt=true changelog_opt=true
+    local bump_arg="" set_ver="" auto_eval=false custom_msg=""
+    local -a positional=()
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --help|-h)
+                echo "Usage: ais [OPTIONS] [major|minor|patch|auto|<version>] [\"release note\"]"
+                echo "       aisemver [OPTIONS] [major|minor|patch|auto|<version>] [\"release note\"]"
+                echo ""
+                echo "Standalone Semantic Versioning (SemVer) bump & changelog engine."
+                echo "Updates version declarations across project manifests (Node, Deno, Python,"
+                echo "Rust, Go, Dart/Flutter, Java/Kotlin, .NET, Swift, Elixir, CMake, Helm) and"
+                echo "maintains CHANGELOG.md without requiring an AI commit of staged code changes."
+                echo ""
+                echo "Arguments:"
+                echo "  major|minor|patch  Explicit bump increment level"
+                echo "  auto               Auto-evaluate bump level from git history"
+                echo "  <version>          Explicit target version string (e.g. 1.2.3 or v2.0.0)"
+                echo "  \"release note\"    Optional release summary / note for changelog and commit"
+                echo ""
+                echo "Options:"
+                echo "  --help, -h         Show this help message and exit"
+                echo "  --dry-run, -d      Preview version transition and changelog (0 changes written)"
+                echo "  --verbose, -v      Show detailed file discovery, pattern matching, and git actions"
+                echo "  --yes, -y          Non-interactive mode (accept all defaults without prompt)"
+                echo "  --bump=<level>     Explicit bump level (major, minor, patch, auto)"
+                echo "  --semver=<level>   Synonym for --bump"
+                echo "  --set=<version>    Set exact version string"
+                echo "  --auto             Evaluate bump level automatically from git commits since last tag"
+                echo "  --message, -m <msg> Custom release note / summary"
+                echo "  --commit           Create Git release commit (default: true)"
+                echo "  --no-commit        Do not create Git release commit"
+                echo "  --tag              Create annotated Git tag for new version (default: true)"
+                echo "  --no-tag           Do not create Git tag"
+                echo "  --stage            Stage modified version files and changelog with git add (default: true)"
+                echo "  --no-stage         Do not stage modified files into git index"
+                echo "  --changelog        Update project changelog (default: true)"
+                echo "  --no-changelog     Do not update changelog"
+                echo ""
+                echo "CLI Shims:"
+                echo "  ais                Fast standalone SemVer bump"
+                echo "  aisemver           Full command name (alias for ais)"
+                echo "  aisx               Fast dry-run preview (0 changes made)"
+                echo ""
+                echo "Examples:"
+                echo "  ais                           Interactive release decision menu"
+                echo "  ais patch                     Bump patch version across all manifests"
+                echo "  ais minor -m \"New auth API\"   Bump minor with custom release highlight"
+                echo "  ais major --no-tag            Bump major without creating a Git tag"
+                echo "  ais 2.0.0                     Explicitly set version to 2.0.0"
+                echo "  ais auto -y                   Non-interactive auto-bump based on git commits"
+                echo "  aisx                          Dry-run preview of files and changelog changes"
+                return 0
+                ;;
+            --dry-run|-d)        dry_run=true ;;
+            --verbose|-v)        verbose=true ;;
+            --yes|-y)            auto_yes=true ;;
+            --auto)              auto_eval=true ;;
+            --bump=*)            bump_arg="${1#--bump=}" ;;
+            --semver=*)          bump_arg="${1#--semver=}" ;;
+            --set=*)             set_ver="${1#--set=}" ;;
+            --message=*)         custom_msg="${1#--message=}" ;;
+            -m)                  shift; custom_msg="${1:-}" ;;
+            --commit)            commit_opt=true ;;
+            --no-commit)         commit_opt=false; tag_opt=false ;;
+            --tag)               tag_opt=true ;;
+            --no-tag)            tag_opt=false ;;
+            --stage)             stage_opt=true ;;
+            --no-stage)          stage_opt=false; commit_opt=false; tag_opt=false ;;
+            --changelog)         changelog_opt=true ;;
+            --no-changelog)      changelog_opt=false ;;
+            *)                   positional+=("$1") ;;
+        esac
+        shift
+    done
+
+    # Process positional arguments
+    local pos
+    for pos in "${positional[@]}"; do
+        case "$pos" in
+            major|minor|patch)
+                bump_arg="$pos"
+                ;;
+            auto)
+                auto_eval=true
+                ;;
+            v[0-9]*|[0-9]*.[0-9]*)
+                set_ver="${pos#v}"; set_ver="${set_ver#V}"
+                ;;
+            *)
+                if [ -z "$custom_msg" ]; then
+                    custom_msg="$pos"
+                else
+                    custom_msg="${custom_msg} ${pos}"
+                fi
+                ;;
+        esac
+    done
+
+    # Resolve baseline current version
+    local cur_ver
+    cur_ver=$(get_last_version)
+    cur_ver="${cur_ver#v}"; cur_ver="${cur_ver#V}"
+
+    # Determine bump level or exact version
+    local target_ver="" bump_level=""
+    if [ -n "$set_ver" ]; then
+        target_ver="$set_ver"
+        bump_level="custom"
+    elif [ -n "$bump_arg" ]; then
+        bump_level="$bump_arg"
+        target_ver=$(calculate_next_semver "$cur_ver" "$bump_level")
+    elif [ "$auto_eval" = "true" ]; then
+        # Evaluate from git history since last tag
+        local last_tag git_commits
+        last_tag=$(git tag -l "v*" "*.*.*" 2>/dev/null | grep -E '^v?[0-9]+\.[0-9]+' | sort -V 2>/dev/null | tail -n1 || true)
+        local range="HEAD"
+        [ -n "$last_tag" ] && range="${last_tag}..HEAD"
+        git_commits=$(git log "$range" --format="%s" 2>/dev/null || true)
+        if printf '%s\n' "$git_commits" | grep -qE 'BREAKING[ -]CHANGE:|^[a-z]+(\([^)]+\))?!:'; then
+            bump_level="major"
+        elif printf '%s\n' "$git_commits" | grep -qE '^feat(\([^)]+\))?:'; then
+            bump_level="minor"
+        elif printf '%s\n' "$git_commits" | grep -qE '^fix(\([^)]+\))?:'; then
+            bump_level="patch"
+        else
+            bump_level="${AI_SEMVER_DEFAULT_BUMP:-patch}"
+        fi
+        target_ver=$(calculate_next_semver "$cur_ver" "$bump_level")
+    fi
+
+    # Interactive prompt if no target version was specified and running on a tty
+    if [ -z "$target_ver" ]; then
+        if [ "$auto_yes" = "true" ] || [ ! -t 0 ]; then
+            bump_level="${AI_SEMVER_DEFAULT_BUMP:-patch}"
+            target_ver=$(calculate_next_semver "$cur_ver" "$bump_level")
+        else
+            # Interactive decision menu
+            local patch_ver minor_ver major_ver
+            patch_ver=$(calculate_next_semver "$cur_ver" "patch")
+            minor_ver=$(calculate_next_semver "$cur_ver" "minor")
+            major_ver=$(calculate_next_semver "$cur_ver" "major")
+
+            local v_files
+            v_files=$(detect_version_files)
+            local v_files_str
+            if [ -n "$v_files" ]; then
+                v_files_str=$(printf '%s' "$v_files" | tr '\n' ',' | sed 's/,$//' | sed 's/,/, /g')
+            else
+                v_files_str="(none — Git tag only)"
+            fi
+
+            echo ""
+            echo "🏷️  aisemver — Semantic Versioning Release"
+            echo "────────────────────────────────────────────"
+            echo "   Current version: $cur_ver"
+            echo "   Manifest files:  $v_files_str"
+            echo ""
+            echo "Select bump level:"
+            echo "  [1] Patch  ($cur_ver -> $patch_ver) [Default]"
+            echo "  [2] Minor  ($cur_ver -> $minor_ver)"
+            echo "  [3] Major  ($cur_ver -> $major_ver)"
+            echo "  [4] Custom version"
+            echo "  [5] Dry run preview"
+            echo "  [6] Cancel / Abort"
+            echo ""
+            printf "Choice [1-6, default: 1]: "
+
+            local choice=""
+            if ! read -r choice; then
+                echo ""; return 1
+            fi
+            choice=$(echo "$choice" | tr -d '[:space:]')
+            choice=${choice:-1}
+
+            case "$choice" in
+                1|patch|p|PATCH)
+                    bump_level="patch"
+                    target_ver="$patch_ver"
+                    ;;
+                2|minor|m|MINOR)
+                    bump_level="minor"
+                    target_ver="$minor_ver"
+                    ;;
+                3|major|M|MAJOR)
+                    bump_level="major"
+                    target_ver="$major_ver"
+                    ;;
+                4|custom|c)
+                    printf "Enter target version (e.g. 1.3.0): "
+                    read -r target_ver
+                    target_ver=$(echo "$target_ver" | tr -d '[:space:]')
+                    target_ver="${target_ver#v}"; target_ver="${target_ver#V}"
+                    bump_level="custom"
+                    if [ -z "$target_ver" ]; then
+                        echo "❌ Invalid version string"; return 1
+                    fi
+                    ;;
+                5|dry-run|preview)
+                    dry_run=true
+                    bump_level="patch"
+                    target_ver="$patch_ver"
+                    ;;
+                *)
+                    echo "❌ Operation cancelled"
+                    return 0
+                    ;;
+            esac
+        fi
+    fi
+
+    # Strip any leading 'v'
+    target_ver="${target_ver#v}"; target_ver="${target_ver#V}"
+
+    # Detect files to update
+    local v_files_list
+    v_files_list=$(detect_version_files)
+
+    local cl_file=""
+    if [ "$changelog_opt" = "true" ]; then
+        if ! cl_file=$(detect_changelog_file 2>/dev/null) || [ -z "$cl_file" ]; then
+            cl_file="${AI_SEMVER_CHANGELOG_FILE:-CHANGELOG.md}"
+        fi
+    fi
+
+    local tag_name="${AI_SEMVER_TAG_PREFIX:-v}${target_ver}"
+    local rel_commit_msg="${custom_msg:-chore(release): v${target_ver}}"
+
+    # Dry-run preview
+    if [ "$dry_run" = "true" ]; then
+        echo ""
+        echo "🔍 aisemver Dry-Run Preview (0 changes made)"
+        echo "────────────────────────────────────────────"
+        echo "   Current version: $cur_ver"
+        echo "   Target version:  $target_ver ($bump_level)"
+        echo "   Git tag:         $tag_name $([ "$tag_opt" = "true" ] && echo "(enabled)" || echo "(disabled)")"
+        echo "   Release commit:  $rel_commit_msg $([ "$commit_opt" = "true" ] && echo "(enabled)" || echo "(disabled)")"
+        echo "   Git staging:     $([ "$stage_opt" = "true" ] && echo "enabled" || echo "disabled")"
+        echo ""
+        echo "📝 Manifest files to be updated:"
+        if [ -n "$v_files_list" ]; then
+            while IFS= read -r vf; do
+                [ -n "$vf" ] && echo "   • $vf ($cur_ver -> $target_ver)"
+            done <<< "$v_files_list"
+        else
+            echo "   (none found — tag only)"
+        fi
+        echo ""
+        if [ -n "$cl_file" ]; then
+            echo "📄 Changelog target: $cl_file"
+            local preview_notes
+            preview_notes=$(generate_changelog_release_notes "$target_ver" "$custom_msg")
+            echo "   Preview notes:"
+            printf '%s\n' "$preview_notes" | sed 's/^/     /'
+        fi
+        echo ""
+        return 0
+    fi
+
+    # Perform updates
+    local -a updated_files=()
+    if [ -n "$v_files_list" ]; then
+        local vf
+        while IFS= read -r vf; do
+            [ -z "$vf" ] && continue
+            if update_version_in_file "$vf" "$cur_ver" "$target_ver"; then
+                updated_files+=("$vf")
+                [ "$verbose" = "true" ] && echo "   Updated: $vf"
+            fi
+        done <<< "$v_files_list"
+    fi
+
+    # Update changelog
+    if [ "$changelog_opt" = "true" ] && [ -n "$cl_file" ]; then
+        local rel_notes
+        rel_notes=$(generate_changelog_release_notes "$target_ver" "$custom_msg")
+        if update_changelog "$target_ver" "$rel_notes" "$stage_opt"; then
+            updated_files+=("$cl_file")
+            [ "$verbose" = "true" ] && echo "   Updated changelog: $cl_file"
+        fi
+    fi
+
+    # Git operations
+    local is_git=false
+    if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        is_git=true
+    fi
+
+    if [ "$is_git" = "true" ] && [ ${#updated_files[@]} -gt 0 ]; then
+        if [ "$stage_opt" = "true" ]; then
+            agit add "${updated_files[@]}" 2>/dev/null || git add "${updated_files[@]}" 2>/dev/null || true
+            [ "$verbose" = "true" ] && echo "   Staged ${#updated_files[@]} file(s)"
+        fi
+
+        if [ "$commit_opt" = "true" ]; then
+            if git commit -m "$rel_commit_msg" 2>/dev/null; then
+                [ "$verbose" = "true" ] && echo "   Created commit: $rel_commit_msg"
+                if [ "$tag_opt" = "true" ]; then
+                    if create_version_tag "$target_ver" "Release v${target_ver}"; then
+                        [ "$verbose" = "true" ] && echo "   Created Git tag: $tag_name"
+                    fi
+                fi
+            else
+                echo "⚠️  Failed to create release commit" >&2
+            fi
+        fi
+    fi
+
+    # Final summary display
+    echo ""
+    if [ "$commit_opt" = "true" ] && [ "$is_git" = "true" ]; then
+        echo "✅ SemVer Release Successful!"
+        echo "   Version:    $cur_ver -> $target_ver ($bump_level)"
+        if [ ${#updated_files[@]} -gt 0 ]; then
+            local files_str
+            files_str=$(printf '%s' "${updated_files[*]}" | tr ' ' ',' | sed 's/,/, /g')
+            echo "   Files:      $files_str"
+        fi
+        echo "   Commit:     $rel_commit_msg"
+        if [ "$tag_opt" = "true" ]; then
+            echo "   Git tag:    $tag_name"
+        fi
+    elif [ "$stage_opt" = "true" ] && [ "$is_git" = "true" ]; then
+        echo "✅ SemVer files updated and staged successfully!"
+        echo "   Version:    $cur_ver -> $target_ver ($bump_level)"
+        if [ ${#updated_files[@]} -gt 0 ]; then
+            local files_str
+            files_str=$(printf '%s' "${updated_files[*]}" | tr ' ' ',' | sed 's/,/, /g')
+            echo "   Files:      $files_str"
+        fi
+    else
+        echo "✅ SemVer files updated successfully (unstaged)!"
+        echo "   Version:    $cur_ver -> $target_ver ($bump_level)"
+        if [ ${#updated_files[@]} -gt 0 ]; then
+            local files_str
+            files_str=$(printf '%s' "${updated_files[*]}" | tr ' ' ',' | sed 's/,/, /g')
+            echo "   Files:      $files_str"
+        fi
+    fi
+    echo ""
+    return 0
+}
+
 
 

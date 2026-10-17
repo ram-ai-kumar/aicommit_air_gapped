@@ -77,6 +77,59 @@ The documentation is organized into stakeholder-focused categories:
 
 This structure provides role-appropriate documentation while maintaining comprehensive coverage of all project aspects.
 
+## 🚀 Commands & CLI Quick Reference
+
+The toolkit provides 12 executable command-line wrappers in `bin/` and corresponding shell functions:
+
+### Conventional Commits (`aicommit`)
+| Command | Mode | Description |
+| :--- | :--- | :--- |
+| `aicommit` | Interactive | Analyze staged changes and generate commit message interactively |
+| `aic` | Non-interactive | Fast all-in-one commit without SemVer |
+| `aicc` | Non-interactive | Fast atomic split commits by scope |
+| `aics` | Non-interactive | Fast all-in-one commit with SemVer bump & Git tag |
+| `aiccs` | Non-interactive | Fast atomic split commits with SemVer bump & Git tag |
+| `aicx` | Dry-run | Preview prompt and staged files (0 changes made) |
+| `aiccx` | Dry-run | Preview atomic split scope groups (0 changes made) |
+| `aicsx` | Dry-run | Preview single commit with SemVer plan (0 changes made) |
+| `aiccsx` | Dry-run | Preview atomic split commits with SemVer plan (0 changes made) |
+
+### Standalone Semantic Versioning (`ais` / `aisemver`)
+Evaluates and bumps version declarations across manifests and updates `CHANGELOG.md` without making AI commits of code changes:
+
+| Command | Mode | Description |
+| :--- | :--- | :--- |
+| `ais` | Interactive | Evaluate and bump SemVer interactively across manifests |
+| `aisemver` | Alias | Full synonym for `ais` |
+| `aisx` | Dry-run | Fast dry-run preview of manifest changes and changelog notes (0 changes made) |
+
+```bash
+# Common ais usage patterns:
+ais patch                       # Bump patch version across all manifests & update changelog
+ais minor -m "New features"     # Bump minor version with custom release note
+ais major --no-tag              # Bump major without creating a Git tag
+ais 2.5.0                       # Explicitly set version to 2.5.0 across all manifests
+ais auto -y                     # Non-interactive auto-bump based on conventional commits
+aisx                            # Preview release plan and changelog without modifying files
+```
+
+Supported manifest formats (monorepos & polyglot workspaces):
+- **Node / JS**: `package.json`, `package-lock.json`
+- **Deno / JSR**: `deno.json`, `deno.jsonc`, `jsr.json`
+- **Python**: `pyproject.toml`, `setup.py`, `setup.cfg`, `*version*.py`
+- **Rust**: `Cargo.toml`
+- **Go**: `*version*.go`
+- **Dart / Flutter**: `pubspec.yaml`
+- **Ruby**: `*.gemspec`, `version.rb`
+- **PHP**: `composer.json`
+- **Java / Kotlin / Gradle**: `pom.xml`, `build.gradle`, `build.gradle.kts`, `gradle.properties`
+- **.NET**: `*.csproj`, `*.fsproj`, `Directory.Build.props`
+- **Swift**: `Package.swift`, `project.pbxproj`
+- **Elixir**: `mix.exs`
+- **CMake**: `CMakeLists.txt`
+- **Helm**: `Chart.yaml`
+- **Generic**: `VERSION`, `.version`
+
 ## 🧪 Testing
 
 The project uses BATS (Bash Automated Testing System) as its single test framework:

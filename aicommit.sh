@@ -90,6 +90,11 @@ _aicommit_main() {
                 echo "  aicsx              Verbose dry-run preview with SemVer (0 changes made)"
                 echo "  aiccsx             Verbose dry-run split preview with SemVer (0 changes made)"
                 echo ""
+                echo "Standalone SemVer Commands (bump manifests & changelog only):"
+                echo "  ais                Bump semantic version across manifests & update CHANGELOG.md"
+                echo "  aisemver           Synonym for ais"
+                echo "  aisx               Dry-run inspection preview of SemVer bump (0 changes made)"
+                echo ""
                 echo "Interactive Session:"
                 echo "  aicommit           Fully interactive commit with scope and SemVer decisions"
                 echo ""
@@ -97,6 +102,10 @@ _aicommit_main() {
                 echo "  git add -p && aicommit        Interactive session: review message, scopes & SemVer"
                 echo "  aicommit --bump               Interactive session with SemVer bump pre-selected"
                 echo "  aicommit --bump=minor         Interactive session with explicit minor bump"
+                echo "  ais                           Evaluate and bump SemVer interactively across manifests"
+                echo "  ais minor                     Explicit minor bump (1.2.3 -> 1.3.0) & update changelog"
+                echo "  ais 2.0.0                     Explicitly set version to 2.0.0 across manifests"
+                echo "  aisx                          Dry-run inspection preview (0 changes made)"
                 echo "  aic                           Fast all-in-one commit (CI/CD / non-interactive)"
                 echo "  aicc                          Fast atomic split commits (CI/CD / non-interactive)"
                 echo "  aics                          Fast all-in-one commit + SemVer (CI/CD / non-interactive)"
@@ -413,9 +422,27 @@ aiccsx() {
     AIC_SHORTCUT=true aicommit --dry-run --verbose --bump --shortcut "${args[@]}"
 }
 
+# Standalone Semantic Versioning command — bump version across manifests & update changelog
+aisemver() {
+    [ -n "$ZSH_VERSION" ] && setopt localoptions localtraps shwordsplit nonomatch nomonitor nonotify typesetsilent
+    _aisemver_main "$@"
+}
+
+# Concise shortcut for aisemver
+ais() {
+    [ -n "$ZSH_VERSION" ] && setopt localoptions localtraps shwordsplit nonomatch nomonitor nonotify typesetsilent
+    _aisemver_main "$@"
+}
+
+# Dry-run inspection preview for aisemver (0 changes made)
+aisx() {
+    [ -n "$ZSH_VERSION" ] && setopt localoptions localtraps shwordsplit nonomatch nomonitor nonotify typesetsilent
+    _aisemver_main --dry-run "$@"
+}
+
 # Export functions for subshells if running in bash
 if [ -n "$BASH_VERSION" ]; then
-    export -f aicommit aic aicc aicx aiccx aics aiccs aicsx aiccsx 2>/dev/null || true
+    export -f aicommit aic aicc aicx aiccx aics aiccs aicsx aiccsx ais aisemver aisx 2>/dev/null || true
 fi
 
 # Run directly when executed as a script rather than sourced

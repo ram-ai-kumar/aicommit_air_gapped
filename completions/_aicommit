@@ -1,22 +1,47 @@
-#compdef aicommit aic aicc aicx aiccx aics aiccs aicsx aiccsx
+#compdef aicommit aic aicc aicx aiccx aics aiccs aicsx aiccsx ais aisemver aisx
 
-# Zsh completion for aicommit
+# Zsh completion for aicommit and aisemver
 _aicommit() {
-    _arguments \
-        '(-h --help)'{-h,--help}'[Show help message]' \
-        '(-y --yes)'{-y,--yes}'[Accept generated commit messages automatically]' \
-        '(-s --split)'{-s,--split}'[Split staged changes into atomic commits]' \
-        '(--no-split --all)'{--no-split,--all}'[Keep all changes in single commit]' \
-        '(-b --bump)'{-b,--bump}'[Evaluate and bump SemVer version]' \
-        '--bump=[Explicit SemVer bump level]:level:(major minor patch auto)' \
-        '--semver[Synonym for --bump]' \
-        '--semver=[Synonym for --bump=]:level:(major minor patch auto)' \
-        '--tag[Create Git tag for bumped version]' \
-        '--no-tag[Do not create Git tag]' \
-        '(-d --dry-run)'{-d,--dry-run}'[Build context without calling LLM]' \
-        '(-v --verbose)'{-v,--verbose}'[Show temp file paths and enhanced context]' \
-        '(-r --regenerate)'{-r,--regenerate}'[Re-run LLM on cached prompt]' \
-        '--clean-cache[Remove the .git/aicommit working directory and exit]'
+    case "$service" in
+        ais|aisemver|aisx)
+            _arguments \
+                '(-h --help)'{-h,--help}'[Show help message]' \
+                '(-d --dry-run)'{-d,--dry-run}'[Preview manifest updates and changelog without modifying]' \
+                '(-y --yes)'{-y,--yes}'[Apply updates non-interactively without prompting]' \
+                '--auto[Calculate next version automatically from conventional commits]' \
+                '--major[Bump major version]' \
+                '--minor[Bump minor version]' \
+                '--patch[Bump patch version]' \
+                '--set=[Explicitly set target version]:version:' \
+                '(-m --message)'{-m,--message}'[Custom release notes message for changelog]:message:' \
+                '--tag[Create annotated Git tag for bumped version]' \
+                '--no-tag[Do not create Git tag]' \
+                '--commit[Create release commit for bumped version]' \
+                '--no-commit[Do not create release commit]' \
+                '--stage[Stage bumped files with git add]' \
+                '--no-stage[Do not stage bumped files]' \
+                '--changelog[Update CHANGELOG.md]' \
+                '--no-changelog[Do not update CHANGELOG.md]' \
+                '*:bump level or target version:(major minor patch auto)'
+            ;;
+        *)
+            _arguments \
+                '(-h --help)'{-h,--help}'[Show help message]' \
+                '(-y --yes)'{-y,--yes}'[Accept generated commit messages automatically]' \
+                '(-s --split)'{-s,--split}'[Split staged changes into atomic commits]' \
+                '(--no-split --all)'{--no-split,--all}'[Keep all changes in single commit]' \
+                '(-b --bump)'{-b,--bump}'[Evaluate and bump SemVer version]' \
+                '--bump=[Explicit SemVer bump level]:level:(major minor patch auto)' \
+                '--semver[Synonym for --bump]' \
+                '--semver=[Synonym for --bump=]:level:(major minor patch auto)' \
+                '--tag[Create Git tag for bumped version]' \
+                '--no-tag[Do not create Git tag]' \
+                '(-d --dry-run)'{-d,--dry-run}'[Build context without calling LLM]' \
+                '(-v --verbose)'{-v,--verbose}'[Show temp file paths and enhanced context]' \
+                '(-r --regenerate)'{-r,--regenerate}'[Re-run LLM on cached prompt]' \
+                '--clean-cache[Remove the .git/aicommit working directory and exit]'
+            ;;
+    esac
 }
 
 _aicommit "$@"
