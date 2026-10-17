@@ -211,11 +211,12 @@ teardown() {
     [ "$output" = "" ]
 }
 
-@test "bin/ais executes standalone SemVer bump non-interactively with tag and commit" {
+@test "bin/ais executes standalone SemVer bump non-interactively with tag and commit without -y" {
     printf '{\n  "name": "ais-bin-pkg",\n  "version": "3.1.0"\n}\n' > package.json
     git add package.json
     git commit -m "chore: initial pkg"
-    run "$AICOMMIT_DIR/bin/ais" minor -y
+    # bin/ais works without -y (safe defaults for CI/CD pipelines)
+    run "$AICOMMIT_DIR/bin/ais" minor
     [ "$status" -eq 0 ]
     assert_output_contains "SemVer Release Successful!"
     assert_output_contains "v3.2.0"
@@ -229,5 +230,19 @@ teardown() {
     # Verify CHANGELOG.md updated
     [ -f CHANGELOG.md ]
     run grep '\[3.2.0\]' CHANGELOG.md
+    [ "$status" -eq 0 ]
+}
+
+@test "bin/aisemver executes standalone SemVer bump interactively with user prompt" {
+    printf '{\n  "name": "aisemver-bin-pkg",\n  "version": "1.0.0"\n}\n' > package.json
+    git add package.json
+    git commit -m "chore: initial pkg"
+    run "$AICOMMIT_DIR/bin/aisemver" <<< $'2\ny'
+    [ "$status" -eq 0 ]
+    assert_output_contains "aisemver — Semantic Versioning Release"
+    assert_output_contains "aisemver — Release Confirmation"
+    assert_output_contains "SemVer Release Successful!"
+    assert_output_contains "v1.0.1"
+    run grep '"version": "1.0.1"' package.json
     [ "$status" -eq 0 ]
 }

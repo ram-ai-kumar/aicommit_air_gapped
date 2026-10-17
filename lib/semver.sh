@@ -1201,7 +1201,7 @@ prompt_semver_decision() {
 
     cat <<EOF >&2
 
-🏷️  SemVer Release Decision:
+🏷️  aisemver — SemVer Release Decision:
    Current version: $cur_ver
    Manifest files:  $v_files_str
 
@@ -1610,7 +1610,16 @@ apply_semver_release() {
 _aisemver_main() {
     [ -n "$ZSH_VERSION" ] && setopt localoptions localtraps shwordsplit nonomatch nomonitor nonotify typesetsilent
 
-    local dry_run=false verbose=false auto_yes=false
+    local dry_run=false verbose=false
+    local auto_yes=false
+    if [ "${AI_SEMVER_MODE:-}" = "non_interactive" ]; then
+        auto_yes=true
+    elif [ "${AI_SEMVER_MODE:-}" = "interactive" ]; then
+        auto_yes=false
+    elif [[ "${0:-}" == *"bin/ais" ]] || [[ "${0:-}" == *"bin/aisx" ]]; then
+        auto_yes=true
+    fi
+
     local commit_opt=true tag_opt=true stage_opt=true changelog_opt=true
     local bump_arg="" set_ver="" auto_eval=false custom_msg=""
     local -a positional=()
@@ -1620,11 +1629,17 @@ _aisemver_main() {
             --help|-h)
                 echo "Usage: ais [OPTIONS] [major|minor|patch|auto|<version>] [\"release note\"]"
                 echo "       aisemver [OPTIONS] [major|minor|patch|auto|<version>] [\"release note\"]"
+                echo "       aisx [OPTIONS] [major|minor|patch|auto|<version>] [\"release note\"]"
                 echo ""
                 echo "Standalone Semantic Versioning (SemVer) bump & changelog engine."
                 echo "Updates version declarations across project manifests (Node, Deno, Python,"
                 echo "Rust, Go, Dart/Flutter, Java/Kotlin, .NET, Swift, Elixir, CMake, Helm) and"
                 echo "maintains CHANGELOG.md without requiring an AI commit of staged code changes."
+                echo ""
+                echo "CLI Tools:"
+                echo "  ais                Fast SemVer bump across manifests & changelog (safe defaults, CI/CD pipelines)"
+                echo "  aisx               Dry-run inspection preview of SemVer bump (safe defaults, CI/CD pipelines, 0 changes made)"
+                echo "  aisemver           Interactive SemVer bump (prompts user for bump level & release confirmation)"
                 echo ""
                 echo "Arguments:"
                 echo "  major|minor|patch  Explicit bump increment level"
@@ -1636,7 +1651,8 @@ _aisemver_main() {
                 echo "  --help, -h         Show this help message and exit"
                 echo "  --dry-run, -d      Preview version transition and changelog (0 changes written)"
                 echo "  --verbose, -v      Show detailed file discovery, pattern matching, and git actions"
-                echo "  --yes, -y          Non-interactive mode (accept all defaults without prompt)"
+                echo "  --yes, -y          Non-interactive mode (accept all safe defaults without prompt)"
+                echo "  --interactive, -i  Interactive mode (prompt user for choices)"
                 echo "  --bump=<level>     Explicit bump level (major, minor, patch, auto)"
                 echo "  --semver=<level>   Synonym for --bump"
                 echo "  --set=<version>    Set exact version string"
@@ -1651,24 +1667,18 @@ _aisemver_main() {
                 echo "  --changelog        Update project changelog (default: true)"
                 echo "  --no-changelog     Do not update changelog"
                 echo ""
-                echo "CLI Shims:"
-                echo "  ais                Fast standalone SemVer bump"
-                echo "  aisemver           Full command name (alias for ais)"
-                echo "  aisx               Fast dry-run preview (0 changes made)"
-                echo ""
                 echo "Examples:"
-                echo "  ais                           Interactive release decision menu"
-                echo "  ais patch                     Bump patch version across all manifests"
-                echo "  ais minor -m \"New auth API\"   Bump minor with custom release highlight"
-                echo "  ais major --no-tag            Bump major without creating a Git tag"
-                echo "  ais 2.0.0                     Explicitly set version to 2.0.0"
-                echo "  ais auto -y                   Non-interactive auto-bump based on git commits"
-                echo "  aisx                          Dry-run preview of files and changelog changes"
+                echo "  ais                           Non-interactive bump with safe defaults (patch/auto, for CI/CD)"
+                echo "  ais patch                     Fast bump patch version (for CI/CD pipelines)"
+                echo "  ais minor -m \"New auth API\"   Fast bump minor with custom release note (for CI/CD)"
+                echo "  aisx                          Fast non-interactive dry-run preview (0 changes written, for CI/CD)"
+                echo "  aisemver                      Fully interactive release session (prompts for level & confirm)"
                 return 0
                 ;;
             --dry-run|-d)        dry_run=true ;;
             --verbose|-v)        verbose=true ;;
             --yes|-y)            auto_yes=true ;;
+            --interactive|-i)    auto_yes=false ;;
             --auto)              auto_eval=true ;;
             --bump=*)            bump_arg="${1#--bump=}" ;;
             --semver=*)          bump_arg="${1#--semver=}" ;;
@@ -1724,8 +1734,8 @@ _aisemver_main() {
     elif [ -n "$bump_arg" ]; then
         bump_level="$bump_arg"
         target_ver=$(calculate_next_semver "$cur_ver" "$bump_level")
-    elif [ "$auto_eval" = "true" ]; then
-        # Evaluate from git history since last tag
+    elif [ "$auto_eval" = "true" ] || [ "$auto_yes" = "true" ]; then
+        # Evaluate from git history since last tag, or fallback to patch (safe defaults for CI/CD)
         local last_tag git_commits
         last_tag=$(git tag -l "v*" "*.*.*" 2>/dev/null | grep -E '^v?[0-9]+\.[0-9]+' | sort -V 2>/dev/null | tail -n1 || true)
         local range="HEAD"
@@ -1743,9 +1753,9 @@ _aisemver_main() {
         target_ver=$(calculate_next_semver "$cur_ver" "$bump_level")
     fi
 
-    # Interactive prompt if no target version was specified and running on a tty
+    # Interactive prompt for aisemver if no target version was specified
     if [ -z "$target_ver" ]; then
-        if [ "$auto_yes" = "true" ] || [ ! -t 0 ]; then
+        if [ "$auto_yes" = "true" ]; then
             bump_level="${AI_SEMVER_DEFAULT_BUMP:-patch}"
             target_ver=$(calculate_next_semver "$cur_ver" "$bump_level")
         else
@@ -1764,6 +1774,24 @@ _aisemver_main() {
                 v_files_str="(none — Git tag only)"
             fi
 
+            # Recommended bump evaluation
+            local last_tag git_commits rec_bump="patch" rec_reason="fix/maintenance"
+            last_tag=$(git tag -l "v*" "*.*.*" 2>/dev/null | grep -E '^v?[0-9]+\.[0-9]+' | sort -V 2>/dev/null | tail -n1 || true)
+            local range="HEAD"
+            [ -n "$last_tag" ] && range="${last_tag}..HEAD"
+            git_commits=$(git log "$range" --format="%s" 2>/dev/null || true)
+            if printf '%s\n' "$git_commits" | grep -qE 'BREAKING[ -]CHANGE:|^[a-z]+(\([^)]+\))?!:'; then
+                rec_bump="major"; rec_reason="breaking change"
+            elif printf '%s\n' "$git_commits" | grep -qE '^feat(\([^)]+\))?:'; then
+                rec_bump="minor"; rec_reason="new feature"
+            elif printf '%s\n' "$git_commits" | grep -qE '^fix(\([^)]+\))?:'; then
+                rec_bump="patch"; rec_reason="bug fix"
+            fi
+            local rec_next
+            rec_next=$(calculate_next_semver "$cur_ver" "$rec_bump")
+            local rec_upper
+            rec_upper=$(echo "$rec_bump" | tr '[:lower:]' '[:upper:]')
+
             echo ""
             echo "🏷️  aisemver — Semantic Versioning Release"
             echo "────────────────────────────────────────────"
@@ -1771,36 +1799,42 @@ _aisemver_main() {
             echo "   Manifest files:  $v_files_str"
             echo ""
             echo "Select bump level:"
-            echo "  [1] Patch  ($cur_ver -> $patch_ver) [Default]"
-            echo "  [2] Minor  ($cur_ver -> $minor_ver)"
-            echo "  [3] Major  ($cur_ver -> $major_ver)"
-            echo "  [4] Custom version"
-            echo "  [5] Dry run preview"
-            echo "  [6] Cancel / Abort"
+            echo "  [1] Recommended: $rec_upper ($cur_ver -> $rec_next, $rec_reason) [Default]"
+            echo "  [2] Patch  ($cur_ver -> $patch_ver)"
+            echo "  [3] Minor  ($cur_ver -> $minor_ver)"
+            echo "  [4] Major  ($cur_ver -> $major_ver)"
+            echo "  [5] Custom version"
+            echo "  [6] Dry run preview"
+            echo "  [7] Cancel / Abort"
             echo ""
-            printf "Choice [1-6, default: 1]: "
+            printf "Choice [1-7, default: 1]: "
 
             local choice=""
             if ! read -r choice; then
-                echo ""; return 1
+                echo "❌ No input available to select version bump (stdin closed)" >&2
+                return 1
             fi
             choice=$(echo "$choice" | tr -d '[:space:]')
             choice=${choice:-1}
 
             case "$choice" in
-                1|patch|p|PATCH)
+                1|rec|recommended)
+                    bump_level="$rec_bump"
+                    target_ver="$rec_next"
+                    ;;
+                2|patch|p|PATCH)
                     bump_level="patch"
                     target_ver="$patch_ver"
                     ;;
-                2|minor|m|MINOR)
+                3|minor|m|MINOR)
                     bump_level="minor"
                     target_ver="$minor_ver"
                     ;;
-                3|major|M|MAJOR)
+                4|major|M|MAJOR)
                     bump_level="major"
                     target_ver="$major_ver"
                     ;;
-                4|custom|c)
+                5|custom|c)
                     printf "Enter target version (e.g. 1.3.0): "
                     read -r target_ver
                     target_ver=$(echo "$target_ver" | tr -d '[:space:]')
@@ -1810,10 +1844,10 @@ _aisemver_main() {
                         echo "❌ Invalid version string"; return 1
                     fi
                     ;;
-                5|dry-run|preview)
+                6|dry-run|preview)
                     dry_run=true
-                    bump_level="patch"
-                    target_ver="$patch_ver"
+                    bump_level="$rec_bump"
+                    target_ver="$rec_next"
                     ;;
                 *)
                     echo "❌ Operation cancelled"
@@ -1869,6 +1903,52 @@ _aisemver_main() {
         fi
         echo ""
         return 0
+    fi
+
+    # Interactive confirmation prompt for aisemver
+    if [ "$dry_run" != "true" ] && [ "$auto_yes" != "true" ]; then
+        echo ""
+        echo "🏷️  aisemver — Release Confirmation"
+        echo "────────────────────────────────────"
+        echo "   Current: $cur_ver"
+        echo "   Bump:    $bump_level"
+        echo "   Target:  $target_ver"
+        echo "   Git tag: $tag_name $([ "$tag_opt" = "true" ] && echo "(enabled)" || echo "(disabled)")"
+        echo "   Commit:  $rel_commit_msg $([ "$commit_opt" = "true" ] && echo "(enabled)" || echo "(disabled)")"
+        if [ -n "$v_files_list" ]; then
+            local vf_str
+            vf_str=$(printf '%s' "$v_files_list" | tr '\n' ',' | sed 's/,$//' | sed 's/,/, /g')
+            echo "   Files:   $vf_str"
+        else
+            echo "   Files:   (none — tag only)"
+        fi
+        [ -n "$cl_file" ] && echo "   Changelog: $cl_file"
+        echo ""
+        printf "Proceed with SemVer release? ([Y]/n/e to edit message): "
+
+        local confirm_resp=""
+        if ! read -r confirm_resp; then
+            echo "❌ No input available for release confirmation (stdin closed)" >&2
+            return 1
+        fi
+        confirm_resp=$(echo "$confirm_resp" | tr -d '[:space:]')
+        case "$confirm_resp" in
+            y|Y|yes|YES|"")
+                # Confirmed
+                ;;
+            e|E|edit)
+                printf "Enter release commit message [default: %s]: " "$rel_commit_msg"
+                local edit_msg=""
+                if read -r edit_msg && [ -n "$edit_msg" ]; then
+                    rel_commit_msg="$edit_msg"
+                    custom_msg="$edit_msg"
+                fi
+                ;;
+            *)
+                echo "❌ SemVer release cancelled."
+                return 0
+                ;;
+        esac
     fi
 
     # Perform updates

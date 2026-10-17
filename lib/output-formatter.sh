@@ -224,9 +224,9 @@ display_commit_confirmation() {
     if [ "$bump_opt" = "true" ]; then
         echo "Use this message with SemVer? ([Y]/n/e to edit, c to change level, a for AI)"
     elif [ -n "$rec_summary" ]; then
-        echo "Use this message? ([Y]/n/e to edit, s for SemVer bump [$rec_summary], a for AI)"
+        echo "Use this message? ([Y]/n/e to edit, s for aisemver [$rec_summary], a for AI)"
     else
-        echo "Use this message? ([Y]/n/e to edit, s for SemVer, a for AI)"
+        echo "Use this message? ([Y]/n/e to edit, s for aisemver, a for AI)"
     fi
 }
 

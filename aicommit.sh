@@ -91,9 +91,9 @@ _aicommit_main() {
                 echo "  aiccsx             Verbose dry-run split preview with SemVer (0 changes made)"
                 echo ""
                 echo "Standalone SemVer Commands (bump manifests & changelog only):"
-                echo "  ais                Bump semantic version across manifests & update CHANGELOG.md"
-                echo "  aisemver           Synonym for ais"
-                echo "  aisx               Dry-run inspection preview of SemVer bump (0 changes made)"
+                echo "  ais                Fast SemVer bump across manifests & changelog (safe defaults, CI/CD pipelines)"
+                echo "  aisx               Dry-run inspection preview of SemVer bump (safe defaults, CI/CD pipelines, 0 changes made)"
+                echo "  aisemver           Interactive SemVer bump (prompts user for bump level & release confirmation)"
                 echo ""
                 echo "Interactive Session:"
                 echo "  aicommit           Fully interactive commit with scope and SemVer decisions"
@@ -102,10 +102,11 @@ _aicommit_main() {
                 echo "  git add -p && aicommit        Interactive session: review message, scopes & SemVer"
                 echo "  aicommit --bump               Interactive session with SemVer bump pre-selected"
                 echo "  aicommit --bump=minor         Interactive session with explicit minor bump"
-                echo "  ais                           Evaluate and bump SemVer interactively across manifests"
-                echo "  ais minor                     Explicit minor bump (1.2.3 -> 1.3.0) & update changelog"
-                echo "  ais 2.0.0                     Explicitly set version to 2.0.0 across manifests"
-                echo "  aisx                          Dry-run inspection preview (0 changes made)"
+                echo "  ais                           Fast non-interactive bump with safe defaults (for CI/CD pipelines)"
+                echo "  ais patch                     Fast bump patch version across manifests (for CI/CD)"
+                echo "  ais 2.0.0                     Explicitly set version to 2.0.0 across manifests (for CI/CD)"
+                echo "  aisx                          Fast non-interactive dry-run preview (0 changes written, for CI/CD)"
+                echo "  aisemver                      Fully interactive release session (prompts for level & confirm)"
                 echo "  aic                           Fast all-in-one commit (CI/CD / non-interactive)"
                 echo "  aicc                          Fast atomic split commits (CI/CD / non-interactive)"
                 echo "  aics                          Fast all-in-one commit + SemVer (CI/CD / non-interactive)"
@@ -121,8 +122,8 @@ _aicommit_main() {
             --no-split|--all) split_mode=false; explicit_all=true ;;
             --bump|-b)       bump_opt=true ;;
             --bump=*)        bump_opt=true; bump_level="${1#--bump=}" ;;
-            --semver)        bump_opt=true ;;
-            --semver=*)      bump_opt=true; bump_level="${1#--semver=}" ;;
+            --semver|--aisemver) bump_opt=true ;;
+            --semver=*|--aisemver=*) bump_opt=true; bump_level="${1#*=}" ;;
             --tag)           tag_opt=true ;;
             --no-tag)        tag_opt=false ;;
             --shortcut)      is_aic=true ;;
@@ -422,22 +423,22 @@ aiccsx() {
     AIC_SHORTCUT=true aicommit --dry-run --verbose --bump --shortcut "${args[@]}"
 }
 
-# Standalone Semantic Versioning command — bump version across manifests & update changelog
+# Standalone Semantic Versioning command — bump version across manifests & update changelog (interactive)
 aisemver() {
     [ -n "$ZSH_VERSION" ] && setopt localoptions localtraps shwordsplit nonomatch nomonitor nonotify typesetsilent
-    _aisemver_main "$@"
+    AI_SEMVER_MODE="interactive" _aisemver_main "$@"
 }
 
-# Concise shortcut for aisemver
+# Concise shortcut for standalone SemVer bump — safe defaults, non-interactive (CI/CD friendly)
 ais() {
     [ -n "$ZSH_VERSION" ] && setopt localoptions localtraps shwordsplit nonomatch nomonitor nonotify typesetsilent
-    _aisemver_main "$@"
+    AI_SEMVER_MODE="non_interactive" _aisemver_main --yes "$@"
 }
 
-# Dry-run inspection preview for aisemver (0 changes made)
+# Dry-run inspection preview for standalone SemVer — safe defaults, non-interactive (CI/CD friendly, 0 changes made)
 aisx() {
     [ -n "$ZSH_VERSION" ] && setopt localoptions localtraps shwordsplit nonomatch nomonitor nonotify typesetsilent
-    _aisemver_main --dry-run "$@"
+    AI_SEMVER_MODE="non_interactive" _aisemver_main --dry-run --yes "$@"
 }
 
 # Export functions for subshells if running in bash

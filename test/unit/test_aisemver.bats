@@ -400,3 +400,149 @@ EOF
     run grep '"version": "1.0.0"' node_modules/external-dep/package.json
     [ "$status" -eq 0 ]
 }
+
+# ─── CI/CD Non-Interactive Defaults vs Interactive Prompting ──────────────────
+
+@test "ais works without -y and without prompt using safe defaults in CI/CD pipelines" {
+    printf '{\n  "name": "cicd-pkg",\n  "version": "1.0.0"\n}\n' > package.json
+    git add package.json
+    git commit -m "chore: initial"
+    git tag -a v1.0.0 -m "Release v1.0.0"
+
+    echo "fix bug" > fix.js
+    git add fix.js
+    git commit -m "fix(core): resolve null pointer exception"
+
+    # ais runs without -y and without prompt (non-interactive default for CI/CD)
+    run ais
+    [ "$status" -eq 0 ]
+    assert_output_contains "SemVer Release Successful!"
+    assert_output_contains "v1.0.1"
+    run grep '"version": "1.0.1"' package.json
+    [ "$status" -eq 0 ]
+    run git tag -l
+    assert_output_contains "v1.0.1"
+}
+
+@test "ais patch works without -y and without prompt in CI/CD pipelines" {
+    printf '{\n  "name": "cicd-patch-pkg",\n  "version": "2.1.0"\n}\n' > package.json
+    git add package.json
+    git commit -m "chore: initial"
+
+    run ais patch
+    [ "$status" -eq 0 ]
+    assert_output_contains "SemVer Release Successful!"
+    assert_output_contains "v2.1.1"
+    run grep '"version": "2.1.1"' package.json
+    [ "$status" -eq 0 ]
+}
+
+@test "aisx works without -y and without prompt using safe defaults in CI/CD pipelines" {
+    printf '{\n  "name": "cicd-aisx-pkg",\n  "version": "1.5.0"\n}\n' > package.json
+    git add package.json
+    git commit -m "chore: initial"
+
+    run aisx
+    [ "$status" -eq 0 ]
+    assert_output_contains "aisemver Dry-Run Preview"
+    assert_output_contains "1.5.0 -> 1.5.1"
+
+    # Verify no files were modified or tagged
+    run git status --porcelain
+    [ "$output" = "" ]
+    run git tag -l
+    [ "$output" = "" ]
+}
+
+@test "aisemver prompts user for bump level and confirmation before release" {
+    printf '{\n  "name": "interactive-aisemver-pkg",\n  "version": "1.0.0"\n}\n' > package.json
+    git add package.json
+    git commit -m "chore: initial"
+
+    # Provide option 2 (patch) and confirmation 'y' via stdin
+    run aisemver <<< $'2\ny'
+    [ "$status" -eq 0 ]
+    assert_output_contains "aisemver — Semantic Versioning Release"
+    assert_output_contains "aisemver — Release Confirmation"
+    assert_output_contains "Proceed with SemVer release?"
+    assert_output_contains "SemVer Release Successful!"
+    assert_output_contains "v1.0.1"
+
+    run grep '"version": "1.0.1"' package.json
+    [ "$status" -eq 0 ]
+    run git tag -l
+    assert_output_contains "v1.0.1"
+}
+
+@test "aisemver prompts user and aborts cleanly when user cancels confirmation" {
+    printf '{\n  "name": "interactive-abort-pkg",\n  "version": "1.0.0"\n}\n' > package.json
+    git add package.json
+    git commit -m "chore: initial"
+
+    # Provide option 2 (patch) then 'n' to abort confirmation
+    run aisemver <<< $'2\nn'
+    [ "$status" -eq 0 ]
+    assert_output_contains "SemVer release cancelled"
+
+    # Verify no changes were made
+    run git status --porcelain
+    [ "$output" = "" ]
+    run git tag -l
+    [ "$output" = "" ]
+}
+
+@test "aisemver with -y bypasses prompts and applies release" {
+    printf '{\n  "name": "aisemver-yes-pkg",\n  "version": "1.0.0"\n}\n' > package.json
+    git add package.json
+    git commit -m "chore: initial"
+
+    run aisemver patch -y
+    [ "$status" -eq 0 ]
+    assert_output_contains "SemVer Release Successful!"
+    assert_output_contains "v1.0.1"
+    run grep '"version": "1.0.1"' package.json
+    [ "$status" -eq 0 ]
+}
+
+@test "aicommit interactive session supports typing aisemver at confirmation prompt" {
+    printf '{\n  "name": "aicommit-aisemver-pkg",\n  "version": "1.0.0"\n}\n' > package.json
+    git add package.json
+    git commit -m "initial" >/dev/null 2>&1
+
+    echo "console.log('test');" > app.js
+    git add app.js
+
+    export AI_MODEL="test-model"
+    mock_ollama_api 'feat: add brand new test feature'
+
+    # Send 'aisemver' to invoke SemVer decision, then '1' for recommended bump (minor)
+    run aicommit <<< $'aisemver\n1'
+    [ "$status" -eq 0 ]
+    assert_output_contains "Committed!"
+    assert_output_contains "Tagged release: v1.1.0"
+    run grep '"version": "1.1.0"' package.json
+    [ "$status" -eq 0 ]
+    [ "$(git tag -l 'v1.1.0')" = "v1.1.0" ]
+}
+
+@test "aicommit interactive session supports typing ais at confirmation prompt" {
+    printf '{\n  "name": "aicommit-ais-pkg",\n  "version": "1.0.0"\n}\n' > package.json
+    git add package.json
+    git commit -m "initial" >/dev/null 2>&1
+
+    echo "console.log('test ais');" > app.js
+    git add app.js
+
+    export AI_MODEL="test-model"
+    mock_ollama_api 'fix: fix broken test bug'
+
+    # Send 'ais' to invoke SemVer decision, then '1' for recommended bump (patch)
+    run aicommit <<< $'ais\n1'
+    [ "$status" -eq 0 ]
+    assert_output_contains "Committed!"
+    assert_output_contains "Tagged release: v1.0.1"
+    run grep '"version": "1.0.1"' package.json
+    [ "$status" -eq 0 ]
+    [ "$(git tag -l 'v1.0.1')" = "v1.0.1" ]
+}
+

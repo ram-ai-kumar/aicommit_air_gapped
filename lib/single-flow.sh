@@ -83,19 +83,19 @@ _aicommit_apply_choice() {
             fi
             _CHOICE_RESP="y"
             ;;
-        s=*|b=*)
+        s=*|b=*|semver=*|aisemver=*|ais=*)
             local inline_level="${resp#*=}"
             _CHOICE_BUMP_OPT=true
             _aicommit_semver_plan "$cur_ver" "$inline_level" true
             _CHOICE_RESP="y"
             ;;
-        s\ *|b\ *)
+        s\ *|b\ *|semver\ *|aisemver\ *|ais\ *)
             local inline_level="${resp#* }"
             _CHOICE_BUMP_OPT=true
             _aicommit_semver_plan "$cur_ver" "$inline_level" true
             _CHOICE_RESP="y"
             ;;
-        s|S|b|B|semver|bump|c|C)
+        s|S|b|B|semver|bump|c|C|aisemver|ais)
             local chosen_decision
             chosen_decision=$(prompt_semver_decision "$commit_msg" "$cur_ver" "$bump_level")
             if [ "$chosen_decision" = "skip" ]; then
