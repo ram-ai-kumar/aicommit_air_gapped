@@ -540,6 +540,25 @@ refactor(validation): optimize error counting
     [ -s "${d}/NUMSTAT" ]
 }
 
+@test "build_ai_context handles multiple stat-only and sensitive files without awk newline error" {
+    echo "SECRET_KEY=123" > .env.docker.example
+    echo "ANOTHER_KEY=456" > .env.local
+    echo '{"name":"pkg","version":"1.0.0"}' > package-lock.json
+    echo "console.log(1);" > app.js
+    git add .env.docker.example .env.local package-lock.json app.js
+
+    run build_ai_context "$(git diff --staged)" "$(git diff --staged --name-only)" "$(git diff --staged --numstat)"
+    [ "$status" -eq 0 ]
+    refute_output_contains "awk: newline in string"
+
+    local d
+    d=$(get_aicommit_tmp_dir)
+    [ -f "${d}/CHANGES_CONTEXT" ]
+    run cat "${d}/CHANGES_CONTEXT"
+    assert_output_contains ".env.docker.example"
+    assert_output_contains "package-lock.json"
+}
+
 @test "build_facts detects added and deleted files" {
     local diff_text
     diff_text=$'diff --git a/new.txt b/new.txt\nnew file mode 100644\n+content\ndiff --git a/gone.txt b/gone.txt\ndeleted file mode 100644\n-old\n'

@@ -688,11 +688,19 @@ build_ai_context() {
     changes_summary=$(printf '%s' "$changes" | filter_and_truncate_diff "$tier2_cap" "$tier3_cap")
 
     # Stat summary for tier-1 files (lets the model infer dependency/asset
-    # changes without reading their diffs) — one awk join, not per-file grep
+    # changes without reading their diffs) — one awk join, not per-file grep.
+    # Note: stat_only_files travels via file, not -v: BSD awk rejects literal newlines in -v.
     local stat_only_stat=""
     if [ -n "$stat_only_files" ]; then
-        stat_only_stat=$(printf '%s\n' "$numstat_data" | awk -v list="$stat_only_files" '
-            BEGIN { n = split(list, f, "\n"); for (i = 1; i <= n; i++) keep[f[i]] = 1 }
+        printf '%s\n' "$stat_only_files" > "${out_dir}/STAT_ONLY_NAMES"
+        stat_only_stat=$(printf '%s\n' "$numstat_data" | awk -v list_file="${out_dir}/STAT_ONLY_NAMES" '
+            BEGIN {
+                FS = "\t"
+                while ((getline f < list_file) > 0) {
+                    if (f != "") keep[f] = 1
+                }
+                close(list_file)
+            }
             $3 in keep { printf "%s | +%s -%s\n", $3, $1, $2 }
         ')
     fi
