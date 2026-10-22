@@ -624,6 +624,56 @@ collect_scope_candidates() {
     } | awk 'NF' | sort -u | head -20
 }
 
+# Verify staged files do not contain unintentional 0-byte source files.
+# Logs events to macOS Unified Logging System.
+check_staged_empty_files() {
+    local staged_files="$1"
+    if [ "${ALLOW_EMPTY_FILES:-false}" = "true" ] || [ "${AICOMMIT_ALLOW_EMPTY:-false}" = "true" ] || [ "${SKIP_EMPTY_CHECK:-false}" = "true" ]; then
+        if command -v logger &>/dev/null; then
+            logger -t "aicommit" -p user.notice "[aicommit] ALLOW_EMPTY_FILES active; skipping 0-byte file check" 2>/dev/null || true
+        fi
+        return 0
+    fi
+
+    local allow_file=".allow-empty-files"
+    local empty_files=()
+    local f fsize base
+
+    while IFS= read -r f; do
+        [ -z "$f" ] && continue
+        [ -f "$f" ] || continue
+
+        fsize=$(wc -c < "$f" 2>/dev/null || stat -f%z "$f" 2>/dev/null || echo 1)
+        if [ "$fsize" -eq 0 ]; then
+            base=$(basename "$f")
+            case "$base" in
+                __init__.py|.gitkeep|.keep|.gitignore|.env.example) continue ;;
+            esac
+
+            if [ -f "$allow_file" ] && grep -Fxq "$f" "$allow_file" 2>/dev/null; then
+                continue
+            fi
+
+            if [[ "$f" =~ \.(py|ts|tsx|js|jsx|rb|go|rs|json|ya?ml)$ ]]; then
+                empty_files+=("$f")
+            fi
+        fi
+    done <<< "$staged_files"
+
+    if [ ${#empty_files[@]} -gt 0 ]; then
+        if command -v logger &>/dev/null; then
+            logger -t "aicommit" -p user.err "[aicommit] ABORTED COMMIT: Staged empty file(s): ${empty_files[*]}" 2>/dev/null || true
+        fi
+        display_error "Staged empty (0-byte) source files detected"             "$(printf '• %s
+' "${empty_files[@]}")
+
+Aborting commit to protect against corrupted code.
+To override: ALLOW_EMPTY_FILES=true aic"
+        return 1
+    fi
+    return 0
+}
+
 # Build AI context — writes run-dir files consumed by the prompt pipeline.
 # Args: $1=diff, $2=staged_files, $3=numstat_data, $4=logical_scope (optional),
 #       $5=out_dir (optional, default run dir), $6=tier2 cap, $7=tier3 cap
@@ -657,6 +707,11 @@ build_ai_context() {
 
     if [ "$total_files" -eq 0 ] 2>/dev/null || ! [ "$total_files" -gt 0 ] 2>/dev/null; then
         display_error "No staged files found"
+        return 1
+    fi
+
+    # Check for empty (0-byte) source files to prevent committing wiped code
+    if ! check_staged_empty_files "$staged_files"; then
         return 1
     fi
 
