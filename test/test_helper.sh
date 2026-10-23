@@ -58,6 +58,7 @@ setup_test_env() {
 
     # Disable live AI grouping in tests so unit tests test deterministic heuristics
     export AI_DISABLE_GROUPING="true"
+    export AI_ENABLE_LLM_GROUPING="false"
     export AI_REFLECTION_PROMPT_FILE="$AICOMMIT_DIR/templates/reflection-prompt.txt"
 
     # Global mock for timeout to respect internal mocked functions

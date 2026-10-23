@@ -1,0 +1,231 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "version": "1.0.0",
+  "frameworks": {
+    "rails": {
+      "name": "Ruby on Rails",
+      "detect_signals": ["Gemfile", "config/routes.rb", "app/controllers", "app/models"],
+      "file_extensions": [".rb", ".erb", ".haml", ".rake"],
+      "feature_extractors": [
+        { "role": "controller", "pattern": "app/controllers/(.+)_controller\\.rb$", "capture": 1, "plural": true },
+        { "role": "model", "pattern": "app/models/(.+)\\.rb$", "capture": 1, "plural": false },
+        { "role": "view", "pattern": "app/views/([^/]+)/.*", "capture": 1, "plural": true },
+        { "role": "helper", "pattern": "app/helpers/(.+)_helper\\.rb$", "capture": 1, "plural": true },
+        { "role": "spec_model", "pattern": "spec/models/(.+)_spec\\.rb$", "capture": 1, "plural": false },
+        { "role": "spec_controller", "pattern": "spec/controllers/(.+)_controller_spec\\.rb$", "capture": 1, "plural": true },
+        { "role": "spec_request", "pattern": "spec/requests/(.+)_spec\\.rb$", "capture": 1, "plural": true },
+        { "role": "spec_system", "pattern": "spec/system/(.+)_spec\\.rb$", "capture": 1, "plural": true },
+        { "role": "mailer", "pattern": "app/mailers/(.+)_mailer\\.rb$", "capture": 1, "plural": false },
+        { "role": "job", "pattern": "app/jobs/(.+)_job\\.rb$", "capture": 1, "plural": false },
+        { "role": "service", "pattern": "app/services/(.+)_service\\.rb$", "capture": 1, "plural": false },
+        { "role": "serializer", "pattern": "app/serializers/(.+)_serializer\\.rb$", "capture": 1, "plural": false },
+        { "role": "migration", "pattern": "db/migrate/[0-9]+_(?:create_|add_.*_to_|change_)?(.+)\\.rb$", "capture": 1, "plural": true }
+      ],
+      "companion_locations": [
+        "app/models/{feature}.rb",
+        "app/controllers/{feature_plural}_controller.rb",
+        "app/views/{feature_plural}/*",
+        "app/helpers/{feature_plural}_helper.rb",
+        "app/helpers/{feature}_helper.rb",
+        "app/mailers/{feature}_mailer.rb",
+        "app/jobs/{feature}_job.rb",
+        "app/services/{feature}_service.rb",
+        "app/services/{feature}.rb",
+        "app/serializers/{feature}_serializer.rb",
+        "db/migrate/*{feature}*.rb",
+        "db/migrate/*{feature_plural}*.rb",
+        "spec/models/{feature}_spec.rb",
+        "spec/controllers/{feature_plural}_controller_spec.rb",
+        "spec/requests/{feature_plural}_spec.rb",
+        "spec/system/{feature_plural}_spec.rb",
+        "spec/mailers/{feature}_mailer_spec.rb",
+        "spec/factories/{feature_plural}.rb",
+        "spec/factories/{feature}.rb",
+        "test/models/{feature}_test.rb",
+        "test/controllers/{feature_plural}_controller_test.rb"
+      ],
+      "shared_registry_files": [
+        {
+          "path": "config/routes.rb",
+          "hunk_match_patterns": [
+            "resources[ \\t]+:([a-z0-9_]+)",
+            "resource[ \\t]+:([a-z0-9_]+)",
+            "namespace[ \\t]+:([a-z0-9_]+)",
+            "/([a-z0-9_]+)"
+          ]
+        },
+        {
+          "path": "Gemfile",
+          "hunk_match_patterns": [
+            "gem[ \\t]+[\"']([a-z0-9_\\-]+)[\"']"
+          ]
+        }
+      ]
+    },
+    "fastapi": {
+      "name": "Python FastAPI",
+      "detect_signals": ["requirements.txt", "pyproject.toml", "main.py"],
+      "file_extensions": [".py", ".pyi"],
+      "feature_extractors": [
+        { "role": "router", "pattern": "(?:app/api/routers/|routers/|app/routers/|app/api/v[0-9]+/endpoints/)(.+)\\.py$", "capture": 1, "plural": true },
+        { "role": "service", "pattern": "(?:app/services/|services/)(.+?)(?:_service)?\\.py$", "capture": 1, "plural": false },
+        { "role": "model", "pattern": "(?:app/models/|models/)(.+?)(?:_model)?\\.py$", "capture": 1, "plural": false },
+        { "role": "schema", "pattern": "(?:app/schemas/|schemas/)(.+?)(?:_schema)?\\.py$", "capture": 1, "plural": false },
+        { "role": "crud", "pattern": "(?:app/crud/|crud/)(?:crud_)?(.+)\\.py$", "capture": 1, "plural": false },
+        { "role": "test", "pattern": "tests/(?:.*/)?test_(.+)\\.py$", "capture": 1, "plural": false },
+        { "role": "migration", "pattern": "alembic/versions/[0-9a-f]+_(.+)\\.py$", "capture": 1, "plural": false }
+      ],
+      "companion_locations": [
+        "app/api/routers/{feature}.py",
+        "app/api/routers/{feature_plural}.py",
+        "routers/{feature}.py",
+        "routers/{feature_plural}.py",
+        "app/services/{feature}_service.py",
+        "app/services/{feature}.py",
+        "services/{feature}_service.py",
+        "app/schemas/{feature}.py",
+        "app/schemas/{feature}_schema.py",
+        "schemas/{feature}.py",
+        "app/models/{feature}.py",
+        "app/models/{feature}_model.py",
+        "models/{feature}.py",
+        "app/crud/crud_{feature}.py",
+        "crud/{feature}.py",
+        "tests/test_{feature}.py",
+        "tests/test_{feature_plural}.py",
+        "tests/api/test_{feature}.py",
+        "alembic/versions/*{feature}*.py"
+      ],
+      "shared_registry_files": [
+        {
+          "path": "app/main.py",
+          "hunk_match_patterns": [
+            "include_router\\(([a-z0-9_]+)",
+            "from[ \\t]+\\.[a-z0-9_.]+[ \\t]+import[ \\t]+([a-z0-9_]+)"
+          ]
+        }
+      ]
+    },
+    "flutter": {
+      "name": "Flutter / Dart",
+      "detect_signals": ["pubspec.yaml", "analysis_options.yaml"],
+      "file_extensions": [".dart"],
+      "feature_extractors": [
+        { "role": "bloc", "pattern": "lib/blocs/(.+?)(?:_bloc|_state|_event)?\\.dart$", "capture": 1, "plural": false },
+        { "role": "cubit", "pattern": "lib/cubits/(.+?)(?:_cubit|_state)?\\.dart$", "capture": 1, "plural": false },
+        { "role": "screen", "pattern": "lib/screens/(.+?)(?:_screen|_page|_view)?\\.dart$", "capture": 1, "plural": false },
+        { "role": "widget", "pattern": "lib/widgets/(.+?)(?:_widget)?\\.dart$", "capture": 1, "plural": false },
+        { "role": "repository", "pattern": "lib/repositories/(.+?)(?:_repository)?(?:_impl)?\\.dart$", "capture": 1, "plural": false },
+        { "role": "service", "pattern": "lib/services/(.+?)(?:_service)?\\.dart$", "capture": 1, "plural": false },
+        { "role": "model", "pattern": "lib/models/(.+?)(?:_model)?(?:\\.g|\\.freezed)?\\.dart$", "capture": 1, "plural": false },
+        { "role": "test", "pattern": "test/(?:.*/)?(.+?)_test\\.dart$", "capture": 1, "plural": false }
+      ],
+      "companion_locations": [
+        "lib/blocs/{feature}_bloc.dart",
+        "lib/blocs/{feature}_event.dart",
+        "lib/blocs/{feature}_state.dart",
+        "lib/cubits/{feature}_cubit.dart",
+        "lib/cubits/{feature}_state.dart",
+        "lib/screens/{feature}_screen.dart",
+        "lib/pages/{feature}_page.dart",
+        "lib/widgets/{feature}_*.dart",
+        "lib/repositories/{feature}_repository.dart",
+        "lib/repositories/{feature}_repository_impl.dart",
+        "lib/services/{feature}_service.dart",
+        "lib/models/{feature}_model.dart",
+        "lib/models/{feature}.dart",
+        "lib/models/{feature}.g.dart",
+        "lib/models/{feature}.freezed.dart",
+        "lib/models/{feature}.mocks.dart",
+        "test/blocs/{feature}_bloc_test.dart",
+        "test/screens/{feature}_screen_test.dart",
+        "test/models/{feature}_test.dart"
+      ],
+      "shared_registry_files": [
+        {
+          "path": "pubspec.yaml",
+          "hunk_match_patterns": [
+            "([a-z0-9_]+):"
+          ]
+        }
+      ]
+    },
+    "rust_tauri": {
+      "name": "Rust / Tauri",
+      "detect_signals": ["Cargo.toml", "src-tauri/tauri.conf.json"],
+      "file_extensions": [".rs", ".toml"],
+      "feature_extractors": [
+        { "role": "command", "pattern": "src-tauri/src/commands/(.+)\\.rs$", "capture": 1, "plural": false },
+        { "role": "module", "pattern": "src/(.+?)(?:/mod|/lib)?\\.rs$", "capture": 1, "plural": false },
+        { "role": "test", "pattern": "tests/(.+?)(?:_test)?\\.rs$", "capture": 1, "plural": false }
+      ],
+      "companion_locations": [
+        "src/{feature}.rs",
+        "src/{feature}/mod.rs",
+        "src-tauri/src/commands/{feature}.rs",
+        "tests/{feature}_test.rs",
+        "tests/{feature}.rs"
+      ],
+      "shared_registry_files": [
+        {
+          "path": "Cargo.toml",
+          "hunk_match_patterns": [
+            "([a-z0-9_\\-]+)[ \\t]*="
+          ]
+        }
+      ]
+    },
+    "go": {
+      "name": "Go",
+      "detect_signals": ["go.mod"],
+      "file_extensions": [".go"],
+      "feature_extractors": [
+        { "role": "handler", "pattern": "internal/handlers/(.+?)(?:_handler)?\\.go$", "capture": 1, "plural": false },
+        { "role": "service", "pattern": "internal/service/(.+?)(?:_service)?\\.go$", "capture": 1, "plural": false },
+        { "role": "repository", "pattern": "internal/repository/(.+?)(?:_repository)?\\.go$", "capture": 1, "plural": false },
+        { "role": "pkg", "pattern": "pkg/(.+?)/(?:.+)\\.go$", "capture": 1, "plural": false },
+        { "role": "test", "pattern": "(.+?)_test\\.go$", "capture": 1, "plural": false }
+      ],
+      "companion_locations": [
+        "internal/handlers/{feature}.go",
+        "internal/service/{feature}.go",
+        "internal/repository/{feature}.go",
+        "internal/*/{feature}_test.go",
+        "pkg/{feature}/*_test.go"
+      ],
+      "shared_registry_files": [
+        {
+          "path": "go.mod",
+          "hunk_match_patterns": [
+            "([a-z0-9_\\./\\-]+)[ \\t]+v[0-9]"
+          ]
+        }
+      ]
+    },
+    "react_ts": {
+      "name": "React / TypeScript",
+      "detect_signals": ["package.json", "tsconfig.json"],
+      "file_extensions": [".tsx", ".ts", ".jsx", ".js"],
+      "feature_extractors": [
+        { "role": "feature_module", "pattern": "src/features/([^/]+)/.*", "capture": 1, "plural": false },
+        { "role": "component", "pattern": "src/components/(.+?)(?:/.*|\\.tsx)$", "capture": 1, "plural": false },
+        { "role": "hook", "pattern": "src/hooks/use(.+)\\.ts$", "capture": 1, "plural": false },
+        { "role": "service", "pattern": "src/services/(.+?)(?:Api|Service)?\\.ts$", "capture": 1, "plural": false }
+      ],
+      "companion_locations": [
+        "src/features/{feature}/**/*",
+        "src/components/{feature}/**/*",
+        "src/hooks/use{feature}.ts",
+        "src/services/{feature}Api.ts"
+      ],
+      "shared_registry_files": [
+        {
+          "path": "package.json",
+          "hunk_match_patterns": [
+            "\"([@a-z0-9_\\-/]+)\":[ \\t]*\""
+          ]
+        }
+      ]
+    }
+  }
+}

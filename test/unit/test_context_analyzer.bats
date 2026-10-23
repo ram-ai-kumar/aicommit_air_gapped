@@ -293,6 +293,7 @@ EOF
     export AI_MODEL="test-model"
     mock_ollama_api '{"groups":[{"name":"auth flow","type":"feat","files":["app.js"]}]}'
     run name_groups_with_ai "1\tapp.js" "app.js"
+    export AI_ENABLE_LLM_GROUPING="false"
     [ "$status" -eq 0 ]
     assert_output_contains "auth flow"
 }
@@ -327,3 +328,82 @@ EOF
     grep -q "src/a.js" "${state_dir}/COCHANGE"
     awk -F'\t' '$1=="src/a.js" && $2=="src/b.js" && $3>=2 {found=1} END{exit !found}' "${state_dir}/COCHANGE"
 }
+
+# ─── Multi-Language Vertical Feature Slices & Anti-Horizontal Clustering ─────
+
+@test "vertical slice: Rails feature groups model, controller, view, spec, migration and routes" {
+    local files
+    files="$(printf 'app/models/subscription.rb\napp/controllers/subscriptions_controller.rb\napp/views/subscriptions/index.html.erb\nspec/models/subscription_spec.rb\ndb/migrate/20261023_create_subscriptions.rb\nconfig/routes.rb')"
+    local diff
+    diff="$(printf 'diff --git a/config/routes.rb b/config/routes.rb\n--- a/config/routes.rb\n+++ b/config/routes.rb\n@@ -10,1 +10,2 @@\n+  resources :subscriptions\n')"
+    run group_staged_files_logically "$files" "$diff"
+    [ "$status" -eq 0 ]
+    [ $(printf '%s\n' "$output" | count_lines) -eq 1 ]
+    assert_output_contains $'subscription\t'
+    assert_output_contains "app/models/subscription.rb"
+    assert_output_contains "app/controllers/subscriptions_controller.rb"
+    assert_output_contains "app/views/subscriptions/index.html.erb"
+    assert_output_contains "spec/models/subscription_spec.rb"
+    assert_output_contains "db/migrate/20261023_create_subscriptions.rb"
+    assert_output_contains "config/routes.rb"
+}
+
+@test "vertical slice: anti-horizontal test guard keeps multiple features disjoint without grouping tests together" {
+    local files
+    files="$(printf 'app/models/subscription.rb\napp/controllers/subscriptions_controller.rb\nspec/models/subscription_spec.rb\napp/models/user.rb\napp/controllers/users_controller.rb\nspec/models/user_spec.rb')"
+    run group_staged_files_logically "$files"
+    [ "$status" -eq 0 ]
+    [ $(printf '%s\n' "$output" | count_lines) -eq 2 ]
+    # Ensure specs stayed with their respective feature slice
+    assert_output_contains $'subscription\tapp/controllers/subscriptions_controller.rb\tapp/models/subscription.rb\tspec/models/subscription_spec.rb'
+    assert_output_contains $'user\tapp/controllers/users_controller.rb\tapp/models/user.rb\tspec/models/user_spec.rb'
+}
+
+@test "vertical slice: Flutter Dart clusters BLoC triad, screen, generated code, and test into feature group" {
+    local files
+    files="$(printf 'lib/features/auth/bloc/auth_bloc.dart\nlib/features/auth/bloc/auth_state.dart\nlib/features/auth/bloc/auth_event.dart\nlib/features/auth/screens/auth_screen.dart\nlib/features/auth/models/auth.g.dart\ntest/features/auth/auth_bloc_test.dart')"
+    run group_staged_files_logically "$files"
+    [ "$status" -eq 0 ]
+    [ $(printf '%s\n' "$output" | count_lines) -eq 1 ]
+    assert_output_contains $'auth\t'
+    assert_output_contains "auth_bloc.dart"
+    assert_output_contains "auth_screen.dart"
+    assert_output_contains "auth.g.dart"
+    assert_output_contains "auth_bloc_test.dart"
+}
+
+@test "vertical slice: FastAPI clusters router, schema, service, test, and router registration" {
+    local files
+    files="$(printf 'app/routers/items.py\napp/schemas/item.py\napp/services/item_service.py\ntests/test_items.py\napp/main.py')"
+    local diff
+    diff="$(printf 'diff --git a/app/main.py b/app/main.py\n--- a/app/main.py\n+++ b/app/main.py\n@@ -5,1 +5,2 @@\n+app.include_router(items.router, prefix=\"/items\")\n')"
+    run group_staged_files_logically "$files" "$diff"
+    [ "$status" -eq 0 ]
+    [ $(printf '%s\n' "$output" | count_lines) -eq 1 ]
+    assert_output_contains $'item\t'
+    assert_output_contains "app/routers/items.py"
+    assert_output_contains "app/schemas/item.py"
+    assert_output_contains "tests/test_items.py"
+    assert_output_contains "app/main.py"
+}
+
+@test "vertical slice: Rust and Tauri clusters command and integration test" {
+    local files
+    files="$(printf 'src-tauri/src/commands/download.rs\nsrc-tauri/tests/download_test.rs')"
+    run group_staged_files_logically "$files"
+    [ "$status" -eq 0 ]
+    [ $(printf '%s\n' "$output" | count_lines) -eq 1 ]
+    assert_output_contains $'download\tsrc-tauri/src/commands/download.rs\tsrc-tauri/tests/download_test.rs'
+}
+
+@test "vertical slice: Go clusters package files, repositories and handler tests" {
+    local files
+    files="$(printf 'internal/order/handler.go\ninternal/order/service.go\ninternal/order/repository.go\ninternal/order/handler_test.go')"
+    run group_staged_files_logically "$files"
+    [ "$status" -eq 0 ]
+    [ $(printf '%s\n' "$output" | count_lines) -eq 1 ]
+    assert_output_contains $'order\t'
+    assert_output_contains "internal/order/handler.go"
+    assert_output_contains "internal/order/handler_test.go"
+}
+

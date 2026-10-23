@@ -174,12 +174,14 @@ cluster_staged_files_deterministic() {
     local staged_files="$1"
     local diff_file="${2:-}"
     local cochange_file="${3:-}"
+    local framework_patterns_file="${AI_FRAMEWORK_PATTERNS_FILE:-$AICOMMIT_DIR/config/framework-patterns.json}"
 
     printf '%s\n' "$staged_files" | LC_ALL=C sort | awk \
         -v diff_file="$diff_file" \
         -v cochange_file="$cochange_file" \
         -v cochange_min="${AI_COCHANGE_MIN:-2}" \
-        -v sym_max="${AI_SYMBOL_MAX_FILES:-4}" '
+        -v sym_max="${AI_SYMBOL_MAX_FILES:-4}" \
+        -v patterns_file="$framework_patterns_file" '
     function basename_of(p,   b) { b = p; sub(/^.*\//, "", b); return b }
     function dirname_of(p,   d) { d = p; return (sub(/\/[^\/]*$/, "", d) ? d : ".") }
     function dir2(p,   d, a, n) {
@@ -188,17 +190,45 @@ cluster_staged_files_deterministic() {
         n = split(d, a, "/")
         return (n >= 2) ? a[1] "/" a[2] : a[1]
     }
-    function norm_stem(b,   s) {
-        s = b
-        sub(/\.[^.\/]+$/, "", s)                                    # extension
-        sub(/^(test|tests)_/, "", s)                               # test_ prefix
-        sub(/(_test|_spec|\.test|\.spec|test_|spec_|-test|-spec)$/, "", s)
+    function norm_stem(path,    b, s) {
+        b = basename_of(path)
+        if (b ~ /^use[A-Z]/) sub(/^use/, "", b)
+        s = tolower(b)
+        sub(/\.(g|freezed|mocks|part)\.dart$/, "", s)
+        sub(/\.(module|spec|test)\.(css|scss|sass|less|ts|tsx|js|jsx)$/, "", s)
+        sub(/\.html\.(erb|haml|slim)$/, "", s)
+        sub(/\.[^.\/]+$/, "", s)
+        sub(/^[0-9]+_/, "", s)
+        sub(/^(test|tests|spec|specs)_/, "", s)
+        sub(/(_test|_spec|\.test|\.spec|test_|spec_|-test|-spec|_tests|_specs)$/, "", s)
+        sub(/^(create|add|update|remove|drop|alter|modify)_/, "", s)
+        sub(/^use_/, "", s)
+        sub(/(_controller|_controllers|_service|_services|_helper|_helpers|_serializer|_serializers|_router|_routers|_model|_models|_schema|_schemas|_handler|_handlers|_client|_clients|_adapter|_adapters|_factory|_factories|_validator|_validators|_worker|_workers|_job|_jobs|_dto|_types|_screen|_screens|_widget|_widgets|_page|_pages|_view|_views|_bloc|_cubit|_event|_state|_notifier|_provider|_repository|_repositories|_datasource|_datasources)$/, "", s)
+        if (s ~ /ies$/) sub(/ies$/, "y", s)
+        else if (s ~ /(sses|shes|ches|xes|zes)$/) sub(/es$/, "", s)
+        else if (s ~ /[^s]s$/ && length(s) > 3) sub(/s$/, "", s)
         return s
     }
     function is_test_path(p) {
         return p ~ /(^|\/)(tests?|spec|__tests__|testdata)\// || \
                p ~ /(_test|_spec|\.test|\.spec)\.[^.\/]+$/ || \
                p ~ /\.bats$/ || p ~ /(^|\/)test_[^\/]+$/
+    }
+    function feature_of(path,    p, d, s, n, a, seg) {
+        s = norm_stem(path)
+        if (s ~ /^(index|show|edit|new|form|create|update|list|detail|details|page|view|mod|lib|main|app|handler|handlers|service|services|repository|repositories|client|clients|worker|workers|model|models|schema|schemas|types|dto|dtos|adapter|adapters|dao|controller|controllers)$/) {
+            d = dirname_of(path); n = split(d, a, "/")
+            if (n >= 1) {
+                seg = tolower(a[n])
+                if (seg ~ /ies$/) sub(/ies$/, "y", seg)
+                else if (seg ~ /[^s]s$/ && length(seg) > 3) sub(/s$/, "", seg)
+                if (seg !~ /^(views?|screens?|widgets?|pages?|components?|app|lib|src|internal|pkg)$/) s = seg
+            }
+        }
+        return s
+    }
+    function is_domain_keyword(s) {
+        return (s != "" && s !~ /^(test|tests|spec|specs|model|models|controller|controllers|view|views|helper|helpers|service|services|migration|migrations|route|routes|config|common|core|base|main|index|app|lib|src|doc|docs|readme|changelog|license|fixture|fixtures|script|scripts|bin|tool|tools|handler|handlers|repository|repositories|schema|schemas|types|dto|dtos|adapter|adapters|dao|client|clients|worker|workers)$/ && length(s) >= 3)
     }
     function find(x,   r, p2) {
         r = x
@@ -207,6 +237,7 @@ cluster_staged_files_deterministic() {
         return r
     }
     function union(a, b,   ra, rb) {
+        if (a == "" || b == "" || a == b) return
         ra = find(a); rb = find(b)
         if (ra != rb) { parent[rb] = ra; touched[a] = 1; touched[b] = 1 }
     }
@@ -230,14 +261,44 @@ cluster_staged_files_deterministic() {
                     hunk[cur] = hunk[cur] substr(line, 1, 300) "\n"
                     if (length(hunk[cur]) > 60000) hunk[cur] = substr(hunk[cur], 1, 60000)
                     sym = ""
-                    if (match(line, /(^|[^A-Za-z0-9_])(def |function |func |class |interface |struct |enum )[A-Za-z_][A-Za-z0-9_]*/)) {
-                        sym = substr(line, RSTART, RLENGTH); sub(/.* /, "", sym)
+                    if (match(line, /(^|[^A-Za-z0-9_])(def |function |func |fn |class |interface |struct |enum |module |trait |mixin )[A-Za-z_][A-Za-z0-9_]*/)) {
+                        sym = substr(line, RSTART, RLENGTH); sub(/.*[ \t]/, "", sym)
+                    } else if (match(line, /(^|[^A-Za-z0-9_])(sealed|abstract|base|final)[ \t]+class[ \t]+[A-Za-z_][A-Za-z0-9_]*/)) {
+                        sym = substr(line, RSTART, RLENGTH); sub(/.*[ \t]/, "", sym)
                     } else if (match(line, /[A-Za-z_][A-Za-z0-9_]*[ \t]*\([^;{}]*\)[ \t]*\{/)) {
                         s = substr(line, RSTART, RLENGTH)
                         match(s, /^[A-Za-z_][A-Za-z0-9_]*/)
                         sym = substr(s, RSTART, RLENGTH)
                     }
-                    if (sym != "" && length(sym) >= 5) defs[cur SUBSEP sym] = 1
+                    if (sym != "" && length(sym) >= 5 && sym !~ /^(constructor|toString|hashCode|build|dispose|initState|render|setup|teardown)$/) {
+                        defs[cur SUBSEP sym] = 1
+                    }
+                    if (match(line, /(resources|resource|create_table)[ \t]+:([A-Za-z0-9_]+)/)) {
+                        res = substr(line, RSTART, RLENGTH)
+                        sub(/.*:/, "", res)
+                        res = tolower(res)
+                        if (res ~ /ies$/) sub(/ies$/, "y", res)
+                        else if (res ~ /[^s]s$/ && length(res) > 3) sub(/s$/, "", res)
+                        if (length(res) >= 3) diff_features[cur SUBSEP res] = 1
+                    }
+                    if (match(line, /(prefix|path|route|get|post|put|delete|patch)[ \t]*(\([ \t]*|=[ \t]*)[^A-Za-z0-9_]*\/?[A-Za-z0-9_-]+/)) {
+                        res = substr(line, RSTART, RLENGTH)
+                        sub(/^.*(\/|[= \t(])[^A-Za-z0-9_]*/, "", res)
+                        sub(/[^A-Za-z0-9_].*$/, "", res)
+                        res = tolower(res)
+                        if (res ~ /ies$/) sub(/ies$/, "y", res)
+                        else if (res ~ /[^s]s$/ && length(res) > 3) sub(/s$/, "", res)
+                        if (length(res) >= 3) diff_features[cur SUBSEP res] = 1
+                    }
+                    if (match(line, /include_router\([ \t]*([A-Za-z0-9_]+)/)) {
+                        res = substr(line, RSTART, RLENGTH)
+                        sub(/^.*include_router\([ \t]*/, "", res)
+                        sub(/\..*$/, "", res)
+                        res = tolower(res)
+                        if (res ~ /ies$/) sub(/ies$/, "y", res)
+                        else if (res ~ /[^s]s$/ && length(res) > 3) sub(/s$/, "", res)
+                        if (length(res) >= 3) diff_features[cur SUBSEP res] = 1
+                    }
                 }
             }
             close(diff_file)
@@ -255,25 +316,58 @@ cluster_staged_files_deterministic() {
     }
     { files[++nf] = $0; parent[$0] = $0 }
     END {
-        # Edge 1 — test↔subject stem pairing
+        # Cycle 1 — Primary Domain Feature Seed Formation & Companion Pairing
         for (i = 1; i <= nf; i++) {
             f = files[i]
-            st = norm_stem(basename_of(f))
-            stem_count[st]++
-            stem_test[st] += (is_test_path(f) ? 1 : 0)
-            stem_list[st] = stem_list[st] SUBSEP f
-            if (!(st in stem_first)) stem_first[st] = f
+            st = feature_of(f)
+            if (st != "" && is_domain_keyword(st)) {
+                feat_count[st]++
+                feat_list[st] = (st in feat_list ? feat_list[st] SUBSEP f : f)
+                if (!(st in feat_first)) feat_first[st] = f
+            }
+            base_st = norm_stem(basename_of(f))
+            stem_count[base_st]++
+            stem_test[base_st] += (is_test_path(f) ? 1 : 0)
+            stem_list[base_st] = (base_st in stem_list ? stem_list[base_st] SUBSEP f : f)
+            if (!(base_st in stem_first)) stem_first[base_st] = f
+        }
+        for (st in feat_count) {
+            if (feat_count[st] >= 2) {
+                m = split(feat_list[st], sf, SUBSEP)
+                for (j = 1; j <= m; j++) {
+                    if (sf[j] != "") union(feat_first[st], sf[j])
+                }
+            }
         }
         for (st in stem_count) {
             if (stem_count[st] >= 2 && stem_test[st] >= 1 && stem_test[st] < stem_count[st]) {
                 m = split(stem_list[st], sf, SUBSEP)
-                for (j = 1; j <= m; j++) union(stem_first[st], sf[j])
+                for (j = 1; j <= m; j++) {
+                    if (sf[j] != "") union(stem_first[st], sf[j])
+                }
             }
         }
 
-        # Edge 2 — shared symbol: a definition changed in file A appears in
-        # the hunks of file B (word-boundary match, not bare substring).
-        # Guarded: skip symbols appearing in more than sym_max files.
+        # Cycle 1.5 — Dart & companion code-gen pairing (.g.dart, .freezed.dart, .mocks.dart)
+        for (i = 1; i <= nf; i++) {
+            f = files[i]
+            if (f ~ /\.(g|freezed|mocks|part)\.dart$/) {
+                base_f = f
+                sub(/\.(g|freezed|mocks|part)\.dart$/, ".dart", base_f)
+                if (base_f in parent) union(base_f, f)
+            }
+        }
+
+        # Cycle 2A — Shared Files & Migrations diff-keyword matching
+        for (k in diff_features) {
+            split(k, a, SUBSEP)
+            df_file = a[1]; df_feat = a[2]
+            if ((df_file in parent) && (df_feat in feat_first)) {
+                union(feat_first[df_feat], df_file)
+            }
+        }
+
+        # Cycle 2B — Shared Symbol: a definition changed in file A appears in file B
         for (sym in definer) {
             nd = split(definer[sym], dl, " ")
             if (nd > sym_max) continue
@@ -295,16 +389,13 @@ cluster_staged_files_deterministic() {
             }
         }
 
-        # Edge 3 — co-change history (only when both files are staged)
+        # Cycle 3 — Co-change history (only when both files are staged)
         for (k in cpair) {
             split(k, a, SUBSEP)
             if ((a[1] in parent) && (a[2] in parent)) union(a[1], a[2])
         }
 
-        # Edge 3.5 — relocation families: renames sharing an old->new parent-dir
-        # transform signature bind together (e.g. docs/delivery/* -> docs/platform/*).
-        # Deletes+adds with a basename unique on both sides are treated as one
-        # relocation git could not pair below the similarity threshold.
+        # Cycle 3.5 — Relocation families: renames sharing parent-dir signature
         for (i = 1; i <= nf; i++) {
             f = files[i]
             if (f in old_path) {
@@ -325,18 +416,19 @@ cluster_staged_files_deterministic() {
             else sig_first[pair_sig[f]] = f
         }
 
-        # Edge 4 — same leaf directory, weak: only attaches files still
-        # isolated after the strong edges. Existing components are preferred
-        # attachment targets; leftover same-dir singletons bind together.
+        # Cycle 4 — Same leaf directory (with strict ANTI-HORIZONTAL TEST GUARD)
         for (i = 1; i <= nf; i++) {
             f = files[i]
-            if (f in touched) dir_rep[dirname_of(f)] = find(f)
+            if (f in touched) {
+                if (!is_test_path(f)) dir_rep[dirname_of(f)] = find(f)
+            }
         }
         for (i = 1; i <= nf; i++) {
             f = files[i]
             if (f in touched) continue
+            if (is_test_path(f)) continue
             d = dirname_of(f)
-            if (d == ".") continue
+            if (d == "." || d ~ /(^|\/)(tests?|spec|__tests__|testdata)($|\/)/) continue
             if (d in dir_rep) union(dir_rep[d], f)
             else dir_rep[d] = f
         }
@@ -415,10 +507,10 @@ grouping_state_key() {
         uh_hash=$(shasum -a 256 "${run_dir}/USER_HINTS" 2>/dev/null | awk '{print $1}')
     fi
     printf '%s\ngprompt:%s\nhints:%s\nalgo:%s\nbackend:%s\nmodel:%s\nseed:%s\nnum_ctx:%s\nnp:%s\nmaxpaths:%s\ndisable:%s\nenable:%s\nnso:%s\n' \
-        "$ssk" "$gprompt_hash" "$uh_hash" "${AICOMMIT_GROUPING_ALGO_VERSION:-v3}" "${AI_BACKEND:-ollama}" \
+        "$ssk" "$gprompt_hash" "$uh_hash" "${AICOMMIT_GROUPING_ALGO_VERSION:-v4}" "${AI_BACKEND:-ollama}" \
         "${AI_MODEL:-$DEFAULT_AI_MODEL}" "${AI_SEED:-42}" "${AI_NUM_CTX:-16384}" \
         "${AI_GROUPING_NUM_PREDICT:-2048}" "${AI_GROUPING_MAX_PATHS:-1000}" \
-        "${AI_DISABLE_GROUPING:-false}" "${AI_ENABLE_LLM_GROUPING:-true}" \
+        "${AI_DISABLE_GROUPING:-false}" "${AI_ENABLE_LLM_GROUPING:-false}" \
         "${AI_NO_STRUCTURED_OUTPUT:-false}" | shasum -a 256 | awk '{print $1}'
 }
 
@@ -437,32 +529,94 @@ _write_grouping_source() {
 _name_component_lines() {
     local comp_lines="$1"
     local line first_file name base n used_names=" " files_tab=""
-    local common_dir leaf
+    local common_dir leaf dom_feat
     while IFS= read -r line; do
         [ -z "$line" ] && continue
         _aicommit_split_tab_line "$line"
         [ ${#_aicommit_split_files[@]} -eq 0 ] && continue
-        first_file=$(printf '%s' "$line" | cut -f2)
-        name=$(infer_logical_file_context "$first_file")
-        # Generic bucket name + members sharing a deeper common leaf dir →
-        # name the component by that leaf instead of "docs-12".
-        case "$name" in
-            docs|config|scripts|core)
-                if [ ${#_aicommit_split_files[@]} -ge 2 ]; then
-                    common_dir=$(printf '%s\n' "${_aicommit_split_files[@]}" | awk -F/ '
-                        { n = split($0, a, "/")
-                          if (NR == 1) { m = n - 1; for (i = 1; i <= m; i++) c[i] = a[i] }
-                          else { for (i = 1; i <= m && i < n; i++) if (a[i] != c[i]) m = i - 1 }
-                        }
-                        END { s = ""; for (i = 1; i <= m; i++) s = (s == "" ? c[i] : s "/" c[i]); print s }')
-                    leaf="${common_dir##*/}"
-                    case "$leaf" in
-                        docs|doc|src|lib|app|test|tests|"") ;;
-                        *) [ "$common_dir" != "." ] && name="$leaf" ;;
-                    esac
-                fi
-                ;;
-        esac
+
+        # Identify dominant domain feature keyword among member files if present
+        dom_feat=$(printf '%s\n' "${_aicommit_split_files[@]}" | awk '
+        function basename_of(p,   b) { b = p; sub(/^.*\//, "", b); return b }
+        function dirname_of(p,   d) { d = p; return (sub(/\/[^\/]*$/, "", d) ? d : ".") }
+        function norm_stem(path,    b, s) {
+            b = basename_of(path)
+            if (b ~ /^use[A-Z]/) sub(/^use/, "", b)
+            s = tolower(b)
+            sub(/\.(g|freezed|mocks|part)\.dart$/, "", s)
+            sub(/\.(module|spec|test)\.(css|scss|sass|less|ts|tsx|js|jsx)$/, "", s)
+            sub(/\.html\.(erb|haml|slim)$/, "", s)
+            sub(/\.[^.\/]+$/, "", s)
+            sub(/^[0-9]+_/, "", s)
+            sub(/^(test|tests|spec|specs)_/, "", s)
+            sub(/(_test|_spec|\.test|\.spec|test_|spec_|-test|-spec|_tests|_specs)$/, "", s)
+            sub(/^(create|add|update|remove|drop|alter|modify)_/, "", s)
+            sub(/^use_/, "", s)
+            sub(/(_controller|_controllers|_service|_services|_helper|_helpers|_serializer|_serializers|_router|_routers|_model|_models|_schema|_schemas|_handler|_handlers|_client|_clients|_adapter|_adapters|_factory|_factories|_validator|_validators|_worker|_workers|_job|_jobs|_dto|_types|_screen|_screens|_widget|_widgets|_page|_pages|_view|_views|_bloc|_cubit|_event|_state|_notifier|_provider|_repository|_repositories|_datasource|_datasources)$/, "", s)
+            if (s ~ /ies$/) sub(/ies$/, "y", s)
+            else if (s ~ /(sses|shes|ches|xes|zes)$/) sub(/es$/, "", s)
+            else if (s ~ /[^s]s$/ && length(s) > 3) sub(/s$/, "", s)
+            return s
+        }
+        function feature_of(path,    p, d, s, n, a, seg) {
+            s = norm_stem(path)
+            if (s ~ /^(index|show|edit|new|form|create|update|list|detail|details|page|view|mod|lib|main|app|handler|handlers|service|services|repository|repositories|client|clients|worker|workers|model|models|schema|schemas|types|dto|dtos|adapter|adapters|dao|controller|controllers)$/) {
+                d = dirname_of(path); n = split(d, a, "/")
+                if (n >= 1) {
+                    seg = tolower(a[n])
+                    if (seg ~ /ies$/) sub(/ies$/, "y", seg)
+                    else if (seg ~ /[^s]s$/ && length(seg) > 3) sub(/s$/, "", seg)
+                    if (seg !~ /^(views?|screens?|widgets?|pages?|components?|app|lib|src|internal|pkg)$/) s = seg
+                }
+            }
+            return s
+        }
+        function is_domain_keyword(s) {
+            return (s != "" && s !~ /^(test|tests|spec|specs|model|models|controller|controllers|view|views|helper|helpers|service|services|migration|migrations|route|routes|config|common|core|base|main|index|app|lib|src|doc|docs|readme|changelog|license|fixture|fixtures|script|scripts|bin|tool|tools|handler|handlers|repository|repositories|schema|schemas|types|dto|dtos|adapter|adapters|dao|client|clients|worker|workers)$/ && length(s) >= 3)
+        }
+        {
+            st = feature_of($0)
+            if (is_domain_keyword(st)) counts[st]++
+            total_files++
+        }
+        END {
+            max_c = 0; best = ""; num_distinct = 0
+            for (st in counts) {
+                num_distinct++
+                if (counts[st] > max_c) { max_c = counts[st]; best = st }
+            }
+            if (max_c >= 2) {
+                print best
+            } else if (max_c == 1 && num_distinct == 1 && total_files >= 2) {
+                print best
+            }
+        }')
+
+        if [ -n "$dom_feat" ]; then
+            name="$dom_feat"
+        else
+            first_file=$(printf '%s' "$line" | cut -f2)
+            name=$(infer_logical_file_context "$first_file")
+            # Generic bucket name + members sharing a deeper common leaf dir →
+            # name the component by that leaf instead of "docs-12".
+            case "$name" in
+                docs|config|scripts|core)
+                    if [ ${#_aicommit_split_files[@]} -ge 2 ]; then
+                        common_dir=$(printf '%s\n' "${_aicommit_split_files[@]}" | awk -F/ '
+                            { n = split($0, a, "/")
+                              if (NR == 1) { m = n - 1; for (i = 1; i <= m; i++) c[i] = a[i] }
+                              else { for (i = 1; i <= m && i < n; i++) if (a[i] != c[i]) m = i - 1 }
+                            }
+                            END { s = ""; for (i = 1; i <= m; i++) s = (s == "" ? c[i] : s "/" c[i]); print s }')
+                        leaf="${common_dir##*/}"
+                        case "$leaf" in
+                            docs|doc|src|lib|app|test|tests|"") ;;
+                            *) [ "$common_dir" != "." ] && name="$leaf" ;;
+                        esac
+                    fi
+                    ;;
+            esac
+        fi
         [ -z "$name" ] && name="core"
         base="$name"; n=1
         while [[ "$used_names" == *" ${name} "* ]]; do
@@ -805,7 +959,7 @@ group_staged_files_logically() {
     comp_count=$(printf '%s\n' "$comp_lines" | awk 'NF' | wc -l | tr -d ' ')
 
     if [ "$comp_count" -gt 1 ]; then
-        if [ "${AI_ENABLE_LLM_GROUPING:-true}" != "true" ] || [ "${AI_DISABLE_GROUPING:-false}" = "true" ]; then
+        if [ "${AI_ENABLE_LLM_GROUPING:-false}" != "true" ] || [ "${AI_DISABLE_GROUPING:-false}" = "true" ]; then
             provenance="fallback:disabled"
         elif ! validate_backend_prerequisites >/dev/null 2>&1; then
             provenance="fallback:no-backend"
