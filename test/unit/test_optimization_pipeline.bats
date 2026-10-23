@@ -71,6 +71,7 @@ teardown() {
     git commit -q -m "chore: initial commit"
 
     export AI_DISABLE_GROUPING="false"
+    export AI_ENABLE_LLM_GROUPING="true"
     echo "c1" >> app.js
     echo "c2" >> helper.py
     git add app.js helper.py
@@ -97,6 +98,7 @@ teardown() {
 
 @test "aicc with 2 groups makes at most 1 naming call, 1 batch call and 0 semver calls" {
     export AI_DISABLE_GROUPING="false"
+    export AI_ENABLE_LLM_GROUPING="true"
     echo "part1" >> app.js
     echo "part2" >> helper.py
     git add app.js helper.py
