@@ -19,12 +19,15 @@
         { "role": "job", "pattern": "app/jobs/(.+)_job\\.rb$", "capture": 1, "plural": false },
         { "role": "service", "pattern": "app/services/(.+)_service\\.rb$", "capture": 1, "plural": false },
         { "role": "serializer", "pattern": "app/serializers/(.+)_serializer\\.rb$", "capture": 1, "plural": false },
+        { "role": "route", "pattern": "config/routes/(.+)\\.rb$", "capture": 1, "plural": true },
         { "role": "migration", "pattern": "db/migrate/[0-9]+_(?:create_|add_.*_to_|change_)?(.+)\\.rb$", "capture": 1, "plural": true }
       ],
       "companion_locations": [
         "app/models/{feature}.rb",
         "app/controllers/{feature_plural}_controller.rb",
         "app/views/{feature_plural}/*",
+        "config/routes/{feature}.rb",
+        "config/routes/{feature_plural}.rb",
         "app/helpers/{feature_plural}_helper.rb",
         "app/helpers/{feature}_helper.rb",
         "app/mailers/{feature}_mailer.rb",
@@ -51,6 +54,8 @@
             "resources[ \\t]+:([a-z0-9_]+)",
             "resource[ \\t]+:([a-z0-9_]+)",
             "namespace[ \\t]+:([a-z0-9_]+)",
+            "draw[ \\t]+:([a-z0-9_]+)",
+            "scope[ \\t]+[\"']/([a-z0-9_]+)",
             "/([a-z0-9_]+)"
           ]
         },
@@ -67,7 +72,7 @@
       "detect_signals": ["requirements.txt", "pyproject.toml", "main.py"],
       "file_extensions": [".py", ".pyi"],
       "feature_extractors": [
-        { "role": "router", "pattern": "(?:app/api/routers/|routers/|app/routers/|app/api/v[0-9]+/endpoints/)(.+)\\.py$", "capture": 1, "plural": true },
+        { "role": "router", "pattern": "(?:app/api/routers/|routers/|app/routers/|app/routes/|routes/|app/api/v[0-9]+/endpoints/)(.+?)(?:_routes|_route)?\\.py$", "capture": 1, "plural": true },
         { "role": "service", "pattern": "(?:app/services/|services/)(.+?)(?:_service)?\\.py$", "capture": 1, "plural": false },
         { "role": "model", "pattern": "(?:app/models/|models/)(.+?)(?:_model)?\\.py$", "capture": 1, "plural": false },
         { "role": "schema", "pattern": "(?:app/schemas/|schemas/)(.+?)(?:_schema)?\\.py$", "capture": 1, "plural": false },
@@ -80,6 +85,9 @@
         "app/api/routers/{feature_plural}.py",
         "routers/{feature}.py",
         "routers/{feature_plural}.py",
+        "app/routes/{feature}.py",
+        "app/routes/{feature_plural}.py",
+        "routes/{feature}.py",
         "app/services/{feature}_service.py",
         "app/services/{feature}.py",
         "services/{feature}_service.py",
@@ -101,7 +109,8 @@
           "path": "app/main.py",
           "hunk_match_patterns": [
             "include_router\\(([a-z0-9_]+)",
-            "from[ \\t]+\\.[a-z0-9_.]+[ \\t]+import[ \\t]+([a-z0-9_]+)"
+            "from[ \\t]+\\.[a-z0-9_.]+[ \\t]+import[ \\t]+([a-z0-9_]+)",
+            "@(?:app|router)\\.(?:get|post|put|delete|patch)\\([ \\t]*[\"']/([a-z0-9_\\-]+)"
           ]
         }
       ]
@@ -117,6 +126,7 @@
         { "role": "widget", "pattern": "lib/widgets/(.+?)(?:_widget)?\\.dart$", "capture": 1, "plural": false },
         { "role": "repository", "pattern": "lib/repositories/(.+?)(?:_repository)?(?:_impl)?\\.dart$", "capture": 1, "plural": false },
         { "role": "service", "pattern": "lib/services/(.+?)(?:_service)?\\.dart$", "capture": 1, "plural": false },
+        { "role": "route", "pattern": "lib/(?:routes|router)/(.+?)(?:_route|_routes|_routing)?\\.dart$", "capture": 1, "plural": false },
         { "role": "model", "pattern": "lib/models/(.+?)(?:_model)?(?:\\.g|\\.freezed)?\\.dart$", "capture": 1, "plural": false },
         { "role": "test", "pattern": "test/(?:.*/)?(.+?)_test\\.dart$", "capture": 1, "plural": false }
       ],
@@ -128,6 +138,11 @@
         "lib/cubits/{feature}_state.dart",
         "lib/screens/{feature}_screen.dart",
         "lib/pages/{feature}_page.dart",
+        "lib/routes/{feature}_routes.dart",
+        "lib/routes/{feature}_route.dart",
+        "lib/router/{feature}_routes.dart",
+        "lib/router/{feature}_route.dart",
+        "lib/routes/{feature}.dart",
         "lib/widgets/{feature}_*.dart",
         "lib/repositories/{feature}_repository.dart",
         "lib/repositories/{feature}_repository_impl.dart",
@@ -146,6 +161,22 @@
           "path": "pubspec.yaml",
           "hunk_match_patterns": [
             "([a-z0-9_]+):"
+          ]
+        },
+        {
+          "path": "lib/routes/app_router.dart",
+          "hunk_match_patterns": [
+            "path:[ \\t]*[\"']/([a-z0-9_\\-]+)",
+            "GoRoute\\([ \\t]*path:[ \\t]*[\"']/([a-z0-9_\\-]+)",
+            "AutoRoute\\([ \\t]*path:[ \\t]*[\"']/([a-z0-9_\\-]+)"
+          ]
+        },
+        {
+          "path": "lib/router/app_router.dart",
+          "hunk_match_patterns": [
+            "path:[ \\t]*[\"']/([a-z0-9_\\-]+)",
+            "GoRoute\\([ \\t]*path:[ \\t]*[\"']/([a-z0-9_\\-]+)",
+            "AutoRoute\\([ \\t]*path:[ \\t]*[\"']/([a-z0-9_\\-]+)"
           ]
         }
       ]
@@ -181,6 +212,7 @@
       "file_extensions": [".go"],
       "feature_extractors": [
         { "role": "handler", "pattern": "internal/handlers/(.+?)(?:_handler)?\\.go$", "capture": 1, "plural": false },
+        { "role": "route", "pattern": "internal/(?:routes|router)/(.+?)(?:_routes|_route)?\\.go$", "capture": 1, "plural": false },
         { "role": "service", "pattern": "internal/service/(.+?)(?:_service)?\\.go$", "capture": 1, "plural": false },
         { "role": "repository", "pattern": "internal/repository/(.+?)(?:_repository)?\\.go$", "capture": 1, "plural": false },
         { "role": "pkg", "pattern": "pkg/(.+?)/(?:.+)\\.go$", "capture": 1, "plural": false },
@@ -188,6 +220,9 @@
       ],
       "companion_locations": [
         "internal/handlers/{feature}.go",
+        "internal/routes/{feature}.go",
+        "internal/routes/{feature}_routes.go",
+        "internal/router/{feature}.go",
         "internal/service/{feature}.go",
         "internal/repository/{feature}.go",
         "internal/*/{feature}_test.go",
@@ -199,6 +234,13 @@
           "hunk_match_patterns": [
             "([a-z0-9_\\./\\-]+)[ \\t]+v[0-9]"
           ]
+        },
+        {
+          "path": "cmd/server/main.go",
+          "hunk_match_patterns": [
+            "r\\.(?:Route|Group)\\([ \\t]*[\"']/([a-z0-9_\\-]+)",
+            "r\\.(?:Get|Post|Put|Delete)\\([ \\t]*[\"']/([a-z0-9_\\-]+)"
+          ]
         }
       ]
     },
@@ -207,12 +249,17 @@
       "detect_signals": ["package.json", "tsconfig.json"],
       "file_extensions": [".tsx", ".ts", ".jsx", ".js"],
       "feature_extractors": [
+        { "role": "route", "pattern": "(?:app|src/app)/(?:api/)?(.+)/route\\.(?:ts|js)$", "capture": 1, "plural": false },
+        { "role": "route", "pattern": "src/routes/(.+?)(?:_routes|_route|Routes)?\\.(?:tsx|ts)$", "capture": 1, "plural": false },
         { "role": "feature_module", "pattern": "src/features/([^/]+)/.*", "capture": 1, "plural": false },
         { "role": "component", "pattern": "src/components/(.+?)(?:/.*|\\.tsx)$", "capture": 1, "plural": false },
         { "role": "hook", "pattern": "src/hooks/use(.+)\\.ts$", "capture": 1, "plural": false },
         { "role": "service", "pattern": "src/services/(.+?)(?:Api|Service)?\\.ts$", "capture": 1, "plural": false }
       ],
       "companion_locations": [
+        "app/api/{feature}/route.ts",
+        "src/routes/{feature}Routes.tsx",
+        "src/routes/{feature}.tsx",
         "src/features/{feature}/**/*",
         "src/components/{feature}/**/*",
         "src/hooks/use{feature}.ts",
@@ -223,6 +270,12 @@
           "path": "package.json",
           "hunk_match_patterns": [
             "\"([@a-z0-9_\\-/]+)\":[ \\t]*\""
+          ]
+        },
+        {
+          "path": "src/App.tsx",
+          "hunk_match_patterns": [
+            "<Route[ \\t]+path=[\"']/([a-z0-9_\\-]+)"
           ]
         }
       ]
