@@ -2177,12 +2177,11 @@ _split_diff_by_groups() {
     ' "$diff_file" "$numstat_file"
 }
 
-# Materialize per-group run files and generate every group's commit message
-# before any commit happens. Fills the 1-indexed array _AICOMMIT_GRP_MSGS.
+# Materialize per-group run files (STAGED_NAMES, GROUP_SCOPE, DIFF, AI context)
+# WITHOUT invoking the LLM upfront.
 # Args: $1=scope_groups (TAB lines), $2=tmp_dir (run dir)
-generate_group_messages() {
+prepare_group_run_dirs() {
     local scope_groups="$1" tmp_dir="$2"
-    _AICOMMIT_GRP_MSGS=()
 
     local i=0 group_line gdir
     local groups_root="${tmp_dir}/groups"
@@ -2229,6 +2228,23 @@ generate_group_messages() {
             "$(cat "${gdir}/GROUP_SCOPE")" \
             "$gdir" || return 1
     done
+    return 0
+}
+
+# Materialize per-group run files and generate every group's commit message
+# before any commit happens. Fills the 1-indexed array _AICOMMIT_GRP_MSGS.
+# Args: $1=scope_groups (TAB lines), $2=tmp_dir (run dir)
+generate_group_messages() {
+    local scope_groups="$1" tmp_dir="$2"
+    _AICOMMIT_GRP_MSGS=()
+
+    prepare_group_run_dirs "$scope_groups" "$tmp_dir" || return 1
+
+    local groups_root="${tmp_dir}/groups"
+    local index_file="${groups_root}/INDEX"
+    local n=0
+    n=$(count_lines < "$index_file")
+    [ "$n" -eq 0 ] && return 1
 
     # One batched call for all groups when enabled; the shared rules prefix is
     # then processed once instead of n times.
@@ -2241,7 +2257,7 @@ generate_group_messages() {
     fi
 
     # Sequential fallback — per-group generate (still deterministic per call)
-    local m
+    local i m
     for ((i = 1; i <= n; i++)); do
         if ! m=$(generate_commit_message "${groups_root}/${i}"); then
             display_error "Failed to generate commit message for group $i"

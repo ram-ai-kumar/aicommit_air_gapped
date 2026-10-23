@@ -113,7 +113,7 @@ _aicommit_split_flow() {
     fi
     display_resolved_atomic_groups "$scope_groups"
 
-    if ! generate_group_messages "$scope_groups" "$tmp_dir"; then
+    if ! prepare_group_run_dirs "$scope_groups" "$tmp_dir"; then
         return 1
     fi
 
@@ -141,14 +141,14 @@ _aicommit_split_flow() {
             continue
         fi
 
-        grp_commit_msg="${_AICOMMIT_GRP_MSGS[$idx]:-}"
-        if [ -z "$grp_commit_msg" ]; then
+        display_split_progress "$idx" "$num_scopes" "$grp_scope"
+
+        if ! grp_commit_msg=$(generate_commit_message "${tmp_dir}/groups/${idx}"); then
             display_error "Failed to generate commit message for scope: $grp_scope"
             return 1
         fi
         subset_changes=$(cat "${tmp_dir}/groups/${idx}/DIFF" 2>/dev/null)
 
-        display_split_progress "$idx" "$num_scopes" "$grp_scope"
         display_commit_message "$grp_commit_msg" "Suggested Commit ($idx/$num_scopes - scope: $grp_scope):"
 
         local grp_cur_ver grp_rec_summary=""

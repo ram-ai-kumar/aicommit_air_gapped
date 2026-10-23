@@ -334,7 +334,7 @@ teardown() {
 
 @test "aicommit --bump --dry-run previews SemVer plan without changes" {
     printf '{\n  "name": "my-tool",\n  "version": "1.2.0"\n}\n' > package.json
-    touch new_feature.js
+    echo "console.log('feature');" > new_feature.js
     git add new_feature.js
 
     run aicommit --bump --dry-run

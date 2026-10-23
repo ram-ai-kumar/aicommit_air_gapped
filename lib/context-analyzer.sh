@@ -203,7 +203,7 @@ cluster_staged_files_deterministic() {
         sub(/(_test|_spec|\.test|\.spec|test_|spec_|-test|-spec|_tests|_specs)$/, "", s)
         sub(/^(create|add|update|remove|drop|alter|modify)_/, "", s)
         sub(/^use_/, "", s)
-        sub(/(_controller|_controllers|_service|_services|_helper|_helpers|_serializer|_serializers|_router|_routers|_model|_models|_schema|_schemas|_handler|_handlers|_client|_clients|_adapter|_adapters|_factory|_factories|_validator|_validators|_worker|_workers|_job|_jobs|_dto|_types|_screen|_screens|_widget|_widgets|_page|_pages|_view|_views|_bloc|_cubit|_event|_state|_notifier|_provider|_repository|_repositories|_datasource|_datasources)$/, "", s)
+        sub(/(_controller|_controllers|_service|_services|_helper|_helpers|_serializer|_serializers|_router|_routers|_route|_routes|_routing|_model|_models|_schema|_schemas|_handler|_handlers|_client|_clients|_adapter|_adapters|_factory|_factories|_validator|_validators|_worker|_workers|_job|_jobs|_dto|_types|_screen|_screens|_widget|_widgets|_page|_pages|_view|_views|_bloc|_cubit|_event|_state|_notifier|_provider|_repository|_repositories|_datasource|_datasources)$/, "", s)
         if (s ~ /ies$/) sub(/ies$/, "y", s)
         else if (s ~ /(sses|shes|ches|xes|zes)$/) sub(/es$/, "", s)
         else if (s ~ /[^s]s$/ && length(s) > 3) sub(/s$/, "", s)
@@ -214,21 +214,35 @@ cluster_staged_files_deterministic() {
                p ~ /(_test|_spec|\.test|\.spec)\.[^.\/]+$/ || \
                p ~ /\.bats$/ || p ~ /(^|\/)test_[^\/]+$/
     }
-    function feature_of(path,    p, d, s, n, a, seg) {
+    function feature_of(path,    p, d, s, n, a, seg, idx) {
+        if (match(path, /(^|\/)(features?|modules?)\/([^\/]+)\//)) {
+            seg = substr(path, RSTART, RLENGTH)
+            sub(/^.*(features?|modules?)\//, "", seg)
+            sub(/\/.*$/, "", seg)
+            seg = tolower(seg)
+            if (seg ~ /ies$/) sub(/ies$/, "y", seg)
+            else if (seg ~ /(sses|shes|ches|xes|zes)$/) sub(/es$/, "", seg)
+            else if (seg ~ /[^s]s$/ && length(seg) > 3) sub(/s$/, "", seg)
+            if (is_domain_keyword(seg)) return seg
+        }
         s = norm_stem(path)
-        if (s ~ /^(index|show|edit|new|form|create|update|list|detail|details|page|view|mod|lib|main|app|handler|handlers|service|services|repository|repositories|client|clients|worker|workers|model|models|schema|schemas|types|dto|dtos|adapter|adapters|dao|controller|controllers)$/) {
+        if (s ~ /^(index|show|edit|new|form|create|update|list|detail|details|page|view|mod|lib|main|app|route|routes|router|routers|urls|handler|handlers|service|services|repository|repositories|client|clients|worker|workers|model|models|schema|schemas|types|dto|dtos|adapter|adapters|dao|controller|controllers)$/) {
             d = dirname_of(path); n = split(d, a, "/")
-            if (n >= 1) {
-                seg = tolower(a[n])
+            for (idx = n; idx >= 1; idx--) {
+                seg = tolower(a[idx])
                 if (seg ~ /ies$/) sub(/ies$/, "y", seg)
+                else if (seg ~ /(sses|shes|ches|xes|zes)$/) sub(/es$/, "", seg)
                 else if (seg ~ /[^s]s$/ && length(seg) > 3) sub(/s$/, "", seg)
-                if (seg !~ /^(views?|screens?|widgets?|pages?|components?|app|lib|src|internal|pkg)$/) s = seg
+                if (seg !~ /^(routes?|routers?|urls|views?|screens?|widgets?|pages?|components?|app|lib|src|internal|pkg|api|endpoints?|v[0-9]+|features?)$/) {
+                    s = seg
+                    break
+                }
             }
         }
         return s
     }
     function is_domain_keyword(s) {
-        return (s != "" && s !~ /^(test|tests|spec|specs|model|models|controller|controllers|view|views|helper|helpers|service|services|migration|migrations|route|routes|config|common|core|base|main|index|app|lib|src|doc|docs|readme|changelog|license|fixture|fixtures|script|scripts|bin|tool|tools|handler|handlers|repository|repositories|schema|schemas|types|dto|dtos|adapter|adapters|dao|client|clients|worker|workers)$/ && length(s) >= 3)
+        return (s != "" && s !~ /^(test|tests|spec|specs|model|models|controller|controllers|view|views|helper|helpers|service|services|migration|migrations|route|routes|config|common|core|base|main|index|app|lib|src|doc|docs|readme|changelog|license|fixture|fixtures|script|scripts|bin|tool|tools|handler|handlers|repository|repositories|schema|schemas|types|dto|dtos|adapter|adapters|dao|client|clients|worker|workers|component|components|ui)$/ && length(s) >= 3)
     }
     function find(x,   r, p2) {
         r = x
@@ -279,7 +293,10 @@ cluster_staged_files_deterministic() {
                         res = tolower(res)
                         if (res ~ /ies$/) sub(/ies$/, "y", res)
                         else if (res ~ /[^s]s$/ && length(res) > 3) sub(/s$/, "", res)
-                        if (length(res) >= 3) diff_features[cur SUBSEP res] = 1
+                        if (length(res) >= 3) {
+                            diff_features[cur SUBSEP res] = 1
+                            diff_feat_count[cur SUBSEP res]++
+                        }
                     }
                     if (match(line, /(prefix|path|route|get|post|put|delete|patch)[ \t]*(\([ \t]*|=[ \t]*)[^A-Za-z0-9_]*\/?[A-Za-z0-9_-]+/)) {
                         res = substr(line, RSTART, RLENGTH)
@@ -288,7 +305,10 @@ cluster_staged_files_deterministic() {
                         res = tolower(res)
                         if (res ~ /ies$/) sub(/ies$/, "y", res)
                         else if (res ~ /[^s]s$/ && length(res) > 3) sub(/s$/, "", res)
-                        if (length(res) >= 3) diff_features[cur SUBSEP res] = 1
+                        if (length(res) >= 3) {
+                            diff_features[cur SUBSEP res] = 1
+                            diff_feat_count[cur SUBSEP res]++
+                        }
                     }
                     if (match(line, /include_router\([ \t]*([A-Za-z0-9_]+)/)) {
                         res = substr(line, RSTART, RLENGTH)
@@ -297,7 +317,45 @@ cluster_staged_files_deterministic() {
                         res = tolower(res)
                         if (res ~ /ies$/) sub(/ies$/, "y", res)
                         else if (res ~ /[^s]s$/ && length(res) > 3) sub(/s$/, "", res)
-                        if (length(res) >= 3) diff_features[cur SUBSEP res] = 1
+                        if (length(res) >= 3) {
+                            diff_features[cur SUBSEP res] = 1
+                            diff_feat_count[cur SUBSEP res]++
+                        }
+                    }
+                    if (match(line, /draw[ \t]+:([A-Za-z0-9_]+)/)) {
+                        res = substr(line, RSTART, RLENGTH)
+                        sub(/.*:/, "", res)
+                        res = tolower(res)
+                        if (res ~ /ies$/) sub(/ies$/, "y", res)
+                        else if (res ~ /[^s]s$/ && length(res) > 3) sub(/s$/, "", res)
+                        if (length(res) >= 3) {
+                            diff_features[cur SUBSEP res] = 1
+                            diff_feat_count[cur SUBSEP res]++
+                        }
+                    }
+                    if (match(line, /(GoRoute|AutoRoute|<Route)[ \t]*\([^)]*path:[ \t]*[^A-Za-z0-9_]*\/?[A-Za-z0-9_-]+|<Route[ \t]+path=[^A-Za-z0-9_]*\/?[A-Za-z0-9_-]+/)) {
+                        res = substr(line, RSTART, RLENGTH)
+                        sub(/^.*\/+/, "", res)
+                        sub(/[^A-Za-z0-9_].*$/, "", res)
+                        res = tolower(res)
+                        if (res ~ /ies$/) sub(/ies$/, "y", res)
+                        else if (res ~ /[^s]s$/ && length(res) > 3) sub(/s$/, "", res)
+                        if (length(res) >= 3) {
+                            diff_features[cur SUBSEP res] = 1
+                            diff_feat_count[cur SUBSEP res]++
+                        }
+                    }
+                    if (match(line, /r\.(Route|Group|Get|Post|Put|Delete)\([^A-Za-z0-9_]*\/?[A-Za-z0-9_-]+/)) {
+                        res = substr(line, RSTART, RLENGTH)
+                        sub(/^.*\/+/, "", res)
+                        sub(/[^A-Za-z0-9_].*$/, "", res)
+                        res = tolower(res)
+                        if (res ~ /ies$/) sub(/ies$/, "y", res)
+                        else if (res ~ /[^s]s$/ && length(res) > 3) sub(/s$/, "", res)
+                        if (length(res) >= 3) {
+                            diff_features[cur SUBSEP res] = 1
+                            diff_feat_count[cur SUBSEP res]++
+                        }
                     }
                 }
             }
@@ -359,11 +417,27 @@ cluster_staged_files_deterministic() {
         }
 
         # Cycle 2A — Shared Files & Migrations diff-keyword matching
-        for (k in diff_features) {
-            split(k, a, SUBSEP)
-            df_file = a[1]; df_feat = a[2]
-            if ((df_file in parent) && (df_feat in feat_first)) {
-                union(feat_first[df_feat], df_file)
+        # Dominant feature binding: if a shared file (e.g. routes.rb) touches multiple features,
+        # bind it ONLY to the feature with the highest hunk match count so it never bridges
+        # distinct features together into a single mega-group.
+        for (f_idx = 1; f_idx <= nf; f_idx++) {
+            sh_file = files[f_idx]
+            max_c = 0; best_feat = ""
+            for (k in diff_feat_count) {
+                split(k, a, SUBSEP)
+                if (a[1] == sh_file) {
+                    df_feat = a[2]
+                    if (df_feat in feat_first) {
+                        cnt = diff_feat_count[k]
+                        if (cnt > max_c) {
+                            max_c = cnt
+                            best_feat = df_feat
+                        }
+                    }
+                }
+            }
+            if (best_feat != "" && (best_feat in feat_first)) {
+                union(feat_first[best_feat], sh_file)
             }
         }
 
@@ -552,27 +626,41 @@ _name_component_lines() {
             sub(/(_test|_spec|\.test|\.spec|test_|spec_|-test|-spec|_tests|_specs)$/, "", s)
             sub(/^(create|add|update|remove|drop|alter|modify)_/, "", s)
             sub(/^use_/, "", s)
-            sub(/(_controller|_controllers|_service|_services|_helper|_helpers|_serializer|_serializers|_router|_routers|_model|_models|_schema|_schemas|_handler|_handlers|_client|_clients|_adapter|_adapters|_factory|_factories|_validator|_validators|_worker|_workers|_job|_jobs|_dto|_types|_screen|_screens|_widget|_widgets|_page|_pages|_view|_views|_bloc|_cubit|_event|_state|_notifier|_provider|_repository|_repositories|_datasource|_datasources)$/, "", s)
+            sub(/(_controller|_controllers|_service|_services|_helper|_helpers|_serializer|_serializers|_router|_routers|_route|_routes|_routing|_model|_models|_schema|_schemas|_handler|_handlers|_client|_clients|_adapter|_adapters|_factory|_factories|_validator|_validators|_worker|_workers|_job|_jobs|_dto|_types|_screen|_screens|_widget|_widgets|_page|_pages|_view|_views|_bloc|_cubit|_event|_state|_notifier|_provider|_repository|_repositories|_datasource|_datasources)$/, "", s)
             if (s ~ /ies$/) sub(/ies$/, "y", s)
             else if (s ~ /(sses|shes|ches|xes|zes)$/) sub(/es$/, "", s)
             else if (s ~ /[^s]s$/ && length(s) > 3) sub(/s$/, "", s)
             return s
         }
-        function feature_of(path,    p, d, s, n, a, seg) {
+        function feature_of(path,    p, d, s, n, a, seg, idx) {
+            if (match(path, /(^|\/)(features?|modules?)\/([^\/]+)\//)) {
+                seg = substr(path, RSTART, RLENGTH)
+                sub(/^.*(features?|modules?)\//, "", seg)
+                sub(/\/.*$/, "", seg)
+                seg = tolower(seg)
+                if (seg ~ /ies$/) sub(/ies$/, "y", seg)
+                else if (seg ~ /(sses|shes|ches|xes|zes)$/) sub(/es$/, "", seg)
+                else if (seg ~ /[^s]s$/ && length(seg) > 3) sub(/s$/, "", seg)
+                if (is_domain_keyword(seg)) return seg
+            }
             s = norm_stem(path)
-            if (s ~ /^(index|show|edit|new|form|create|update|list|detail|details|page|view|mod|lib|main|app|handler|handlers|service|services|repository|repositories|client|clients|worker|workers|model|models|schema|schemas|types|dto|dtos|adapter|adapters|dao|controller|controllers)$/) {
+            if (s ~ /^(index|show|edit|new|form|create|update|list|detail|details|page|view|mod|lib|main|app|route|routes|router|routers|urls|handler|handlers|service|services|repository|repositories|client|clients|worker|workers|model|models|schema|schemas|types|dto|dtos|adapter|adapters|dao|controller|controllers)$/) {
                 d = dirname_of(path); n = split(d, a, "/")
-                if (n >= 1) {
-                    seg = tolower(a[n])
+                for (idx = n; idx >= 1; idx--) {
+                    seg = tolower(a[idx])
                     if (seg ~ /ies$/) sub(/ies$/, "y", seg)
+                    else if (seg ~ /(sses|shes|ches|xes|zes)$/) sub(/es$/, "", seg)
                     else if (seg ~ /[^s]s$/ && length(seg) > 3) sub(/s$/, "", seg)
-                    if (seg !~ /^(views?|screens?|widgets?|pages?|components?|app|lib|src|internal|pkg)$/) s = seg
+                    if (seg !~ /^(routes?|routers?|urls|views?|screens?|widgets?|pages?|components?|app|lib|src|internal|pkg|api|endpoints?|v[0-9]+|features?)$/) {
+                        s = seg
+                        break
+                    }
                 }
             }
             return s
         }
         function is_domain_keyword(s) {
-            return (s != "" && s !~ /^(test|tests|spec|specs|model|models|controller|controllers|view|views|helper|helpers|service|services|migration|migrations|route|routes|config|common|core|base|main|index|app|lib|src|doc|docs|readme|changelog|license|fixture|fixtures|script|scripts|bin|tool|tools|handler|handlers|repository|repositories|schema|schemas|types|dto|dtos|adapter|adapters|dao|client|clients|worker|workers)$/ && length(s) >= 3)
+            return (s != "" && s !~ /^(test|tests|spec|specs|model|models|controller|controllers|view|views|helper|helpers|service|services|migration|migrations|route|routes|config|common|core|base|main|index|app|lib|src|doc|docs|readme|changelog|license|fixture|fixtures|script|scripts|bin|tool|tools|handler|handlers|repository|repositories|schema|schemas|types|dto|dtos|adapter|adapters|dao|client|clients|worker|workers|component|components|ui)$/ && length(s) >= 3)
         }
         {
             st = feature_of($0)

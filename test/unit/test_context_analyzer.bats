@@ -407,3 +407,70 @@ EOF
     assert_output_contains "internal/order/handler_test.go"
 }
 
+@test "routes: dedicated Rails route file clusters with feature model, controller, and spec" {
+    local files
+    files="$(printf 'app/models/subscription.rb\napp/controllers/subscriptions_controller.rb\nconfig/routes/subscriptions.rb\nspec/requests/subscriptions_spec.rb')"
+    run group_staged_files_logically "$files"
+    [ "$status" -eq 0 ]
+    [ $(printf '%s\n' "$output" | count_lines) -eq 1 ]
+    assert_output_contains $'subscription\t'
+    assert_output_contains "config/routes/subscriptions.rb"
+    assert_output_contains "app/models/subscription.rb"
+    assert_output_contains "app/controllers/subscriptions_controller.rb"
+    assert_output_contains "spec/requests/subscriptions_spec.rb"
+}
+
+@test "routes: Flutter dedicated route file clusters with feature screens and bloc" {
+    local files
+    files="$(printf 'lib/features/auth/bloc/auth_bloc.dart\nlib/features/auth/screens/auth_screen.dart\nlib/routes/auth_routes.dart\ntest/features/auth/auth_bloc_test.dart')"
+    run group_staged_files_logically "$files"
+    [ "$status" -eq 0 ]
+    [ $(printf '%s\n' "$output" | count_lines) -eq 1 ]
+    assert_output_contains $'auth\t'
+    assert_output_contains "lib/routes/auth_routes.dart"
+    assert_output_contains "lib/features/auth/screens/auth_screen.dart"
+    assert_output_contains "lib/features/auth/bloc/auth_bloc.dart"
+    assert_output_contains "test/features/auth/auth_bloc_test.dart"
+}
+
+@test "routes: Next.js TypeScript App Router route.ts resolves feature from parent directory" {
+    local files
+    files="$(printf 'app/api/subscriptions/route.ts\nsrc/features/subscriptions/SubscriptionCard.tsx\nsrc/features/subscriptions/subscription.test.ts')"
+    run group_staged_files_logically "$files"
+    [ "$status" -eq 0 ]
+    [ $(printf '%s\n' "$output" | count_lines) -eq 1 ]
+    assert_output_contains $'subscription\t'
+    assert_output_contains "app/api/subscriptions/route.ts"
+    assert_output_contains "src/features/subscriptions/SubscriptionCard.tsx"
+    assert_output_contains "src/features/subscriptions/subscription.test.ts"
+}
+
+@test "routes: Go dedicated routes file clusters with feature service and repository" {
+    local files
+    files="$(printf 'internal/billing/service.go\ninternal/billing/repository.go\ninternal/routes/billing_routes.go\ninternal/billing/service_test.go')"
+    run group_staged_files_logically "$files"
+    [ "$status" -eq 0 ]
+    [ $(printf '%s\n' "$output" | count_lines) -eq 1 ]
+    assert_output_contains $'billing\t'
+    assert_output_contains "internal/routes/billing_routes.go"
+    assert_output_contains "internal/billing/service.go"
+    assert_output_contains "internal/billing/service_test.go"
+}
+
+@test "routes: dominant feature binding keeps multiple features disjoint when shared routes.rb changes" {
+    local files
+    files="$(printf 'app/models/subscription.rb\napp/controllers/subscriptions_controller.rb\napp/models/invoice.rb\napp/controllers/invoices_controller.rb\nconfig/routes.rb')"
+    local diff
+    diff="$(printf 'diff --git a/config/routes.rb b/config/routes.rb\n--- a/config/routes.rb\n+++ b/config/routes.rb\n@@ -10,2 +10,4 @@\n+  resources :subscriptions, only: [:index, :show]\n+  get \"/subscriptions/plans\", to: \"subscriptions#plans\"\n+  resources :invoices, only: [:index]\n')"
+    run group_staged_files_logically "$files" "$diff"
+    [ "$status" -eq 0 ]
+    [ $(printf '%s\n' "$output" | count_lines) -eq 2 ]
+    # Ensure subscription and invoice remained separate groups, and routes.rb bound to dominant feature (subscription)
+    assert_output_contains $'subscription\t'
+    assert_output_contains "config/routes.rb"
+    assert_output_contains "app/models/subscription.rb"
+    assert_output_contains $'invoice\t'
+    assert_output_contains "app/models/invoice.rb"
+}
+
+
