@@ -113,21 +113,34 @@ teardown() {
     assert_output_contains "No staged changes"
 }
 
-@test "NT-04: mid-run foreign staged file is detected by _split_guard_staged_set" {
+@test "NT-04: _split_sync_to_staged keeps only files still staged" {
+    echo "base" > base.txt
+    git add base.txt
+    git commit -m "chore: initial" >/dev/null 2>&1
+
     echo "a" > a.txt
     echo "b" > b.txt
     git add a.txt b.txt
 
-    # Staged now matches original
-    run _split_guard_staged_set "$(printf 'a.txt\nb.txt')" "a.txt"
-    [ "$status" -eq 0 ]
+    # All group files staged → all kept
+    grp_file_array=(a.txt b.txt)
+    _split_sync_to_staged
+    [ "${#grp_file_array[@]}" -eq 2 ]
 
-    # Simulate foreign file staged by another process
+    # Unstage b.txt externally → filtered out, a.txt kept
+    git restore --staged b.txt
+    grp_file_array=(a.txt b.txt)
+    _split_sync_to_staged
+    [ "${#grp_file_array[@]}" -eq 1 ]
+    [ "${grp_file_array[0]}" = "a.txt" ]
+
+    # Foreign staged file is never pulled into the group
     echo "foreign" > foreign.txt
     git add foreign.txt
-
-    run _split_guard_staged_set "$(printf 'a.txt\nb.txt')" "a.txt"
-    [ "$status" -eq 1 ]
+    grp_file_array=(a.txt)
+    _split_sync_to_staged
+    [ "${#grp_file_array[@]}" -eq 1 ]
+    [ "${grp_file_array[0]}" = "a.txt" ]
 }
 
 # ─── 3. Edge Cases ───────────────────────────────────────────────────────────
@@ -384,5 +397,93 @@ teardown() {
     [ "$status" -eq 0 ]
     refute_output_contains "Staged set changed since grouping"
     assert_output_contains "All atomic commits completed!"
+}
+
+@test "MC-03: aicc regroups currently staged files, ignoring stale preview artifacts" {
+    echo "base" > base.txt
+    git add base.txt
+    git commit -m "chore: initial" >/dev/null 2>&1
+
+    mkdir -p src docs
+    echo "function f() {}" > src/f.js
+    echo "# guide" > docs/guide.md
+    git add src/f.js docs/guide.md
+
+    # Seed stale preview artifacts from an older run — must be ignored
+    local state_dir
+    state_dir=$(get_aicommit_state_dir)
+    printf 'stale\tghost.txt\n' > "${state_dir}/SCOPE_GROUPS"
+    printf 'deadbeef\n' > "${state_dir}/STAGED_FINGERPRINT"
+
+    export AI_MODEL="test-model"
+    mock_ollama_api 'feat(f): add f'
+
+    run aicc
+    [ "$status" -eq 0 ]
+    refute_output_contains "Reusing"
+    refute_output_contains "Staged set changed since grouping"
+    assert_output_contains "All atomic commits completed!"
+    # Nothing may remain staged and the phantom file must never have been committed
+    [ -z "$(git diff --staged --name-only)" ]
+    ! git cat-file -e "HEAD:ghost.txt" 2>/dev/null
+    git cat-file -e "HEAD:src/f.js"
+    git cat-file -e "HEAD:docs/guide.md"
+}
+
+@test "MC-04: aicc regroups files staged after a dry-run preview" {
+    echo "base" > base.txt
+    git add base.txt
+    git commit -m "chore: initial" >/dev/null 2>&1
+
+    echo "one" > one.js
+    git add one.js
+    run aiccx
+    [ "$status" -eq 0 ]
+
+    # Stage another file after the preview — the real run must pick it up
+    echo "two" > two.js
+    git add two.js
+
+    export AI_MODEL="test-model"
+    mock_ollama_api 'feat: add files'
+
+    run aicc
+    [ "$status" -eq 0 ]
+    assert_output_contains "All atomic commits completed!"
+    [ -z "$(git diff --staged --name-only)" ]
+    git cat-file -e "HEAD:one.js"
+    git cat-file -e "HEAD:two.js"
+}
+
+@test "MC-05: externally staged file mid-run is left staged and never aborts the flow" {
+    echo "base" > base.txt
+    git add base.txt
+    git commit -m "chore: initial" >/dev/null 2>&1
+
+    echo "a" > a_one.js
+    echo "b" > b_two.js
+    git add a_one.js b_two.js
+    echo "sneak" > sneak.js
+
+    export AI_MODEL="test-model"
+    mock_ollama_api 'feat: add files'
+
+    # Simulate another terminal staging a file once the run is underway —
+    # generate_commit_message runs once per group, so sneak.js lands in the
+    # index mid-flight (after grouping, before commits).
+    eval "_orig_generate_commit_message() $(declare -f generate_commit_message | tail -n +2)"
+    generate_commit_message() {
+        git add sneak.js 2>/dev/null || true
+        _orig_generate_commit_message "$@"
+    }
+
+    run aicc
+    [ "$status" -eq 0 ]
+    refute_output_contains "Staged set changed since grouping"
+    assert_output_contains "All atomic commits completed!"
+    # Foreign file stays staged, grouped files were committed
+    printf '%s\n' "$(git diff --staged --name-only)" | grep -qx "sneak.js"
+    git cat-file -e "HEAD:a_one.js"
+    git cat-file -e "HEAD:b_two.js"
 }
 

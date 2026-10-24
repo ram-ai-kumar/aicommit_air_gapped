@@ -846,19 +846,19 @@ refactor(validation): optimize error counting
     [ "$output" = ":(top,literal)src/lib/app.js" ]
 }
 
-@test "staged_fingerprint produces deterministic sha256 of staged files" {
+@test "staged_state_key produces deterministic sha256 of staged files" {
     echo "a" > a.txt
     echo "b" > b.txt
     agit add a.txt b.txt
     local fp1 fp2
-    fp1=$(staged_fingerprint)
-    fp2=$(staged_fingerprint)
+    fp1=$(staged_state_key)
+    fp2=$(staged_state_key)
     [ -n "$fp1" ]
     [ "$fp1" = "$fp2" ]
     echo "c" > c.txt
     agit add c.txt
     local fp3
-    fp3=$(staged_fingerprint)
+    fp3=$(staged_state_key)
     [ "$fp1" != "$fp3" ]
 }
 

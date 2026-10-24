@@ -39,7 +39,7 @@ teardown() {
     declare -f aicommit_clean_cache       > /dev/null
     declare -f agit                       > /dev/null
     declare -f to_pathspec                > /dev/null
-    declare -f staged_fingerprint         > /dev/null
+    declare -f staged_state_key           > /dev/null
     declare -f _aicommit_split_tab_line   > /dev/null
     declare -f count_lines                > /dev/null
     declare -f build_file_context         > /dev/null

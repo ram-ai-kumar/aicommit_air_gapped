@@ -7,8 +7,7 @@
 #
 #   $(git rev-parse --absolute-git-dir)/aicommit/
 #     state/                  shared between runs, every file keyed by a
-#       SCOPE_GROUPS          fingerprint or hash and written tmp+mv
-#       STAGED_FINGERPRINT
+#                           fingerprint or hash and written tmp+mv
 #       FULL_PROMPT           audit artifact (system rules + user context)
 #       MSG_KEY/MSG_CACHE/    last request hash + assembled message
 #       MSG_REQUEST/SEED_OFFSET
@@ -106,7 +105,7 @@ get_aicommit_tmp_dir() {
     printf '%s' "$_AICOMMIT_RUN_DIR"
 }
 
-# Shared cross-run state dir (SCOPE_GROUPS, message cache, co-change cache…).
+# Shared cross-run state dir (message cache, grouping cache, co-change cache…).
 get_aicommit_state_dir() {
     local base rc
     base=$(get_aicommit_base_dir 2>/dev/null) || base=""
@@ -302,18 +301,6 @@ staged_state_key() {
     raw=$(agit diff --staged --raw -z --full-index -M 2>/dev/null) || return 1
     [ -z "$raw" ] && return 1
     printf '%s' "$raw" | shasum -a 256 | awk '{print $1}'
-}
-
-# Stable fingerprint of the current staged file set — used to detect whether
-# staging changed between a dry-run preview and a later split-commit execution.
-# Aliased to the grouping-scoped key: the preview artifacts it guards embed
-# grouping config, so a config change must also invalidate the handoff.
-staged_fingerprint() {
-    if command -v grouping_state_key >/dev/null 2>&1; then
-        grouping_state_key
-    else
-        staged_state_key
-    fi
 }
 
 # Split a TAB-delimited "scope<TAB>file<TAB>file..." line into
@@ -2461,14 +2448,15 @@ commit_staged_subset() {
 }
 
 # Cleanup ephemeral context files — the entire per-run dir goes away.
-# SCOPE_GROUPS/STAGED_FINGERPRINT/FULL_PROMPT/MSG_* deliberately live in the
-# shared state dir so a dry-run preview survives until `aicc` reuses it.
+# FULL_PROMPT/MSG_* deliberately live in the shared state dir so audit and
+# message-cache artifacts survive per-run cleanup.
 cleanup_aicommit_ephemeral() {
     aicommit_cleanup_run_dir
 }
 
-# Cleanup everything including the audit prompt and the persisted scope-grouping
-# decision. The message cache (MSG_*) self-invalidates by key and stays.
+# Cleanup everything including the audit prompt and any legacy persisted
+# scope-grouping artifacts. The message cache (MSG_*) self-invalidates by key
+# and stays.
 cleanup_aicommit_all() {
     aicommit_cleanup_run_dir
     local state_dir

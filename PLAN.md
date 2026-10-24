@@ -13,7 +13,7 @@ This update provides:
 3. Pre-clustering guardrails (Edge 2 symbol ceiling $K \le 4$, Edge 3.5 scoped relocation signatures).
 4. Full Conventional Commit `type` and intent propagation downstream into commit message generation.
 5. Topological DAG sorting to guarantee intermediate tree validity.
-6. Exact content-addressed caching (`staged_state_key`, `grouping_state_key`) and mid-run guards.
+6. Exact content-addressed caching (`staged_state_key`, `grouping_state_key`) with always-regroup semantics and mid-run still-staged filtering.
 
 ## Files to Touch
 
@@ -24,7 +24,7 @@ This update provides:
 | `aicommit.sh` | Ingest positional non-flag arguments and comma-separated tokens as user hints, write `${tmp_dir}/USER_HINTS`, forward to flows |
 | `lib/context-analyzer.sh` | Guarded clustering edges, faceted summaries, `staged_status_map`, `grouping_state_key` (including user hints hash), DAG topological sort, type retention |
 | `lib/core.sh` | `staged_state_key()`, group-DIFF cache isolation, 3-field `_aicommit_split_tab_line`, `GROUP_TYPE`/`GROUP_INTENT` context injection |
-| `lib/split-flow.sh` | Mid-run foreign file guard with `_AICOMMIT_SELF_STAGED` exemption, provenance display, formatted group previews with hints |
+| `lib/split-flow.sh` | Always-regroup on current staged set, mid-run still-staged filtering (`_split_sync_to_staged`), provenance display, formatted group previews with hints |
 | `lib/backends.sh` | Dynamic `num_predict` override support in `build_ollama_request` |
 | `test/unit/test_cli_hints.bats` | Comprehensive test suite covering Smoke, Negative, Edge, Exception, and Security cases |
 | `test/unit/test_context_analyzer.bats` | Unit tests for guarded edges, faceted summarizer, DAG sorter, type retention |

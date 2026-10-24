@@ -4,27 +4,23 @@
 
 [ -n "$ZSH_VERSION" ] && setopt localoptions localtraps shwordsplit nonomatch nomonitor nonotify typesetsilent
 
-# Mid-run staged-set guard: every group file must still be staged, and no
-# staged path may exist that wasn't in the original staged set (files aicommit
-# itself staged — semver manifests/changelog — are exempt). Index paths don't
-# move when HEAD advances, so this stays valid across prior group commits.
-# Args: $1=original staged files (newlines), $2=group files (newlines), $3=self-staged (newlines), $4=already-committed (newlines)
-_split_guard_staged_set() {
-    local original_names="$1" grp_files_list="$2" self_staged="${3:-}" already_committed="${4:-}"
-    local staged_now gf foreign=""
+# Filter the caller's grp_file_array down to files still staged right now.
+# Group membership is computed once at invocation; by commit time a file may
+# have been unstaged externally (or committed by an earlier group's semver
+# bump). Dropped files are simply skipped — the run never aborts on staged-set
+# drift. Index paths don't move when HEAD advances, so this stays valid across
+# prior group commits. Mutates grp_file_array via dynamic scoping (bash + zsh).
+_split_sync_to_staged() {
+    local staged_now f
+    local -a kept=()
     staged_now=$(agit diff --staged -z --name-only | tr '\0' '\n')
-    while IFS= read -r gf; do
-        [ -z "$gf" ] && continue
-        if [ -n "$already_committed" ] && printf '%s\n' "$already_committed" | grep -qxF "$gf"; then
-            continue
+    for f in "${grp_file_array[@]}"; do
+        [ -z "$f" ] && continue
+        if printf '%s\n' "$staged_now" | grep -qxF "$f"; then
+            kept+=("$f")
         fi
-        printf '%s\n' "$staged_now" | grep -qxF "$gf" || return 1
-    done <<< "$grp_files_list"
-    local allowed
-    allowed=$( { printf '%s\n' "$original_names"; printf '%s\n' "$self_staged"; } | awk 'NF' )
-    foreign=$(printf '%s\n' "$staged_now" | awk 'NF' | grep -vxF -f <(printf '%s\n' "$allowed") | head -1)
-    [ -n "$foreign" ] && return 1
-    return 0
+    done
+    grp_file_array=("${kept[@]}")
 }
 
 _aicommit_split_flow() {
@@ -41,30 +37,16 @@ _aicommit_split_flow() {
     local tag_opt="${11}"
     local auto_yes="${12}"
 
-    local groups_source="regrouped"
     local num_scopes=0 scope_names=""
 
     if [ -z "$scope_groups" ]; then
-        # Reuse the grouping decision from a preceding `aiccx`/`--dry-run --split`
-        # when the staged set is unchanged.
-        local fp_now
-        fp_now=$(staged_fingerprint)
-        if [ -f "${state_dir}/SCOPE_GROUPS" ] && [ -f "${state_dir}/STAGED_FINGERPRINT" ] \
-           && [ "$(cat "${state_dir}/STAGED_FINGERPRINT" 2>/dev/null)" = "$fp_now" ]; then
-            scope_groups=$(cat "${state_dir}/SCOPE_GROUPS")
-            num_scopes=$(printf '%s\n' "$scope_groups" | count_lines)
-            scope_names=$(printf '%s\n' "$scope_groups" | awk -F'\t' '{printf (NR>1?", ":"") $1} END{print ""}')
-            groups_source="reused"
-        else
-            scope_groups=$(group_staged_files_by_scope "$staged_files" "$changes" "$numstat_data")
-            scope_groups=$(printf '%s\n' "$scope_groups" | awk -F'\t' 'NF>=2 && $1!="" && $2!="" && $1 !~ /=/ && $1 !~ /^(joined_files|staged_files|files)/ {print $0}')
-            num_scopes=$(printf '%s\n' "$scope_groups" | count_lines)
-            scope_names=$(printf '%s\n' "$scope_groups" | awk -F'\t' '{printf (NR>1?", ":"") $1} END{print ""}')
-        fi
-    else
-        num_scopes=$(printf '%s\n' "$scope_groups" | count_lines)
-        scope_names=$(printf '%s\n' "$scope_groups" | awk -F'\t' '{printf (NR>1?", ":"") $1} END{print ""}')
+        # Always group the currently staged files — deterministic grouping is
+        # cheap, so there is nothing to reuse and nothing that can go stale.
+        scope_groups=$(group_staged_files_by_scope "$staged_files" "$changes" "$numstat_data")
+        scope_groups=$(printf '%s\n' "$scope_groups" | awk -F'\t' 'NF>=2 && $1!="" && $2!="" && $1 !~ /=/ && $1 !~ /^(joined_files|staged_files|files)/ {print $0}')
     fi
+    num_scopes=$(printf '%s\n' "$scope_groups" | count_lines)
+    scope_names=$(printf '%s\n' "$scope_groups" | awk -F'\t' '{printf (NR>1?", ":"") $1} END{print ""}')
 
     if [ "$dry_run" != "true" ] && ! validate_prerequisites; then
         return 1
@@ -72,8 +54,6 @@ _aicommit_split_flow() {
 
     if [ "$dry_run" = "true" ]; then
         umask 077
-        printf '%s\n' "$scope_groups" > "${state_dir}/SCOPE_GROUPS"
-        staged_fingerprint > "${state_dir}/STAGED_FINGERPRINT"
 
         local gsrc=""
         gsrc=$(cat "${tmp_dir}/GROUPING_SOURCE" 2>/dev/null || echo "")
@@ -95,11 +75,7 @@ _aicommit_split_flow() {
         return 0
     fi
 
-    if [ "$groups_source" = "reused" ]; then
-        echo "♻️  Reusing $num_scopes group(s) from last preview:"
-    else
-        echo "📋 Resolved $num_scopes atomic commit group(s):"
-    fi
+    echo "📋 Resolved $num_scopes atomic commit group(s):"
     if [ "$verbose" = "true" ]; then
         local gsrc=""
         gsrc=$(cat "${tmp_dir}/GROUPING_SOURCE" 2>/dev/null || echo "")
@@ -119,7 +95,6 @@ _aicommit_split_flow() {
 
     local idx=1 committed_count=0 group_line=""
     local grp_scope="" subset_changes="" grp_commit_msg="" grp_resp="y"
-    local _aicommit_self_staged=""
     local _aicommit_already_committed=""
     local -a grp_file_array=()
 
@@ -188,15 +163,13 @@ _aicommit_split_flow() {
                         while IFS= read -r uf; do
                             [ -n "$uf" ] && grp_file_array+=("$uf")
                         done <<< "$grp_updated_files"
-                        _aicommit_self_staged="${_aicommit_self_staged}${grp_updated_files}"$'\n'
                     fi
                 fi
-                if ! _split_guard_staged_set "$staged_files" "$(printf '%s\n' "${grp_file_array[@]}")" "$_aicommit_self_staged" "$_aicommit_already_committed"; then
-                    display_error "Staged set changed since grouping" "Re-run to re-group and commit the current staged set"
-                    cleanup_aicommit_all
-                    return 1
-                fi
-                if commit_staged_subset "$grp_commit_msg" "${grp_file_array[@]}"; then
+                _split_sync_to_staged
+                if [ ${#grp_file_array[@]} -eq 0 ]; then
+                    echo "⏭️  Skipping scope '$grp_scope' — no staged files remain."
+                    committed_count=$((committed_count + 1))
+                elif commit_staged_subset "$grp_commit_msg" "${grp_file_array[@]}"; then
                     for cf in "${grp_file_array[@]}"; do
                         _aicommit_already_committed="${_aicommit_already_committed}${cf}"$'\n'
                     done
@@ -242,15 +215,13 @@ _aicommit_split_flow() {
                             while IFS= read -r uf; do
                                 [ -n "$uf" ] && grp_file_array+=("$uf")
                             done <<< "$grp_updated_files"
-                            _aicommit_self_staged="${_aicommit_self_staged}${grp_updated_files}"$'\n'
                         fi
                     fi
-                    if ! _split_guard_staged_set "$staged_files" "$(printf '%s\n' "${grp_file_array[@]}")" "$_aicommit_self_staged" "$_aicommit_already_committed"; then
-                        display_error "Staged set changed since grouping" "Re-run to re-group and commit the current staged set"
-                        cleanup_aicommit_all
-                        return 1
-                    fi
-                    if commit_staged_subset "$edited_msg" "${grp_file_array[@]}"; then
+                    _split_sync_to_staged
+                    if [ ${#grp_file_array[@]} -eq 0 ]; then
+                        echo "⏭️  Skipping scope '$grp_scope' — no staged files remain."
+                        committed_count=$((committed_count + 1))
+                    elif commit_staged_subset "$edited_msg" "${grp_file_array[@]}"; then
                         for cf in "${grp_file_array[@]}"; do
                             _aicommit_already_committed="${_aicommit_already_committed}${cf}"$'\n'
                         done
