@@ -654,6 +654,70 @@ refactor(validation): optimize error counting
     [ "$output" = "feat: add thing" ]
 }
 
+@test "enforce_conventional_commit dedupes identical body bullets" {
+    run enforce_conventional_commit "test: update suite
+
+- rename the case
+- remove stale export
+- rename the case
+- adjust assertions
+- remove stale export"
+    [ "$status" -eq 0 ]
+    [ "${lines[0]}" = "test: update suite" ]
+    [ "${lines[1]}" = "- rename the case" ]
+    [ "${lines[2]}" = "- remove stale export" ]
+    [ "${lines[3]}" = "- adjust assertions" ]
+    [ "${#lines[@]}" -eq 4 ]
+}
+
+@test "enforce_conventional_commit drops bullets that restate the subject" {
+    run enforce_conventional_commit "refactor(core): remove LLM inference
+
+- remove LLM inference
+- remove LLM inference
+- remove LLM inference
+
+BREAKING CHANGE: removes LLM inference features"
+    [ "$status" -eq 0 ]
+    [ "${lines[0]}" = "refactor(core): remove LLM inference" ]
+    [ "${lines[1]}" = "BREAKING CHANGE: removes LLM inference features" ]
+    [ "${#lines[@]}" -eq 2 ]
+}
+
+@test "enforce_conventional_commit dedupes prefix-variant body bullets" {
+    run enforce_conventional_commit "feat(core): add caching
+
+- refactor(core): add caching
+- add caching layer
+- add caching layer"
+    [ "$status" -eq 0 ]
+    [ "${lines[0]}" = "feat(core): add caching" ]
+    [ "${lines[1]}" = "- add caching layer" ]
+    [ "${#lines[@]}" -eq 2 ]
+}
+
+@test "_commit_msg_from_json_obj dedupes repeated body array entries" {
+    local obj='{"type":"refactor","scope":"aicommit","breaking":true,"subject":"remove AI-driven grouping","body":["remove AI-driven grouping","remove AI-driven grouping","remove AI-driven grouping","remove AI-driven grouping","remove AI-driven grouping","remove AI-driven grouping"],"breaking_change":"removes AI-driven grouping features"}'
+    run _commit_msg_from_json_obj "$obj"
+    [ "$status" -eq 0 ]
+    [ "${lines[0]}" = "refactor(aicommit)!: remove AI-driven grouping" ]
+    [ "${lines[1]}" = "BREAKING CHANGE: removes AI-driven grouping features" ]
+    [ "${#lines[@]}" -eq 2 ]
+}
+
+@test "enforce_conventional_commit preserves distinct body bullets" {
+    run enforce_conventional_commit "test: update aiccx dry-run test
+
+- rename test case to clarify behavior
+- remove AI_ENABLE_LLM_GROUPING export
+- adjust assertions to match updated behavior"
+    [ "$status" -eq 0 ]
+    [ "${#lines[@]}" -eq 4 ]
+    assert_output_contains "- rename test case to clarify behavior"
+    assert_output_contains "- remove AI_ENABLE_LLM_GROUPING export"
+    assert_output_contains "- adjust assertions to match updated behavior"
+}
+
 @test "_assemble_commit_message parses schema JSON responses" {
     printf '{"type":"feat","scope":"none","breaking":false,"subject":"add transport"}' > "$TEST_TEMP_DIR/resp.txt"
     run _assemble_commit_message "$TEST_TEMP_DIR/resp.txt" "$TEST_TEMP_DIR"

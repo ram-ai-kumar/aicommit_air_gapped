@@ -833,6 +833,16 @@ enforce_conventional_commit() {
 
     # Run the core enforcement engine in awk
     printf '%s\n' "$raw_input" | awk '
+        function norm_body(s) {
+            s = tolower(s)
+            sub(/^[[:space:]]*[-*+][[:space:]]+/, "", s)
+            sub(/^[a-z]+(\([a-z0-9._\/-]+\))?!?:[[:space:]]*/, "", s)
+            gsub(/[[:space:]]+/, " ", s)
+            sub(/^[[:space:]]+/, "", s)
+            sub(/[[:space:]]+$/, "", s)
+            sub(/\.+$/, "", s)
+            return s
+        }
         BEGIN {
             line_count = 0
         }
@@ -1023,6 +1033,9 @@ enforce_conventional_commit() {
                 body_start++
             }
 
+            # Dedup body lines: normalized-exact repeats and lines that merely
+            # restate the subject carry no information — drop them.
+            norm_subject = norm_body(raw_desc)
             raw_body_count = 0
             prev_blank = 0
             for (i = body_start; i <= body_end; i++) {
@@ -1034,8 +1047,12 @@ enforce_conventional_commit() {
                         prev_blank = 1
                     }
                 } else {
-                    clean_body[raw_body_count++] = b_line
-                    prev_blank = 0
+                    norm = norm_body(b_line)
+                    if (norm != "" && norm != norm_subject && !(norm in seen_body)) {
+                        clean_body[raw_body_count++] = b_line
+                        seen_body[norm] = 1
+                        prev_blank = 0
+                    }
                 }
             }
             while (raw_body_count > 0 && clean_body[raw_body_count - 1] == "") {

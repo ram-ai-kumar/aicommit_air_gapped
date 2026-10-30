@@ -21,7 +21,8 @@ RULES:
   clauses with "and". Describe WHAT changed or WHY, not a list of files.
   Do not include the conventional prefix here (no "feat:" inside subject).
 - body: up to 6 items (paragraphs or bullets), each a real change or reason — never just a file
-  name. Return an empty array when one concern suffices.
+  name. Each item must state a distinct fact; never repeat an item or restate the
+  subject. Return an empty array when one concern suffices.
 - release: pick from ["major","minor","patch","none"]. Use 'major' for breaking changes,
   'minor' for new features, 'patch' for fixes/refactor/tooling, 'none' if unsure.
 
