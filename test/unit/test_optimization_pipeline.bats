@@ -65,44 +65,33 @@ teardown() {
     [ "$calls" -gt 0 ]
 }
 
-@test "aiccx dry-run preview followed by aicc makes 0 naming calls on second run" {
+@test "aiccx dry-run makes no LLM calls; aicc only calls for messages" {
     echo "init" > init.txt
     git add init.txt
     git commit -q -m "chore: initial commit"
 
     export AI_DISABLE_GROUPING="false"
-    export AI_ENABLE_LLM_GROUPING="true"
     echo "c1" >> app.js
     echo "c2" >> helper.py
     git add app.js helper.py
-    mock_ollama_api '{"groups":[{"id":"comp_1","name":"app","type":"chore","merge_into":null},{"id":"comp_2","name":"helper","type":"chore","merge_into":null}]}'
     rm -f "$TEST_TEMP_DIR/chat_calls.jsonl"
 
     run aiccx
     [ "$status" -eq 0 ]
+    # Grouping is fully deterministic — a dry-run must not call the LLM
+    [ ! -f "$TEST_TEMP_DIR/chat_calls.jsonl" ]
 
-    local preview_calls=0
-    [ -f "$TEST_TEMP_DIR/chat_calls.jsonl" ] && preview_calls=$(wc -l < "$TEST_TEMP_DIR/chat_calls.jsonl" | tr -d ' ')
-    [ "$preview_calls" -ge 1 ]
-
-    rm -f "$TEST_TEMP_DIR/chat_calls.jsonl"
     mock_ollama_api '{"type":"chore","scope":"none","breaking":false,"subject":"batch commit","body":[],"release":"none"}'
     run aicc
     [ "$status" -eq 0 ]
-
-    if [ -f "$TEST_TEMP_DIR/chat_calls.jsonl" ]; then
-        ! grep -q "GROUPS" "$TEST_TEMP_DIR/chat_calls.jsonl"
-        ! grep -q "name_groups" "$TEST_TEMP_DIR/chat_calls.jsonl"
-    fi
 }
 
-@test "aicc with 2 groups makes at most 1 naming call, 1 batch call and 0 semver calls" {
+@test "aicc with 2 groups makes only message calls and 0 semver calls" {
     export AI_DISABLE_GROUPING="false"
-    export AI_ENABLE_LLM_GROUPING="true"
     echo "part1" >> app.js
     echo "part2" >> helper.py
     git add app.js helper.py
-    mock_ollama_api '{"groups":[{"id":"comp_1","name":"app","type":"chore","merge_into":null},{"id":"comp_2","name":"helper","type":"chore","merge_into":null}]}'
+    mock_ollama_api '{"type":"chore","scope":"none","breaking":false,"subject":"update app","body":[],"release":"none"}'
     rm -f "$TEST_TEMP_DIR/chat_calls.jsonl"
 
     run aicc
@@ -277,22 +266,6 @@ teardown() {
         run is_strict_conventional_commit "$fin" "$d"
         [ "$status" -eq 0 ]
     done
-}
-
-# ─── Group naming reconciliation ─────────────────────────────────────────────
-
-@test "reconcile_grouping_json with id-based schema maps components to files" {
-    local staged_files=$'lib/core.sh\nREADME.md'
-    local comp_lines=$'comp_1\tlib/core.sh\ncomp_2\tREADME.md'
-    local raw_json='{"groups":[{"id":"comp_1","name":"core","type":"feat","merge_into":null},{"id":"comp_2","name":"docs","type":"docs","merge_into":null}]}'
-
-    run reconcile_grouping_json "$raw_json" "$staged_files" "$comp_lines"
-    [ "$status" -eq 0 ]
-    local line1 line2
-    line1=$(printf '%s\n' "$output" | head -1)
-    line2=$(printf '%s\n' "$output" | tail -1)
-    [[ "$line1" == *"lib/core.sh"* ]]
-    [[ "$line2" == *"README.md"* ]]
 }
 
 # ─── Keep-alive & num_ctx options ────────────────────────────────────────────
