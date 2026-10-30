@@ -475,7 +475,7 @@ DEOF
 
 # ─── bulk-added test consolidation (Cycle 5) ─────────────────────────────────
 
-@test "cluster_staged_files_deterministic does not feature-pair newly added tests" {
+@test "cluster_staged_files_deterministic pairs a newly added test with its staged subject" {
     local files diff_file
     files="$(printf 'app/models/estimate_item.rb\ntest/controllers/estimate_items_controller_test.rb')"
     diff_file="$TEST_TEMP_DIR/diff.txt"
@@ -489,6 +489,26 @@ new file mode 100644
 DEOF
     run cluster_staged_files_deterministic "$files" "$diff_file"
     [ "$status" -eq 0 ]
+    # New test pairs with its staged same-stem subject (estimate_item)
+    [ "$(printf '%s\n' "$output" | count_lines)" -eq 1 ]
+    assert_output_contains $'app/models/estimate_item.rb\ttest/controllers/estimate_items_controller_test.rb'
+}
+
+@test "cluster_staged_files_deterministic keeps unpaired newly added tests bucketed" {
+    local files diff_file
+    files="$(printf 'app/models/order.rb\ntest/controllers/invoice_controller_test.rb')"
+    diff_file="$TEST_TEMP_DIR/diff.txt"
+    cat > "$diff_file" <<'DEOF'
+diff --git a/app/models/order.rb b/app/models/order.rb
++        Order.recalculate_totals(scope)
+diff --git a/test/controllers/invoice_controller_test.rb b/test/controllers/invoice_controller_test.rb
+new file mode 100644
++    test 'creates invoice' do
++      assert_response :success
+DEOF
+    run cluster_staged_files_deterministic "$files" "$diff_file"
+    [ "$status" -eq 0 ]
+    # No shared stem — the new test stays in its own coverage group
     [ "$(printf '%s\n' "$output" | count_lines)" -eq 2 ]
 }
 
@@ -551,6 +571,111 @@ DEOF
     [ "$status" -eq 0 ]
     [ "$(printf '%s\n' "$output" | count_lines)" -eq 2 ]
     assert_output_contains $'test/controllers/a_test.rb\ttest/controllers/b_test.rb'
+}
+
+@test "cluster_staged_files_deterministic treats test_*.py route module as subject, not test" {
+    local files diff_file
+    files="$(printf 'app/api/routes/test_personas.py\ntests/api/routes/test_test_personas.py')"
+    diff_file="$TEST_TEMP_DIR/diff.txt"
+    cat > "$diff_file" <<'DEOF'
+diff --git a/app/api/routes/test_personas.py b/app/api/routes/test_personas.py
+new file mode 100644
++from fastapi import APIRouter
++router = APIRouter(prefix="/test-personas")
++@router.get("")
++async def list_test_personas():
++    return {"data": []}
+diff --git a/tests/api/routes/test_test_personas.py b/tests/api/routes/test_test_personas.py
+new file mode 100644
++import pytest
++def test_personas_hidden(client):
++    assert client.get("/x").status_code == 404
+DEOF
+    run cluster_staged_files_deterministic "$files" "$diff_file"
+    [ "$status" -eq 0 ]
+    # Route module is a subject (no test markers), pytest file pairs via `persona` stem
+    [ "$(printf '%s\n' "$output" | count_lines)" -eq 1 ]
+    assert_output_contains $'app/api/routes/test_personas.py\ttests/api/routes/test_test_personas.py'
+}
+
+@test "cluster_staged_files_deterministic sniffs ambiguous test_*.py with test markers" {
+    local files diff_file
+    files="$(printf 'src/utils/test_helpers.py\nsrc/models/widget.py')"
+    diff_file="$TEST_TEMP_DIR/diff.txt"
+    cat > "$diff_file" <<'DEOF'
+diff --git a/src/utils/test_helpers.py b/src/utils/test_helpers.py
+new file mode 100644
++import pytest
++def test_fixture_works():
++    assert True
+diff --git a/src/models/widget.py b/src/models/widget.py
++    widget.render()
+DEOF
+    run cluster_staged_files_deterministic "$files" "$diff_file"
+    [ "$status" -eq 0 ]
+    # test_helpers.py has pytest markers → classified test → stays separate
+    [ "$(printf '%s\n' "$output" | count_lines)" -eq 2 ]
+}
+
+@test "cluster_staged_files_deterministic does not glue __init__.py files across packages" {
+    local files diff_file
+    files="$(printf 'app/models/__init__.py\napp/services/__init__.py\napp/models/order.rb\napp/services/pricing.rb')"
+    diff_file="$TEST_TEMP_DIR/diff.txt"
+    cat > "$diff_file" <<'DEOF'
+diff --git a/app/models/__init__.py b/app/models/__init__.py
++from .order import Order
+diff --git a/app/services/__init__.py b/app/services/__init__.py
++from .pricing import Pricing
+diff --git a/app/models/order.rb b/app/models/order.rb
++    Order.total
+diff --git a/app/services/pricing.rb b/app/services/pricing.rb
++    Pricing.compute
+DEOF
+    run cluster_staged_files_deterministic "$files" "$diff_file"
+    [ "$status" -eq 0 ]
+    # __init__ files are package markers — they must not merge unrelated dirs
+    [ "$(printf '%s\n' "$output" | count_lines)" -ge 2 ]
+    ! printf '%s\n' "$output" | grep -q $'app/models/__init__.py\tapp/services/__init__.py'
+}
+
+@test "cluster_staged_files_deterministic keeps dir-derived features inside their own tree" {
+    local files diff_file
+    files="$(printf 'backend/app/public_api/admin.py\nfrontend/src/routes/admin/index.tsx\nfrontend/src/routes/admin/route.tsx')"
+    diff_file="$TEST_TEMP_DIR/diff.txt"
+    cat > "$diff_file" <<'DEOF'
+diff --git a/backend/app/public_api/admin.py b/backend/app/public_api/admin.py
++    admin_registry.unregister()
+diff --git a/frontend/src/routes/admin/index.tsx b/frontend/src/routes/admin/index.tsx
++    export const Route = createFileRoute("/admin")()
+diff --git a/frontend/src/routes/admin/route.tsx b/frontend/src/routes/admin/route.tsx
++    export const Route = createFileRoute("/admin")()
+DEOF
+    run cluster_staged_files_deterministic "$files" "$diff_file"
+    [ "$status" -eq 0 ]
+    # `admin` dir-walkback feature must not bridge backend/app ↔ frontend/src
+    [ "$(printf '%s\n' "$output" | count_lines)" -eq 2 ]
+    assert_output_contains $'frontend/src/routes/admin/index.tsx\tfrontend/src/routes/admin/route.tsx'
+}
+
+@test "cluster_staged_files_deterministic ignores ubiquitous CRUD symbol names" {
+    local files diff_file
+    files="$(printf 'app/services/data_admin/repository.py\napp/services/commerce.py')"
+    diff_file="$TEST_TEMP_DIR/diff.txt"
+    cat > "$diff_file" <<'DEOF'
+diff --git a/app/services/data_admin/repository.py b/app/services/data_admin/repository.py
+deleted file mode 100644
+-    def delete(self, row):
+-        session.delete(row)
+-    def update(self, row):
+-        session.commit()
+diff --git a/app/services/commerce.py b/app/services/commerce.py
++    await session.delete(order)
++    await session.commit()
+DEOF
+    run cluster_staged_files_deterministic "$files" "$diff_file"
+    [ "$status" -eq 0 ]
+    # `delete`/`update`/`commit` carry no pairing signal → 2 groups
+    [ "$(printf '%s\n' "$output" | count_lines)" -eq 2 ]
 }
 
 # ─── symbol/dir-union noise dampeners ────────────────────────────────────────

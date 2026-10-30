@@ -103,15 +103,15 @@ infer_file_scope() {
             echo "config" ;;
         .github/*|Dockerfile*|docker-compose*|k8s/*|terraform/*)
             echo "ci" ;;
-        test/*|tests/*|spec/*|__tests__/*|*.test.*|*.spec.*|*.bats)
+        test/*|tests/*|spec/*|__tests__/*|*/test/*|*/tests/*|*/spec/*|*/__tests__/*|*.test.*|*.spec.*|*.bats)
             echo "test" ;;
         docs/*|*.md|*.rst|README*|CHANGELOG*|CONTRIBUTING*)
             echo "docs" ;;
         templates/*|*prompt*)
             echo "prompt" ;;
-        src/components/*|components/*)
+        src/components/*|components/*|*/src/components/*|*/components/*)
             local comp_sub=""
-            comp_sub=$(echo "$file" | sed -E 's|^(src/)?components/([^/]+).*|\2|')
+            comp_sub=$(echo "$file" | sed -E 's#^(.*/)?components/([^/]+).*#\2#')
             if [ -n "$comp_sub" ] && [ "$comp_sub" != "$file" ]; then
                 if echo "$comp_sub" | grep -qi "schema"; then
                     echo "seo"
@@ -124,9 +124,12 @@ infer_file_scope() {
             ;;
         lib/*|aicommit.sh|cli/*)
             echo "core" ;;
-        src/*|app/*)
+        src/*|app/*|*/src/*|*/app/*)
             local mod=""
-            mod=$(echo "$file" | awk -F/ '{print $2}')
+            # Segment right after the first src/ or app/ marker — root layouts
+            # give the same answer as before; prefixed roots (frontend/src,
+            # backend/app, packages/x/src) previously fell through to leaf dirs.
+            mod=$(echo "$file" | sed -E 's#^(.*/)?(src|app)/([^/]+).*#\3#')
             mod="${mod%.*}"
             echo "${mod:-core}" ;;
         *)
@@ -148,7 +151,7 @@ infer_file_scope() {
 infer_logical_file_context() {
     local file="$1"
     case "$file" in
-        test/*|tests/*|spec/*|__tests__/*|*.test.*|*.spec.*|*_test.*|test_*.*|*.bats)
+        test/*|tests/*|spec/*|__tests__/*|*/test/*|*/tests/*|*/spec/*|*/__tests__/*|*.test.*|*.spec.*|*_test.*|test_*.*|*.bats)
             echo "test" ;;
         *.md|*.rst|docs/*|doc/*|README*|CHANGELOG*|CONTRIBUTING*|LICENSE*|AGENTS*|*.txt)
             echo "docs" ;;
@@ -163,8 +166,10 @@ infer_logical_file_context() {
 
 # ─── Deterministic graph clustering ──────────────────────────────────────────
 # Staged files become nodes in a graph; edges are structural facts, not guesses:
-#   1. domain feature + test↔subject stem pairing (newly added tests excluded —
-#      they consolidate by layer in Cycle 5 instead of pairing per subject)
+#   1. domain feature + test↔subject stem pairing (newly added tests pair with
+#      a staged same-stem subject; unpaired ones consolidate by layer in
+#      Cycle 5. Ambiguous `test_*` basenames outside test dirs classify by
+#      staged-hunk test markers, so api/routes/test_personas.py is a subject)
 #   2. shared symbol (non-test definers only) + replicated-edit signatures:
 #      identical or receiver-masked added lines shared across files = one
 #      replicated change (e.g. `foo&.bar` nil-safety added to many views)
@@ -172,7 +177,7 @@ infer_logical_file_context() {
 #   4. same leaf directory         weak edge, only attaches otherwise isolated
 #      files, and only when the rep's component lives entirely in that dir
 #   5. unpaired test consolidation — untouched tests bucket by layer, capped
-#      at AI_MAX_GROUP_SIZE (hybrid placement: M/D tests may still pair)
+#      at AI_MAX_GROUP_SIZE (paired tests stay with their subject)
 # Groups are connected components (union-find), computed in one awk program —
 # identical input always produces identical groups. Set AICOMMIT_GROUP_DEBUG to
 # a path (or /dev/stdout) to log every union edge tagged by cycle.
@@ -199,16 +204,22 @@ cluster_staged_files_deterministic() {
         n = split(d, a, "/")
         return (n >= 2) ? a[1] "/" a[2] : a[1]
     }
+    function dir1(p,   a, n) {
+        n = split(p, a, "/")
+        return (n >= 2) ? a[1] : "."
+    }
     function norm_stem(path,    b, s) {
         b = basename_of(path)
         if (b ~ /^use[A-Z]/) sub(/^use/, "", b)
+        if (b ~ /^Test[A-Z]/) sub(/^Test/, "", b)
+        if (b ~ /^Spec[A-Z]/) sub(/^Spec/, "", b)
         s = tolower(b)
         sub(/\.(g|freezed|mocks|part)\.dart$/, "", s)
         sub(/\.(module|spec|test)\.(css|scss|sass|less|ts|tsx|js|jsx)$/, "", s)
         sub(/\.html\.(erb|haml|slim)$/, "", s)
         sub(/\.[^.\/]+$/, "", s)
         sub(/^[0-9]+_/, "", s)
-        sub(/^(test|tests|spec|specs)_/, "", s)
+        while (sub(/^(test|tests|spec|specs)[_-]/, "", s)) { }
         sub(/(_test|_spec|\.test|\.spec|test_|spec_|-test|-spec|_tests|_specs)$/, "", s)
         sub(/^(create|add|update|remove|drop|alter|modify)_/, "", s)
         sub(/^use_/, "", s)
@@ -218,10 +229,31 @@ cluster_staged_files_deterministic() {
         else if (s ~ /[^s]s$/ && length(s) > 3) sub(/s$/, "", s)
         return s
     }
+    # Pairing key: separator-insensitive stem so `role-gate` ≡ `rolegate` and
+    # `test-personas` ≡ `testpersonas`. Feature names keep the norm_stem form.
+    function stem_key(path,   s) {
+        s = norm_stem(path); gsub(/[-_]/, "", s); return s
+    }
     function is_test_path(p) {
         return p ~ /(^|\/)(tests?|spec|__tests__|testdata)\// || \
                p ~ /(_test|_spec|\.test|\.spec)\.[^.\/]+$/ || \
                p ~ /\.bats$/ || p ~ /(^|\/)test_[^\/]+$/
+    }
+    # `test_*.py`-style basenames outside test dirs are ambiguous: pytest
+    # collects them anywhere, but app code also names domain modules that way
+    # (backend/app/api/routes/test_personas.py is an APIRouter module, not a
+    # test). Resolve by sniffing the staged hunk for test markers.
+    function is_ambiguous_test_name(p) {
+        return p ~ /(^|\/)test_[^\/]+$/ && \
+               p !~ /(^|\/)(tests?|spec|__tests__|testdata)\//
+    }
+    function hunk_is_test(f,   h) {
+        h = hunk[f]
+        return h ~ /(^|\n)[ \t+~-]*(import[ \t]+pytest|from[ \t]+pytest|import[ \t]+unittest|from[ \t]+unittest|def[ \t]+test_|class[ \t]+Test|TestClient|pytest\.|unittest\.)/ || \
+               h ~ /(^|[^A-Za-z0-9_])(describe|it|test|expect)[ \t]*\(/
+    }
+    function is_test_file(f) {
+        return is_test_path(f) && (!is_ambiguous_test_name(f) || hunk_is_test(f))
     }
     function test_bucket(p,   d, seg) {
         if (match(p, /(^|\/)(tests?|spec|__tests__)\/([^\/]+)/)) {
@@ -232,7 +264,12 @@ cluster_staged_files_deterministic() {
         }
         d = dirname_of(p); return "dir:" d
     }
+    # Sets _featdir=1 when the returned feature came from dir-walkback (weak
+    # guess), 0 when it is the file stem itself or an explicit features/ dir
+    # (authoritative). Cycle 1 uses this to keep dir-derived features from
+    # bridging unrelated directory trees.
     function feature_of(path,    p, d, s, n, a, seg, idx) {
+        _featdir = 0
         if (match(path, /(^|\/)(features?|modules?)\/([^\/]+)\//)) {
             seg = substr(path, RSTART, RLENGTH)
             sub(/^.*(features?|modules?)\//, "", seg)
@@ -244,15 +281,16 @@ cluster_staged_files_deterministic() {
             if (is_domain_keyword(seg)) return seg
         }
         s = norm_stem(path)
-        if (s ~ /^(index|show|edit|new|form|create|update|list|detail|details|page|view|mod|lib|main|app|route|routes|router|routers|urls|handler|handlers|service|services|repository|repositories|client|clients|worker|workers|model|models|schema|schemas|types|dto|dtos|adapter|adapters|dao|controller|controllers)$/) {
+        if (s ~ /^(index|show|edit|new|form|create|update|list|detail|details|page|view|mod|lib|main|app|route|routes|router|routers|urls|handler|handlers|service|services|repository|repositories|client|clients|worker|workers|model|models|schema|schemas|types|dto|dtos|adapter|adapters|dao|controller|controllers|__init__|__main__|conftest)$/) {
             d = dirname_of(path); n = split(d, a, "/")
             for (idx = n; idx >= 1; idx--) {
                 seg = tolower(a[idx])
                 if (seg ~ /ies$/) sub(/ies$/, "y", seg)
                 else if (seg ~ /(sses|shes|ches|xes|zes)$/) sub(/es$/, "", seg)
                 else if (seg ~ /[^s]s$/ && length(seg) > 3) sub(/s$/, "", seg)
-                if (seg !~ /^(routes?|routers?|urls|views?|screens?|widgets?|pages?|components?|app|lib|src|internal|pkg|api|endpoints?|v[0-9]+|features?)$/) {
+                if (seg !~ /^(routes?|routers?|urls|views?|screens?|widgets?|pages?|components?|app|lib|src|internal|pkg|api|endpoints?|v[0-9]+|features?|backend|frontend|server|web|mobile|packages?|apps?)$/) {
                     s = seg
+                    _featdir = 1
                     break
                 }
             }
@@ -260,7 +298,7 @@ cluster_staged_files_deterministic() {
         return s
     }
     function is_domain_keyword(s) {
-        return (s != "" && s !~ /^(test|tests|spec|specs|model|models|controller|controllers|view|views|helper|helpers|service|services|migration|migrations|route|routes|config|common|core|base|main|index|app|lib|src|doc|docs|readme|changelog|license|fixture|fixtures|script|scripts|bin|tool|tools|handler|handlers|repository|repositories|schema|schemas|types|dto|dtos|adapter|adapters|dao|client|clients|worker|workers|component|components|ui)$/ && length(s) >= 3)
+        return (s != "" && s !~ /^(test|tests|spec|specs|model|models|controller|controllers|view|views|helper|helpers|service|services|migration|migrations|route|routes|config|common|core|base|main|index|app|lib|src|doc|docs|readme|changelog|license|fixture|fixtures|script|scripts|bin|tool|tools|handler|handlers|repository|repositories|schema|schemas|types|dto|dtos|adapter|adapters|dao|client|clients|worker|workers|component|components|ui|__init__|__main__|conftest)$/ && length(s) >= 3)
     }
     function find(x,   r, p2) {
         r = x
@@ -296,7 +334,7 @@ cluster_staged_files_deterministic() {
                     # many files is the strongest merge signal the diff carries
                     # (e.g. `foo&.bar` nil-safety added to 25 views). Added
                     # lines only; three signature granularities per line.
-                    if (line ~ /^\+/ && !is_test_path(cur)) {
+                    if (line ~ /^\+/ && (!is_test_path(cur) || is_ambiguous_test_name(cur))) {
                         sig_src = substr(line, 2)
                         gsub(/[ \t]+/, " ", sig_src)
                         sub(/^ /, "", sig_src); sub(/ $/, "", sig_src)
@@ -333,7 +371,10 @@ cluster_staged_files_deterministic() {
                         match(s, /^[A-Za-z_][A-Za-z0-9_]*/)
                         sym = substr(s, RSTART, RLENGTH)
                     }
-                    if (sym != "" && length(sym) >= 5 && sym !~ /^(constructor|toString|hashCode|build|dispose|initState|render|setup|teardown)$/ && !is_test_path(cur)) {
+                    # Ubiquitous names carry no pairing signal — a deleted
+                    # CRUD `def delete`/`update`/`commit` must not glue its
+                    # file to every other diff calling .delete()/.update().
+                    if (sym != "" && length(sym) >= 5 && sym !~ /^(constructor|toString|hashCode|build|dispose|initState|render|setup|teardown|all|one|list|count|create|update|delete|save|commit|refresh|rollback|close|open|read|write|find|add|remove|load|init|run|main|start|stop|new|make|call|fetch|send|parse|format|handle|process|execute|apply|reset|clear|copy|clone|dict|json|str|repr|len|enter|exit|done|check|ensure|exists|validate|serialize|to_dict|from_dict|to_json|from_json|dump|dumps|loads|encode|decode|verify|use|data|name|value|item|items|key|result|response|request|error|message|config|settings|options|params|args|kwargs|self|cls|obj|record|row|rows|user)$/ && (!is_test_path(cur) || is_ambiguous_test_name(cur))) {
                         defs[cur SUBSEP sym] = 1
                     }
                     if (match(line, /(resources|resource|create_table)[ \t]+:([A-Za-z0-9_]+)/)) {
@@ -410,6 +451,26 @@ cluster_staged_files_deterministic() {
             }
             close(diff_file)
             for (k in defs) { split(k, a, SUBSEP); definer[a[2]] = definer[a[2]] " " a[1] }
+            # Normalize extracted diff keywords through the same stem rules so
+            # include_router(test_personas.router) reaches feature `persona`
+            # and include_router(public_api_router) reaches `public_api`.
+            for (k in diff_features) {
+                split(k, a, SUBSEP)
+                nr = norm_stem(a[2])
+                if (nr != a[2]) {
+                    delete diff_features[k]
+                    diff_features[a[1] SUBSEP nr] = 1
+                }
+            }
+            for (k in diff_feat_count) {
+                split(k, a, SUBSEP)
+                nr = norm_stem(a[2])
+                if (nr != a[2]) {
+                    c = diff_feat_count[k]
+                    delete diff_feat_count[k]
+                    diff_feat_count[a[1] SUBSEP nr] += c
+                }
+            }
         }
         # Co-change pairs; line 1 of the cache is the HEAD sha it was built at
         if (cochange_file != "") {
@@ -425,35 +486,74 @@ cluster_staged_files_deterministic() {
     END {
         cyc = "1"
         # Cycle 1 — Primary Domain Feature Seed Formation & Companion Pairing
+        # Final test classification first: path-shape test AND (unambiguous
+        # location/suffix OR test markers in the staged hunk). An ambiguous
+        # `test_*` basename outside test dirs (api/routes/test_personas.py is
+        # an APIRouter module, not a pytest file) resolves by content.
         for (i = 1; i <= nf; i++) {
             f = files[i]
-            # Newly added test files never seed or join feature components —
-            # bulk-added coverage consolidates in Cycle 5 instead of splitting
-            # per subject or gluing features together. M/D tests still pair.
-            newtest[f] = (is_test_path(f) && status[f] == "A") ? 1 : 0
+            istest[f] = is_test_file(f) ? 1 : 0
+            newtest[f] = (istest[f] && status[f] == "A") ? 1 : 0
+        }
+        for (i = 1; i <= nf; i++) {
+            f = files[i]
+            # Stem bookkeeping covers every file — newly added tests included —
+            # so a new test still pairs with its staged same-stem subject.
+            # Package markers (__init__.py, conftest.py, __main__.py) never
+            # pair: they share one stem across unrelated packages and
+            # tests/*/__init__.py would count `init` as a tested stem,
+            # gluing every staged __init__ into one component.
+            if (basename_of(f) !~ /^(__init__|__main__|conftest)\./) {
+                base_st = stem_key(f)
+                stem_count[base_st]++
+                stem_test[base_st] += istest[f]
+                stem_list[base_st] = (base_st in stem_list ? stem_list[base_st] SUBSEP f : f)
+                if (!(base_st in stem_first)) stem_first[base_st] = f
+            }
+            # Newly added tests still never seed feature components — bulk-
+            # added coverage consolidates in Cycle 5 instead of voting on
+            # feature names. M/D tests seed and pair as before.
             if (newtest[f]) continue
             st = feature_of(f)
+            feat_dir[f] = _featdir
             if (st != "" && is_domain_keyword(st)) {
                 feat_count[st]++
                 feat_list[st] = (st in feat_list ? feat_list[st] SUBSEP f : f)
                 if (!(st in feat_first)) feat_first[st] = f
             }
-            base_st = norm_stem(basename_of(f))
-            stem_count[base_st]++
-            stem_test[base_st] += (is_test_path(f) ? 1 : 0)
-            stem_list[base_st] = (base_st in stem_list ? stem_list[base_st] SUBSEP f : f)
-            if (!(base_st in stem_first)) stem_first[base_st] = f
         }
         for (st in feat_count) {
             if (feat_count[st] >= 2) {
                 m = split(feat_list[st], sf, SUBSEP)
+                anchor = feat_first[st]
+                delete d2_anchor
+                d2_anchor[dir2(anchor)] = anchor
                 for (j = 1; j <= m; j++) {
-                    if (sf[j] != "") union(feat_first[st], sf[j])
+                    f = sf[j]
+                    if (f == "" || f == anchor) continue
+                    d = dir2(f)
+                    # A dir-derived member (generic stem, name guessed from a
+                    # parent dir) only unions inside its own top-level tree
+                    # (dir1) — Rails spreads a feature across
+                    # app/models|controllers|views legitimately, while
+                    # backend/app ↔ frontend/src must not bridge. A
+                    # stem-derived member owns the feature name itself and may
+                    # bridge trees (auth.py ↔ useAuth.ts, route.ts ↔
+                    # subscription.test.ts).
+                    if (dir1(f) == dir1(anchor) || !feat_dir[f]) {
+                        union(anchor, f)
+                    } else if (d in d2_anchor) {
+                        union(d2_anchor[d], f)
+                    } else {
+                        d2_anchor[d] = f
+                    }
                 }
             }
         }
         for (st in stem_count) {
-            if (stem_count[st] >= 2 && stem_test[st] >= 1 && stem_test[st] < stem_count[st]) {
+            # Min stem length (same as is_domain_keyword): 1-2 char stems like
+            # `a`/`db` are noise that pairs unrelated files.
+            if (length(st) >= 3 && stem_count[st] >= 2 && stem_test[st] >= 1 && stem_test[st] < stem_count[st]) {
                 m = split(stem_list[st], sf, SUBSEP)
                 for (j = 1; j <= m; j++) {
                     if (sf[j] != "") union(stem_first[st], sf[j])
@@ -576,13 +676,13 @@ cluster_staged_files_deterministic() {
         for (i = 1; i <= nf; i++) {
             f = files[i]
             if (f in touched) {
-                if (!is_test_path(f) && comp_ndirs[find(f)] <= 1) dir_rep[dirname_of(f)] = find(f)
+                if (!istest[f] && comp_ndirs[find(f)] <= 1) dir_rep[dirname_of(f)] = find(f)
             }
         }
         for (i = 1; i <= nf; i++) {
             f = files[i]
             if (f in touched) continue
-            if (is_test_path(f)) continue
+            if (istest[f]) continue
             d = dirname_of(f)
             if (d == "." || d ~ /(^|\/)(tests?|spec|__tests__|testdata)($|\/)/) continue
             if (d in dir_rep) union(dir_rep[d], f)
@@ -598,10 +698,12 @@ cluster_staged_files_deterministic() {
         if (tgroup_max + 0 < 2) tgroup_max = 14
         for (i = 1; i <= nf; i++) {
             f = files[i]
-            if (!is_test_path(f)) continue
-            # A tests always bucket (bulk-added coverage); M/D tests bucket
-            # only when no earlier edge paired them to a subject.
-            if ((f in touched) && status[f] != "A") continue
+            if (!istest[f]) continue
+            # Any test already unioned (stem pair, symbol, co-change — A-status
+            # included) stays with its subject; bucketing it would drag the
+            # whole component into the coverage bucket. Only untouched tests
+            # reach this point.
+            if (f in touched) continue
             tb = test_bucket(f)
             tb_count[tb]++
             tb_list[tb] = (tb in tb_list ? tb_list[tb] SUBSEP f : f)
@@ -694,13 +796,15 @@ _name_component_lines() {
         function norm_stem(path,    b, s) {
             b = basename_of(path)
             if (b ~ /^use[A-Z]/) sub(/^use/, "", b)
+            if (b ~ /^Test[A-Z]/) sub(/^Test/, "", b)
+            if (b ~ /^Spec[A-Z]/) sub(/^Spec/, "", b)
             s = tolower(b)
             sub(/\.(g|freezed|mocks|part)\.dart$/, "", s)
             sub(/\.(module|spec|test)\.(css|scss|sass|less|ts|tsx|js|jsx)$/, "", s)
             sub(/\.html\.(erb|haml|slim)$/, "", s)
             sub(/\.[^.\/]+$/, "", s)
             sub(/^[0-9]+_/, "", s)
-            sub(/^(test|tests|spec|specs)_/, "", s)
+            while (sub(/^(test|tests|spec|specs)[_-]/, "", s)) { }
             sub(/(_test|_spec|\.test|\.spec|test_|spec_|-test|-spec|_tests|_specs)$/, "", s)
             sub(/^(create|add|update|remove|drop|alter|modify)_/, "", s)
             sub(/^use_/, "", s)
@@ -710,7 +814,10 @@ _name_component_lines() {
             else if (s ~ /[^s]s$/ && length(s) > 3) sub(/s$/, "", s)
             return s
         }
+        # Sets _featdir=1 when the feature came from dir-walkback (kept in sync
+        # with the copy in cluster_staged_files_deterministic; unused here).
         function feature_of(path,    p, d, s, n, a, seg, idx) {
+            _featdir = 0
             if (match(path, /(^|\/)(features?|modules?)\/([^\/]+)\//)) {
                 seg = substr(path, RSTART, RLENGTH)
                 sub(/^.*(features?|modules?)\//, "", seg)
@@ -722,15 +829,16 @@ _name_component_lines() {
                 if (is_domain_keyword(seg)) return seg
             }
             s = norm_stem(path)
-            if (s ~ /^(index|show|edit|new|form|create|update|list|detail|details|page|view|mod|lib|main|app|route|routes|router|routers|urls|handler|handlers|service|services|repository|repositories|client|clients|worker|workers|model|models|schema|schemas|types|dto|dtos|adapter|adapters|dao|controller|controllers)$/) {
+            if (s ~ /^(index|show|edit|new|form|create|update|list|detail|details|page|view|mod|lib|main|app|route|routes|router|routers|urls|handler|handlers|service|services|repository|repositories|client|clients|worker|workers|model|models|schema|schemas|types|dto|dtos|adapter|adapters|dao|controller|controllers|__init__|__main__|conftest)$/) {
                 d = dirname_of(path); n = split(d, a, "/")
                 for (idx = n; idx >= 1; idx--) {
                     seg = tolower(a[idx])
                     if (seg ~ /ies$/) sub(/ies$/, "y", seg)
                     else if (seg ~ /(sses|shes|ches|xes|zes)$/) sub(/es$/, "", seg)
                     else if (seg ~ /[^s]s$/ && length(seg) > 3) sub(/s$/, "", seg)
-                    if (seg !~ /^(routes?|routers?|urls|views?|screens?|widgets?|pages?|components?|app|lib|src|internal|pkg|api|endpoints?|v[0-9]+|features?)$/) {
+                    if (seg !~ /^(routes?|routers?|urls|views?|screens?|widgets?|pages?|components?|app|lib|src|internal|pkg|api|endpoints?|v[0-9]+|features?|backend|frontend|server|web|mobile|packages?|apps?)$/) {
                         s = seg
+                        _featdir = 1
                         break
                     }
                 }
@@ -738,7 +846,7 @@ _name_component_lines() {
             return s
         }
         function is_domain_keyword(s) {
-            return (s != "" && s !~ /^(test|tests|spec|specs|model|models|controller|controllers|view|views|helper|helpers|service|services|migration|migrations|route|routes|config|common|core|base|main|index|app|lib|src|doc|docs|readme|changelog|license|fixture|fixtures|script|scripts|bin|tool|tools|handler|handlers|repository|repositories|schema|schemas|types|dto|dtos|adapter|adapters|dao|client|clients|worker|workers|component|components|ui)$/ && length(s) >= 3)
+            return (s != "" && s !~ /^(test|tests|spec|specs|model|models|controller|controllers|view|views|helper|helpers|service|services|migration|migrations|route|routes|config|common|core|base|main|index|app|lib|src|doc|docs|readme|changelog|license|fixture|fixtures|script|scripts|bin|tool|tools|handler|handlers|repository|repositories|schema|schemas|types|dto|dtos|adapter|adapters|dao|client|clients|worker|workers|component|components|ui|__init__|__main__|conftest)$/ && length(s) >= 3)
         }
         {
             st = feature_of($0)
@@ -746,16 +854,21 @@ _name_component_lines() {
             total_files++
         }
         END {
-            max_c = 0; best = ""; num_distinct = 0
+            max_c = 0; second_c = 0; best = ""; num_distinct = 0
             for (st in counts) {
                 num_distinct++
-                if (counts[st] > max_c) { max_c = counts[st]; best = st }
+                if (counts[st] > max_c) { second_c = max_c; max_c = counts[st]; best = st }
+                else if (counts[st] > second_c) second_c = counts[st]
             }
             # dominant = covers ≥ half the members — keeps a large merged
-            # component from being named after a minority feature in it
+            # component from being named after a minority feature in it.
+            # Failing that, a repeated feature that is the strict plurality
+            # (a tie can never qualify) still beats a generic dir-scope name.
             if (max_c >= 2 && max_c * 2 >= total_files) {
                 print best
             } else if (max_c == 1 && num_distinct == 1 && total_files >= 2) {
+                print best
+            } else if (max_c >= 3 && max_c > second_c) {
                 print best
             }
         }')
@@ -798,8 +911,8 @@ _name_component_lines() {
             # Generic bucket name + members sharing a deeper common leaf dir →
             # name the component by that leaf instead of "docs-12".
             case "$name" in
-                docs|config|scripts|core)
-                    if [ ${#_aicommit_split_files[@]} -ge 2 ]; then
+                docs|config|scripts|core|ui|routes)
+                    if [ ${#_aicommit_split_files[@]} -ge 1 ]; then
                         common_dir=$(printf '%s\n' "${_aicommit_split_files[@]}" | awk -F/ '
                             { n = split($0, a, "/")
                               if (NR == 1) { m = n - 1; for (i = 1; i <= m; i++) c[i] = a[i] }
@@ -809,6 +922,7 @@ _name_component_lines() {
                         leaf="${common_dir##*/}"
                         case "$leaf" in
                             docs|doc|src|lib|app|test|tests|"") ;;
+                            _*|\$*|.\$*) ;; # pathless route markers (_layout, $id)
                             *) [ "$common_dir" != "." ] && name="$leaf" ;;
                         esac
                     fi
