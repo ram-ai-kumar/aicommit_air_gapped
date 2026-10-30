@@ -163,12 +163,19 @@ infer_logical_file_context() {
 
 # ─── Deterministic graph clustering ──────────────────────────────────────────
 # Staged files become nodes in a graph; edges are structural facts, not guesses:
-#   1. test↔subject stem pairing   test/unit/test_core.bats ↔ lib/core.sh
-#   2. shared symbol               a definition changed in A's diff appears in B's
+#   1. domain feature + test↔subject stem pairing (newly added tests excluded —
+#      they consolidate by layer in Cycle 5 instead of pairing per subject)
+#   2. shared symbol (non-test definers only) + replicated-edit signatures:
+#      identical or receiver-masked added lines shared across files = one
+#      replicated change (e.g. `foo&.bar` nil-safety added to many views)
 #   3. co-change history           files committed together ≥N times in git log -300
-#   4. same leaf directory         weak edge, only attaches otherwise isolated files
+#   4. same leaf directory         weak edge, only attaches otherwise isolated
+#      files, and only when the rep's component lives entirely in that dir
+#   5. unpaired test consolidation — untouched tests bucket by layer, capped
+#      at AI_MAX_GROUP_SIZE (hybrid placement: M/D tests may still pair)
 # Groups are connected components (union-find), computed in one awk program —
-# identical input always produces identical groups.
+# identical input always produces identical groups. Set AICOMMIT_GROUP_DEBUG to
+# a path (or /dev/stdout) to log every union edge tagged by cycle.
 
 cluster_staged_files_deterministic() {
     local staged_files="$1"
@@ -181,6 +188,8 @@ cluster_staged_files_deterministic() {
         -v cochange_file="$cochange_file" \
         -v cochange_min="${AI_COCHANGE_MIN:-2}" \
         -v sym_max="${AI_SYMBOL_MAX_FILES:-4}" \
+        -v tgroup_max="${AI_MAX_GROUP_SIZE:-14}" \
+        -v dbg="${AICOMMIT_GROUP_DEBUG:-}" \
         -v patterns_file="$framework_patterns_file" '
     function basename_of(p,   b) { b = p; sub(/^.*\//, "", b); return b }
     function dirname_of(p,   d) { d = p; return (sub(/\/[^\/]*$/, "", d) ? d : ".") }
@@ -213,6 +222,15 @@ cluster_staged_files_deterministic() {
         return p ~ /(^|\/)(tests?|spec|__tests__|testdata)\// || \
                p ~ /(_test|_spec|\.test|\.spec)\.[^.\/]+$/ || \
                p ~ /\.bats$/ || p ~ /(^|\/)test_[^\/]+$/
+    }
+    function test_bucket(p,   d, seg) {
+        if (match(p, /(^|\/)(tests?|spec|__tests__)\/([^\/]+)/)) {
+            seg = substr(p, RSTART, RLENGTH)
+            sub(/^.*(tests?|spec|__tests__)\//, "", seg)
+            if (seg ~ /^(controllers?|models?|mailers?|helpers?|views?|integration|requests?|routing|channels?|jobs?|policies?|serializers?|units?|functional)$/) return "cov:" seg
+            return "infra"
+        }
+        d = dirname_of(p); return "dir:" d
     }
     function feature_of(path,    p, d, s, n, a, seg, idx) {
         if (match(path, /(^|\/)(features?|modules?)\/([^\/]+)\//)) {
@@ -253,7 +271,7 @@ cluster_staged_files_deterministic() {
     function union(a, b,   ra, rb) {
         if (a == "" || b == "" || a == b) return
         ra = find(a); rb = find(b)
-        if (ra != rb) { parent[rb] = ra; touched[a] = 1; touched[b] = 1 }
+        if (ra != rb) { parent[rb] = ra; touched[a] = 1; touched[b] = 1; if (dbg != "") printf "UNION[%s] %s <- %s\n", cyc, a, b > dbg }
     }
     BEGIN {
         # Per-file hunk text + definitions changed, from the staged diff
@@ -274,6 +292,37 @@ cluster_staged_files_deterministic() {
                 if (line ~ /^[+-]/ && line !~ /^[+-][+-][+-]/) {
                     hunk[cur] = hunk[cur] substr(line, 1, 300) "\n"
                     if (length(hunk[cur]) > 60000) hunk[cur] = substr(hunk[cur], 1, 60000)
+                    # Replicated-edit signatures — the same change applied to
+                    # many files is the strongest merge signal the diff carries
+                    # (e.g. `foo&.bar` nil-safety added to 25 views). Added
+                    # lines only; three signature granularities per line.
+                    if (line ~ /^\+/ && !is_test_path(cur)) {
+                        sig_src = substr(line, 2)
+                        gsub(/[ \t]+/, " ", sig_src)
+                        sub(/^ /, "", sig_src); sub(/ $/, "", sig_src)
+                        if (length(sig_src) >= 12 && sig_src ~ /[.(&=\/]/ && \
+                            sig_src !~ /^(end|else|elsif|elif|fi|done|rescue|ensure|when|then|do)[ ,;}]?$/) {
+                            fsig[cur SUBSEP "L:" sig_src] = 1
+                            sig_v = sig_src
+                            gsub(/@[A-Za-z_][A-Za-z0-9_]*/, "@V", sig_v)
+                            if (sig_v != sig_src && sig_v ~ /&\.|\.[A-Za-z_][A-Za-z0-9_]*\./)
+                                fsig[cur SUBSEP "V:" sig_v] = 1
+                            # Chain-tail signatures: `receiver.foo&.bar` → `foo&.bar`
+                            sig_tmp = sig_v
+                            while (match(sig_tmp, /[A-Za-z_][A-Za-z0-9_]*((&\.|\.)[A-Za-z_][A-Za-z0-9_]*)+/)) {
+                                chain = substr(sig_tmp, RSTART, RLENGTH)
+                                sig_tmp = substr(sig_tmp, RSTART + RLENGTH)
+                                if (chain ~ /&\./ || gsub(/\./, ".", chain) >= 2) {
+                                    # safe-nav attr tail: `x&.name`/`x.y&.name`
+                                    # both mean the same nil-safe display fix
+                                    if (chain ~ /&\./ && match(chain, /[A-Za-z_][A-Za-z0-9_]*$/))
+                                        fsig[cur SUBSEP "C:&." substr(chain, RSTART)] = 1
+                                    sub(/^[A-Za-z_][A-Za-z0-9_]*(&\.|\.)/, "", chain)
+                                    if (chain ~ /&\.|\./) fsig[cur SUBSEP "C:" chain] = 1
+                                }
+                            }
+                        }
+                    }
                     sym = ""
                     if (match(line, /(^|[^A-Za-z0-9_])(def |function |func |fn |class |interface |struct |enum |module |trait |mixin )[A-Za-z_][A-Za-z0-9_]*/)) {
                         sym = substr(line, RSTART, RLENGTH); sub(/.*[ \t]/, "", sym)
@@ -284,7 +333,7 @@ cluster_staged_files_deterministic() {
                         match(s, /^[A-Za-z_][A-Za-z0-9_]*/)
                         sym = substr(s, RSTART, RLENGTH)
                     }
-                    if (sym != "" && length(sym) >= 5 && sym !~ /^(constructor|toString|hashCode|build|dispose|initState|render|setup|teardown)$/) {
+                    if (sym != "" && length(sym) >= 5 && sym !~ /^(constructor|toString|hashCode|build|dispose|initState|render|setup|teardown)$/ && !is_test_path(cur)) {
                         defs[cur SUBSEP sym] = 1
                     }
                     if (match(line, /(resources|resource|create_table)[ \t]+:([A-Za-z0-9_]+)/)) {
@@ -374,9 +423,15 @@ cluster_staged_files_deterministic() {
     }
     { files[++nf] = $0; parent[$0] = $0 }
     END {
+        cyc = "1"
         # Cycle 1 — Primary Domain Feature Seed Formation & Companion Pairing
         for (i = 1; i <= nf; i++) {
             f = files[i]
+            # Newly added test files never seed or join feature components —
+            # bulk-added coverage consolidates in Cycle 5 instead of splitting
+            # per subject or gluing features together. M/D tests still pair.
+            newtest[f] = (is_test_path(f) && status[f] == "A") ? 1 : 0
+            if (newtest[f]) continue
             st = feature_of(f)
             if (st != "" && is_domain_keyword(st)) {
                 feat_count[st]++
@@ -406,6 +461,7 @@ cluster_staged_files_deterministic() {
             }
         }
 
+        cyc = "1.5"
         # Cycle 1.5 — Dart & companion code-gen pairing (.g.dart, .freezed.dart, .mocks.dart)
         for (i = 1; i <= nf; i++) {
             f = files[i]
@@ -416,12 +472,14 @@ cluster_staged_files_deterministic() {
             }
         }
 
+        cyc = "2A"
         # Cycle 2A — Shared Files & Migrations diff-keyword matching
         # Dominant feature binding: if a shared file (e.g. routes.rb) touches multiple features,
         # bind it ONLY to the feature with the highest hunk match count so it never bridges
         # distinct features together into a single mega-group.
         for (f_idx = 1; f_idx <= nf; f_idx++) {
             sh_file = files[f_idx]
+            if (sh_file in newtest && newtest[sh_file]) continue
             max_c = 0; best_feat = ""
             for (k in diff_feat_count) {
                 split(k, a, SUBSEP)
@@ -441,6 +499,7 @@ cluster_staged_files_deterministic() {
             }
         }
 
+        cyc = "2B"
         # Cycle 2B — Shared Symbol: a definition changed in file A appears in file B
         for (sym in definer) {
             nd = split(definer[sym], dl, " ")
@@ -459,16 +518,33 @@ cluster_staged_files_deterministic() {
             for (i = 1; i <= nf; i++) {
                 f = files[i]
                 if ((f SUBSEP sym) in defs) continue
+                if (f in newtest && newtest[f]) continue
                 if (hunk[f] ~ re) union(first, f)
             }
         }
 
+        cyc = "2C"
+        # Cycle 2C — Replicated-edit signatures: identical or receiver-masked
+        # added lines shared across files → one replicated change, one group
+        for (k in fsig) { split(k, a, SUBSEP); sf[a[2]] = sf[a[2]] " " a[1] }
+        for (s in sf) {
+            n2 = split(sf[s], dl, " ")
+            if (n2 < 2) continue
+            first = ""
+            for (j = 1; j <= n2; j++) {
+                if (dl[j] == "") continue
+                if (first == "") first = dl[j]; else union(first, dl[j])
+            }
+        }
+
+        cyc = "3"
         # Cycle 3 — Co-change history (only when both files are staged)
         for (k in cpair) {
             split(k, a, SUBSEP)
             if ((a[1] in parent) && (a[2] in parent)) union(a[1], a[2])
         }
 
+        cyc = "3.5"
         # Cycle 3.5 — Relocation families: renames sharing parent-dir signature
         for (i = 1; i <= nf; i++) {
             f = files[i]
@@ -490,11 +566,17 @@ cluster_staged_files_deterministic() {
             else sig_first[pair_sig[f]] = f
         }
 
+        cyc = "4"
         # Cycle 4 — Same leaf directory (with strict ANTI-HORIZONTAL TEST GUARD)
+        # A touched file may only rep its dir when its whole component lives in
+        # that dir — otherwise a merged fix/feature component sweeps up every
+        # unrelated leftover file in the directory (mega-sweep bug).
+        for (i = 1; i <= nf; i++) cdirs[find(files[i]) SUBSEP dirname_of(files[i])] = 1
+        for (k in cdirs) { split(k, a, SUBSEP); comp_ndirs[a[1]]++ }
         for (i = 1; i <= nf; i++) {
             f = files[i]
             if (f in touched) {
-                if (!is_test_path(f)) dir_rep[dirname_of(f)] = find(f)
+                if (!is_test_path(f) && comp_ndirs[find(f)] <= 1) dir_rep[dirname_of(f)] = find(f)
             }
         }
         for (i = 1; i <= nf; i++) {
@@ -505,6 +587,34 @@ cluster_staged_files_deterministic() {
             if (d == "." || d ~ /(^|\/)(tests?|spec|__tests__|testdata)($|\/)/) continue
             if (d in dir_rep) union(dir_rep[d], f)
             else dir_rep[d] = f
+        }
+
+        cyc = "5"
+        # Cycle 5 — Unpaired test consolidation: tests untouched by every edge
+        # above (new tests whose subjects are not staged) bucket by test layer
+        # instead of each becoming a single-file commit. Capped at tgroup_max —
+        # oversized buckets split into deterministic chunks. The anti-horizontal
+        # guard still holds for *pairing*; this only sweeps leftovers.
+        if (tgroup_max + 0 < 2) tgroup_max = 14
+        for (i = 1; i <= nf; i++) {
+            f = files[i]
+            if (!is_test_path(f)) continue
+            # A tests always bucket (bulk-added coverage); M/D tests bucket
+            # only when no earlier edge paired them to a subject.
+            if ((f in touched) && status[f] != "A") continue
+            tb = test_bucket(f)
+            tb_count[tb]++
+            tb_list[tb] = (tb in tb_list ? tb_list[tb] SUBSEP f : f)
+        }
+        for (tb in tb_count) {
+            m = split(tb_list[tb], sf2, SUBSEP)
+            anchor = ""; pos = 0
+            for (j = 1; j <= m; j++) {
+                if (sf2[j] == "") continue
+                if (pos % tgroup_max == 0) anchor = sf2[j]
+                else union(anchor, sf2[j])
+                pos++
+            }
         }
 
         # Emit components in first-appearance order — deterministic I/O
@@ -556,40 +666,8 @@ build_cochange_cache() {
     } > "$tmp" && mv "$tmp" "$cache"
 }
 
-# Emit a normalized status map of the staged set: STATUS<TAB>path[<TAB>old_path]
-# R/C rows carry the source path in field 3. One git call; statuses feed the
-# grouping prompt and (via the diff headers) the relocation edge.
-staged_status_map() {
-    agit diff --staged --name-status -M 2>/dev/null | awk -F'\t' '{
-        if ($1 == "") next
-        st = $1
-        if (st ~ /^[RC]/ && NF >= 3) printf "%s\t%s\t%s\n", substr(st, 1, 1), $3, $2
-        else if (NF >= 2) printf "%s\t%s\n", substr(st, 1, 1), $2
-    }'
-}
-
-# Canonical cache key for grouping artifacts — the exact staged-state identity
-# plus every input that can change grouping output (grouping prompt, algorithm
-# version, model/backend and all grouping-related knobs). Any difference in the
-# staged set or these inputs produces a different key → cache miss → re-analyze.
-grouping_state_key() {
-    local ssk gprompt_hash run_dir uh_hash=""
-    ssk=$(staged_state_key) || return 1
-    gprompt_hash=$(shasum -a 256 "${AI_GROUPING_PROMPT_FILE:-/dev/null}" 2>/dev/null | awk '{print $1}')
-    run_dir=$(get_aicommit_tmp_dir 2>/dev/null || echo "")
-    if [ -n "$run_dir" ] && [ -s "${run_dir}/USER_HINTS" ]; then
-        uh_hash=$(shasum -a 256 "${run_dir}/USER_HINTS" 2>/dev/null | awk '{print $1}')
-    fi
-    printf '%s\ngprompt:%s\nhints:%s\nalgo:%s\nbackend:%s\nmodel:%s\nseed:%s\nnum_ctx:%s\nnp:%s\nmaxpaths:%s\ndisable:%s\nenable:%s\nnso:%s\n' \
-        "$ssk" "$gprompt_hash" "$uh_hash" "${AICOMMIT_GROUPING_ALGO_VERSION:-v4}" "${AI_BACKEND:-ollama}" \
-        "${AI_MODEL:-$DEFAULT_AI_MODEL}" "${AI_SEED:-42}" "${AI_NUM_CTX:-16384}" \
-        "${AI_GROUPING_NUM_PREDICT:-2048}" "${AI_GROUPING_MAX_PATHS:-1000}" \
-        "${AI_DISABLE_GROUPING:-false}" "${AI_ENABLE_LLM_GROUPING:-false}" \
-        "${AI_NO_STRUCTURED_OUTPUT:-false}" | shasum -a 256 | awk '{print $1}'
-}
-
-# Record how the current grouping was produced (ai / cache / single /
-# deterministic / fallback:<reason>) for dry-run and --verbose display.
+# Record how the current grouping was produced (single / deterministic)
+# for dry-run and --verbose display.
 _write_grouping_source() {
     local run_dir
     run_dir=$(get_aicommit_tmp_dir 2>/dev/null || echo "")
@@ -673,7 +751,9 @@ _name_component_lines() {
                 num_distinct++
                 if (counts[st] > max_c) { max_c = counts[st]; best = st }
             }
-            if (max_c >= 2) {
+            # dominant = covers ≥ half the members — keeps a large merged
+            # component from being named after a minority feature in it
+            if (max_c >= 2 && max_c * 2 >= total_files) {
                 print best
             } else if (max_c == 1 && num_distinct == 1 && total_files >= 2) {
                 print best
@@ -683,8 +763,38 @@ _name_component_lines() {
         if [ -n "$dom_feat" ]; then
             name="$dom_feat"
         else
+            # All-member test component → name by layer bucket rather than a
+            # numeric "test-N" (controller-tests, model-tests, test-infrastructure)
+            name=$(printf '%s\n' "${_aicommit_split_files[@]}" | awk -F/ '
+                function is_test_path(p) {
+                    return p ~ /(^|\/)(tests?|spec|__tests__|testdata)\// || \
+                           p ~ /(_test|_spec|\.test|\.spec)\.[^.\/]+$/ || \
+                           p ~ /\.bats$/ || p ~ /(^|\/)test_[^\/]+$/
+                }
+                {
+                    if (!is_test_path($0)) { mixed = 1; next }
+                    if (match($0, /(^|\/)(tests?|spec|__tests__)\/([^\/]+)/)) {
+                        s = substr($0, RSTART, RLENGTH)
+                        sub(/^.*(tests?|spec|__tests__)\//, "", s)
+                        segs[s] = 1; tot++
+                    } else other = 1
+                }
+                END {
+                    if (mixed || tot == 0) exit
+                    n = 0; for (k in segs) n++
+                    if (other || n != 1) { print "test-infrastructure"; exit }
+                    for (k in segs) { sub(/s$/, "", k); print k "-tests" }
+                }')
+        fi
+        if [ -z "$name" ]; then
+            # Plurality context across members — a merged component keeps the
+            # minority member's file from dictating the group name.
+            name=$(for f in "${_aicommit_split_files[@]}"; do infer_logical_file_context "$f"; done \
+                | awk '{ c[$0]++; if (!($0 in seen)) seen[$0] = NR }
+                       END { bc = -1; bi = 999999; b = ""
+                             for (k in c) if (c[k] > bc || (c[k] == bc && seen[k] < bi)) { bc = c[k]; b = k; bi = seen[k] }
+                             print b }')
             first_file=$(printf '%s' "$line" | cut -f2)
-            name=$(infer_logical_file_context "$first_file")
             # Generic bucket name + members sharing a deeper common leaf dir →
             # name the component by that leaf instead of "docs-12".
             case "$name" in
@@ -728,255 +838,8 @@ group_staged_files_heuristically() {
     _name_component_lines "$comp_lines"
 }
 
-# Ask the LLM to name/merge/split the deterministic components into
-# intent-scoped commit groups. Input = component listing with per-file status
-# tags (A/M/D/R:old=>new) — statuses and rename origins are what let the model
-# infer relocation/restructure intent instead of naming by file type.
-# Response = {"groups":[{"name","type","members":[ids],"files":[paths]}]}:
-# members merges whole components, files splits or partitions path-by-path.
-# Args: $1=comp_lines, $2=staged_files, $3=namestatus_file (optional)
-name_groups_with_ai() {
-    local comp_lines="$1" staged_files="$2" namestatus_file="${3:-}"
-    local prompt_template="${AI_GROUPING_PROMPT_FILE:-$AICOMMIT_DIR/templates/context-grouping-prompt.txt}"
-    [ ! -f "$prompt_template" ] && return 1
-    command -v invoke_llm >/dev/null 2>&1 || return 1
-    command -v build_ollama_request >/dev/null 2>&1 || return 1
-
-    local tmp_dir
-    tmp_dir=$(get_aicommit_tmp_dir) || return 1
-    local user_file="${tmp_dir}/GROUPING_USER" schema_file="${tmp_dir}/GROUPING_SCHEMA.json"
-    local req="${tmp_dir}/GROUPING_REQUEST.json" resp="${tmp_dir}/GROUPING_RESPONSE" err="${tmp_dir}/GROUPING_ERROR"
-    local comp_lines_file="${tmp_dir}/GROUPING_COMPS"
-
-    umask 077
-    printf '%s\n' "$comp_lines" > "$comp_lines_file"
-
-    local comp_count maxpaths per_comp
-    comp_count=$(printf '%s\n' "$comp_lines" | awk 'NF { c++ } END { print c + 0 }')
-    maxpaths="${AI_GROUPING_MAX_PATHS:-1000}"
-    per_comp=$(( maxpaths / (comp_count > 0 ? comp_count : 1) ))
-    [ "$per_comp" -lt 5 ] && per_comp=5
-    [ "$per_comp" -gt 40 ] && per_comp=40
-
-    # Component listing with inline status tags and faceted distribution summaries
-    {
-        if [ -s "${tmp_dir}/USER_HINTS" ]; then
-            printf '=== USER INTENT HINTS (HIGH PRIORITY) ===\n'
-            while IFS= read -r uh; do
-                [ -n "$uh" ] && printf -- '- %s\n' "$uh"
-            done < "${tmp_dir}/USER_HINTS"
-            printf '\n'
-        fi
-        printf 'Staged files were clustered into structural components. Each file is tagged A=added M=modified D=deleted R=renamed(old=>new).\n'
-        awk -F'\t' -v status_file="$namestatus_file" -v per_comp="$per_comp" \
-            -v sensitive="$_AICOMMIT_SENSITIVE_RE" '
-        BEGIN {
-            if (status_file != "") {
-                while ((getline l < status_file) > 0) {
-                    n = split(l, p, "\t")
-                    if (n >= 3 && (p[1] == "R" || p[1] == "C")) st[p[2]] = p[1] ":" p[3] "=>"
-                    else if (n >= 2) st[p[2]] = p[1] ":"
-                }
-                close(status_file)
-            }
-        }
-        {
-            total = 0; r_cnt = 0; m_cnt = 0; a_cnt = 0; d_cnt = 0
-            for (i = 2; i <= NF; i++) {
-                if ($i == "" || $i ~ sensitive) continue
-                total++
-                s = substr(st[$i], 1, 1)
-                if (s == "R" || s == "C") r_cnt++
-                else if (s == "M") m_cnt++
-                else if (s == "A") a_cnt++
-                else if (s == "D") d_cnt++
-            }
-            if (total == 0) next
-            dist = ""
-            if (r_cnt > 0) dist = dist (dist == "" ? "" : ", ") r_cnt " renamed"
-            if (m_cnt > 0) dist = dist (dist == "" ? "" : ", ") m_cnt " modified"
-            if (a_cnt > 0) dist = dist (dist == "" ? "" : ", ") a_cnt " added"
-            if (d_cnt > 0) dist = dist (dist == "" ? "" : ", ") d_cnt " deleted"
-            if (total > per_comp && dist != "") {
-                printf "GROUP %s (%d files: %s):", $1, total, dist
-            } else {
-                printf "GROUP %s:", $1
-            }
-            shown = 0; rest = 0
-            for (i = 2; i <= NF; i++) {
-                if ($i == "" || $i ~ sensitive) continue
-                if (shown < per_comp) {
-                    printf "%s%s%s", (shown > 0 ? ", " : " "), st[$i], $i
-                    shown++
-                } else rest++
-            }
-            if (rest > 0) printf ", +%d more", rest
-            printf "\n"
-        }' "$comp_lines_file"
-    } > "$user_file"
-
-    local comp_ids staged_paths_json n_paths files_item
-    comp_ids=$(printf '%s\n' "$comp_lines" | awk -F'\t' 'NF>=1 && $1!="" {print $1}' | jq -R . | jq -sc 'unique')
-    staged_paths_json=$(printf '%s\n' "$staged_files" | jq -R . | jq -sc 'unique')
-    n_paths=$(printf '%s' "$staged_paths_json" | jq 'length' 2>/dev/null || echo 0)
-    files_item='{"type":"string"}'
-    if [ "$n_paths" -gt 0 ] && [ "$n_paths" -le "${AI_GROUPING_MAX_ENUM_PATHS:-300}" ]; then
-        files_item=$(jq -nc --argjson p "$staged_paths_json" '{type:"string", enum:$p}')
-    fi
-
-    local n_comp_ids min_groups=1
-    n_comp_ids=$(printf '%s\n' "$comp_ids" | jq 'length' 2>/dev/null || echo 0)
-    [ "$n_comp_ids" -ge 2 ] && min_groups=2
-
-    jq -n --argjson ids "$comp_ids" --argjson files_item "$files_item" --argjson min_g "$min_groups" \
-        '{type: "object", additionalProperties: false,
-          properties: {groups: {type: "array", minItems: $min_g, items: {
-            type: "object", additionalProperties: false,
-            properties: {
-                name:    {type: "string", maxLength: 60},
-                type:    {type: "string", enum: ["feat","fix","docs","style","refactor","perf","test","build","ci","chore","revert"]},
-                members: {type: "array", items: {type: "string", enum: $ids}},
-                files:   {type: "array", items: $files_item}
-            },
-            required: ["name", "type"]}}},
-          required: ["groups"]}' > "$schema_file" || return 1
-
-    # The flat AI_NUM_PREDICT cap truncates the response on large group counts —
-    # scale with component count, bounded by the grouping-specific knobs.
-    local np
-    np=$(( comp_count * 48 ))
-    [ "$np" -lt "${AI_GROUPING_NUM_PREDICT:-2048}" ] && np="${AI_GROUPING_NUM_PREDICT:-2048}"
-    [ "$np" -gt "${AI_GROUPING_NUM_PREDICT_MAX:-8192}" ] && np="${AI_GROUPING_NUM_PREDICT_MAX:-8192}"
-
-    if ! build_ollama_request "$req" "${AI_MODEL:-$DEFAULT_AI_MODEL}" "$user_file" "$prompt_template" "$schema_file" "$np"; then
-        return 1
-    fi
-
-    : > "$resp"; : > "$err"
-    if invoke_llm "${AI_MODEL:-$DEFAULT_AI_MODEL}" "$req" "$resp" "$err" "${AI_GROUPING_TIMEOUT:-60}" "Naming commit groups"; then
-        cat "$resp" 2>/dev/null
-        return 0
-    fi
-    _write_grouping_source "fallback:llm-error"
-    return 1
-}
-
-# Reconcile AI naming output against the staged set: files must be staged and
-# assigned exactly once; anything the model dropped is re-attached to its
-# deterministic component (named by first file). Supports id-based and legacy files schema.
-# Args: $1=raw_json, $2=staged_files, $3=comp_lines
-reconcile_grouping_json() {
-    local raw="$1" staged_files="$2" comp_lines="${3:-}"
-
-    if command -v extract_json_object >/dev/null 2>&1; then
-        raw=$(extract_json_object "$raw" 2>/dev/null)
-    fi
-
-    printf '%s' "$raw" | jq -e '.groups | type == "array" and length > 0' >/dev/null 2>&1 || return 1
-
-    local ngroups gi name id files f files_tab="" out="" used_names=" " seen=" "
-    ngroups=$(printf '%s' "$raw" | jq '.groups | length' 2>/dev/null)
-
-    # file -> component id map for re-attaching dropped files
-    local comp_map_file comp_files_file
-    comp_map_file=$(mktemp "${TMPDIR:-/tmp}/aicommit.compmap.XXXXXX") || return 1
-    comp_files_file=$(mktemp "${TMPDIR:-/tmp}/aicommit.compfiles.XXXXXX") || return 1
-    printf '%s\n' "$comp_lines" | awk -F'\t' '{ for (i = 2; i <= NF; i++) if ($i != "") printf "%s\t%s\n", $i, $1 }' > "$comp_map_file"
-    printf '%s\n' "$comp_lines" | awk -F'\t' '{ printf "%s\t", $1; for (i = 2; i <= NF; i++) if ($i != "") printf "%s\t", $i; printf "\n" }' > "$comp_files_file"
-
-    for ((gi = 0; gi < ngroups; gi++)); do
-        name=$(printf '%s' "$raw" | jq -r ".groups[$gi].name // empty" 2>/dev/null \
-            | sed -E 's/[=|`*]//g; s/^[[:space:]#-]+//; s/[[:space:]]+$//' | cut -c1-60)
-        [ -z "$name" ] && name="changes"
-
-        # Hybrid contract: members[] expands component ids, files[] lists
-        # explicit paths (split/partition), and legacy "id" aliases members:[id].
-        # Union them, then the staged/exactly-once filter below does the rest.
-        local grp_ids
-        grp_ids=$(printf '%s' "$raw" | jq -r ".groups[$gi] | (.members // [])[], (.id // empty)" 2>/dev/null)
-        files=""
-        local cid cfiles
-        while IFS= read -r cid; do
-            [ -z "$cid" ] && continue
-            cfiles=$(awk -F'\t' -v target="$cid" '$1 == target { for (i = 2; i <= NF; i++) if ($i != "") print $i }' "$comp_files_file")
-            [ -n "$cfiles" ] && files="${files}${files:+$'\n'}${cfiles}"
-        done <<< "$grp_ids"
-        local efiles
-        efiles=$(printf '%s' "$raw" | jq -r ".groups[$gi].files[]?" 2>/dev/null)
-        [ -n "$efiles" ] && files="${files}${files:+$'\n'}${efiles}"
-
-        files_tab=""
-        while IFS= read -r f; do
-            [ -z "$f" ] && continue
-            printf '%s\n' "$staged_files" | grep -qxF "$f" || continue   # must be staged
-            [[ "$seen" == *" ${f} "* ]] && continue                     # once only
-            seen="${seen}${f} "
-            files_tab="${files_tab}${f}\t"
-        done <<< "$files"
-        [ -z "$files_tab" ] && continue
-
-        local base="$name" n=1
-        while [[ "$used_names" == *" ${name} "* ]]; do
-            n=$((n + 1)); name="${base}-${n}"
-        done
-        used_names="${used_names}${name} "
-        out="${out}${name}\t${files_tab%\\t}\n"
-    done
-    rm -f "$comp_files_file"
-
-    # Leftover staged files → back into their deterministic components.
-    # Build "comp_id\tfile" pairs, group in component order.
-    local leftover_pairs
-    leftover_pairs=$(while IFS= read -r f; do
-        [ -z "$f" ] && continue
-        [[ "$seen" == *" ${f} "* ]] && continue
-        comp_id=$(awk -F'\t' -v f="$f" '$1 == f { print $2; exit }' "$comp_map_file")
-        printf '%s\t%s\n' "${comp_id:-999}" "$f"
-    done <<< "$staged_files" | sort -n)
-    rm -f "$comp_map_file"
-
-    if [ -n "$leftover_pairs" ]; then
-        local cur_cid="" cur_files="" cid="" lf="" leftover_first=""
-        while IFS= read -r line; do
-            [ -z "$line" ] && continue
-            cid="${line%%$'\t'*}"
-            lf="${line#*$'\t'}"
-            if [ "$cid" != "$cur_cid" ]; then
-                if [ -n "$cur_files" ]; then
-                    leftover_first="${cur_files%%$'\t'*}"
-                    name=$(infer_logical_file_context "$leftover_first")
-                    [ -z "$name" ] && name="changes"
-                    local base="$name" n=1
-                    while [[ "$used_names" == *" ${name} "* ]]; do
-                        n=$((n + 1)); name="${base}-${n}"
-                    done
-                    used_names="${used_names}${name} "
-                    out="${out}${name}\t${cur_files}\n"
-                fi
-                cur_cid="$cid"; cur_files=""
-            fi
-            cur_files="${cur_files:+${cur_files}$'\t'}${lf}"
-        done <<< "$leftover_pairs"
-        if [ -n "$cur_files" ]; then
-            leftover_first="${cur_files%%$'\t'*}"
-            name=$(infer_logical_file_context "$leftover_first")
-            [ -z "$name" ] && name="changes"
-            local base="$name" n=1
-            while [[ "$used_names" == *" ${name} "* ]]; do
-                n=$((n + 1)); name="${base}-${n}"
-            done
-            used_names="${used_names}${name} "
-            out="${out}${name}\t${cur_files}\n"
-        fi
-    fi
-
-    [ -z "$out" ] && return 1
-    printf '%b' "$out"
-}
-
-# Group staged files into logical contexts.
-# Deterministic clustering first; the LLM only names/merges components when
-# enabled and available. Falls back to deterministic naming.
+# Group staged files into logical contexts — purely deterministic clustering
+# plus deterministic naming; the LLM is never consulted for grouping.
 # Outputs TAB-delimited records: "<scope>\t<file1>\t<file2>\t..."
 group_staged_files_logically() {
     local staged_files="$1"
@@ -1003,29 +866,8 @@ group_staged_files_logically() {
         return 0
     fi
 
-    # Grouping cache — keyed by the exact staged state plus all grouping inputs.
-    # Any difference in staged files, statuses, content or grouping config
-    # produces a different key → miss → re-analysis.
-    local state_dir="" key="" cdir=""
+    local state_dir="" tmp_dir diff_file cochange_file=""
     state_dir=$(get_aicommit_state_dir 2>/dev/null) || state_dir=""
-    key=$(grouping_state_key 2>/dev/null || echo "")
-    if [ -n "$state_dir" ] && [ -n "$key" ]; then
-        cdir="${state_dir}/cache/${key}"
-        if [ -s "${cdir}/GROUPS" ]; then
-            cat "${cdir}/GROUPS"
-            _write_grouping_source "cache"
-            return 0
-        fi
-    fi
-    if [ -n "$state_dir" ] && [ -n "$key" ] && [ -f "${state_dir}/GROUPS_KEY" ] \
-        && [ "$(cat "${state_dir}/GROUPS_KEY" 2>/dev/null)" = "$key" ] \
-        && [ -s "${state_dir}/GROUPS_CACHE" ]; then
-        cat "${state_dir}/GROUPS_CACHE"
-        _write_grouping_source "cache"
-        return 0
-    fi
-
-    local tmp_dir diff_file cochange_file=""
     tmp_dir=$(get_aicommit_tmp_dir) || return 1
     diff_file="${tmp_dir}/GROUPING_DIFF"
     if [ -n "$changes" ]; then
@@ -1036,63 +878,16 @@ group_staged_files_logically() {
         agit diff --staged > "$diff_file" 2>/dev/null || : > "$diff_file"
     fi
     rm -f "${tmp_dir}/GROUPING_SOURCE"
-    # Per-file status map (A/M/D/R + rename origins) — feeds the grouping prompt
-    staged_status_map > "${tmp_dir}/NAMESTATUS" 2>/dev/null || : > "${tmp_dir}/NAMESTATUS"
     if [ -n "$state_dir" ]; then
         build_cochange_cache "$state_dir" >/dev/null 2>&1 && cochange_file="${state_dir}/COCHANGE"
     fi
 
-    local comp_lines result="" comp_count=0 provenance=""
+    local comp_lines
     comp_lines=$(cluster_staged_files_deterministic "$staged_files" "$diff_file" "$cochange_file")
-    comp_count=$(printf '%s\n' "$comp_lines" | awk 'NF' | wc -l | tr -d ' ')
 
-    if [ "$comp_count" -gt 1 ]; then
-        if [ "${AI_ENABLE_LLM_GROUPING:-false}" != "true" ] || [ "${AI_DISABLE_GROUPING:-false}" = "true" ]; then
-            provenance="fallback:disabled"
-        elif ! validate_backend_prerequisites >/dev/null 2>&1; then
-            provenance="fallback:no-backend"
-        else
-            local ai_json
-            ai_json=$(name_groups_with_ai "$comp_lines" "$staged_files" "${tmp_dir}/NAMESTATUS")
-            if [ -n "$ai_json" ]; then
-                result=$(reconcile_grouping_json "$ai_json" "$staged_files" "$comp_lines")
-                if [ -n "$result" ]; then
-                    local res_count
-                    res_count=$(printf '%s\n' "$result" | count_lines)
-                    if [ "$comp_count" -ge 2 ] && [ "$res_count" -lt 2 ]; then
-                        result=$(_name_component_lines "$comp_lines")
-                        provenance="fallback:collapsed-single"
-                    else
-                        provenance="ai"
-                    fi
-                else
-                    provenance="fallback:invalid-json"
-                fi
-            else
-                [ -s "${tmp_dir}/GROUPING_SOURCE" ] || provenance="fallback:llm-empty"
-            fi
-        fi
-    fi
-
-    if [ -z "$result" ]; then
-        result=$(_name_component_lines "$comp_lines")
-    fi
-    # name_groups_with_ai may have already recorded a more specific reason
-    # (e.g. fallback:llm-error) — only write when it hasn't.
-    [ -s "${tmp_dir}/GROUPING_SOURCE" ] || _write_grouping_source "${provenance:-deterministic}"
-
-    if [ -n "$state_dir" ] && [ -n "$result" ]; then
-        if [ -n "$key" ]; then
-            local cache_base="${state_dir}/cache"
-            [ -d "$cache_base" ] || mkdir -m 700 -p "$cache_base" 2>/dev/null || true
-            [ -d "$cdir" ] || mkdir -m 700 -p "$cdir" 2>/dev/null || true
-            if [ -d "$cdir" ]; then
-                printf '%s\n' "$result" > "${cdir}/GROUPS.tmp" && mv "${cdir}/GROUPS.tmp" "${cdir}/GROUPS"
-            fi
-            printf '%s' "$key" > "${state_dir}/GROUPS_KEY.tmp" && mv "${state_dir}/GROUPS_KEY.tmp" "${state_dir}/GROUPS_KEY"
-            printf '%s\n' "$result" > "${state_dir}/GROUPS_CACHE.tmp" && mv "${state_dir}/GROUPS_CACHE.tmp" "${state_dir}/GROUPS_CACHE"
-        fi
-    fi
+    local result
+    result=$(_name_component_lines "$comp_lines")
+    _write_grouping_source "deterministic"
 
     printf '%s\n' "$result"
 }

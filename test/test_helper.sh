@@ -56,9 +56,8 @@ setup_test_env() {
     # aicommit.sh references $ZSH_VERSION; guard against set -u failures in bash
     export ZSH_VERSION="${ZSH_VERSION:-}"
 
-    # Disable live AI grouping in tests so unit tests test deterministic heuristics
+    # Disable split-grouping in tests so unit tests exercise single-commit flow
     export AI_DISABLE_GROUPING="true"
-    export AI_ENABLE_LLM_GROUPING="false"
     export AI_REFLECTION_PROMPT_FILE="$AICOMMIT_DIR/templates/reflection-prompt.txt"
 
     # Global mock for timeout to respect internal mocked functions

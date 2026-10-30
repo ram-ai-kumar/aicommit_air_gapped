@@ -76,8 +76,6 @@ teardown() {
     declare -f cluster_staged_files_deterministic > /dev/null
     declare -f build_cochange_cache       > /dev/null
     declare -f group_staged_files_heuristically > /dev/null
-    declare -f name_groups_with_ai        > /dev/null
-    declare -f reconcile_grouping_json    > /dev/null
     declare -f group_staged_files_logically > /dev/null
     declare -f group_staged_files_by_scope > /dev/null
     declare -f count_staged_scopes        > /dev/null

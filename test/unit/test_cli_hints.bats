@@ -40,28 +40,7 @@ teardown() {
     assert_output_contains "User hints: \"docs reorganized\", \"auth fix\", \"billing retry\""
 }
 
-@test "ST-04: name_groups_with_ai injects USER INTENT HINTS into grouping prompt" {
-    export AI_ENABLE_LLM_GROUPING="true"
-    export AI_MODEL="test-model"
-    init_aicommit_run
-    local run_dir
-    run_dir=$(get_aicommit_tmp_dir)
-    printf 'docs reorganized\nExport bug resolved\n' > "${run_dir}/USER_HINTS"
-
-    mock_ollama_api '{"groups":[{"name":"docs reorganized","type":"docs","files":["docs/guide.md"]},{"name":"export fix","type":"fix","files":["src/export.js"]}]}'
-
-    run name_groups_with_ai "$(printf '1\tdocs/guide.md\n2\tsrc/export.js')" "$(printf 'docs/guide.md\nsrc/export.js')"
-    [ "$status" -eq 0 ]
-    [ -f "${run_dir}/GROUPING_USER" ]
-    run grep -F "=== USER INTENT HINTS (HIGH PRIORITY) ===" "${run_dir}/GROUPING_USER"
-    [ "$status" -eq 0 ]
-    run grep -F "docs reorganized" "${run_dir}/GROUPING_USER"
-    [ "$status" -eq 0 ]
-    run grep -F "Export bug resolved" "${run_dir}/GROUPING_USER"
-    [ "$status" -eq 0 ]
-}
-
-@test "ST-05: context and prompt templates instruct model to synthesize formal header and body rather than using hint as is" {
+@test "ST-04: context and prompt templates instruct model to synthesize formal header and body rather than using hint as is" {
     echo "content" > test.txt
     git add test.txt
 
@@ -74,10 +53,6 @@ teardown() {
 
     [ -f "${run_dir}/CHANGES_CONTEXT" ]
     run grep -F "Directional guidance" "${run_dir}/CHANGES_CONTEXT"
-    [ "$status" -eq 0 ]
-
-    # Check grouping prompt template
-    run grep -F "Do NOT use hints as-is or copy them verbatim" "$AICOMMIT_DIR/templates/context-grouping-prompt.txt"
     [ "$status" -eq 0 ]
 
     # Check commit message prompt template
@@ -163,18 +138,7 @@ teardown() {
     assert_output_contains "User hints: \"fix: (core) 'retry'\", \"timeout handling\""
 }
 
-@test "EC-03: zero-relevance hint does not crash and leaves changes intact" {
-    mkdir -p docs
-    echo "doc" > docs/readme.md
-    git add docs/readme.md
-
-    local raw='{"groups":[{"name":"database migrations","type":"chore","files":[]},{"name":"documentation","type":"docs","files":["docs/readme.md"]}]}'
-    run reconcile_grouping_json "$raw" "docs/readme.md" "1\tdocs/readme.md"
-    [ "$status" -eq 0 ]
-    assert_output_contains $'documentation\tdocs/readme.md'
-}
-
-@test "EC-04: high hint volume is parsed cleanly" {
+@test "EC-03: high hint volume is parsed cleanly" {
     echo "content" > test.txt
     git add test.txt
 
@@ -184,19 +148,7 @@ teardown() {
     assert_output_contains '"h12"'
 }
 
-@test "EC-05: single staged file with multiple hints assigns file once" {
-    echo "content" > test.txt
-    git add test.txt
-
-    local raw='{"groups":[{"name":"hint 1","type":"feat","files":["test.txt"]},{"name":"hint 2","type":"chore","files":["test.txt"]}]}'
-    run reconcile_grouping_json "$raw" "test.txt" "1\ttest.txt"
-    [ "$status" -eq 0 ]
-    # test.txt must only appear in the first matched group
-    assert_output_contains $'hint 1\ttest.txt'
-    refute_output_contains $'hint 2\ttest.txt'
-}
-
-@test "EC-06: regrouping after preview does not output warning message and continues" {
+@test "EC-04: regrouping after preview does not output warning message and continues" {
     echo "file 1" > file1.txt
     git add file1.txt
 
@@ -214,30 +166,7 @@ teardown() {
 
 # ─── 4. Exception & Resilience Tests ─────────────────────────────────────────
 
-@test "ET-01: grouping_state_key changes when user hints change" {
-    echo "content" > test.txt
-    git add test.txt
-
-    init_aicommit_run
-    local run_dir
-    run_dir=$(get_aicommit_tmp_dir)
-
-    # Key without hints
-    local k1 k2 k3
-    k1=$(grouping_state_key)
-
-    # Key with hint A
-    printf 'hint A\n' > "${run_dir}/USER_HINTS"
-    k2=$(grouping_state_key)
-    [ "$k1" != "$k2" ]
-
-    # Key with hint B
-    printf 'hint B\n' > "${run_dir}/USER_HINTS"
-    k3=$(grouping_state_key)
-    [ "$k2" != "$k3" ]
-}
-
-@test "ET-02: LLM failure with hints falls back to deterministic components" {
+@test "ET-01: grouping is deterministic even with user hints present" {
     mkdir -p src lib
     echo "a" > src/a.js
     echo "b" > lib/b.js
@@ -248,19 +177,14 @@ teardown() {
     run_dir=$(get_aicommit_tmp_dir)
     printf 'docs update\n' > "${run_dir}/USER_HINTS"
 
-    # Simulate invalid JSON response
-    mock_ollama_api "I am sorry, I cannot format this as JSON."
-
-    export AI_ENABLE_LLM_GROUPING="true"
     run group_staged_files_logically "$(printf 'src/a.js\nlib/b.js')"
     [ "$status" -eq 0 ]
     [ -n "$output" ]
-    # Must fallback to deterministic component names
     assert_output_contains "src/a.js"
     assert_output_contains "lib/b.js"
 }
 
-@test "ET-03: AI collapsing multiple components into single group falls back to preserve atomic split" {
+@test "ET-02: deterministic grouping keeps distinct contexts in separate groups" {
     mkdir -p src test/unit
     echo "src" > src/app.js
     echo "test" > test/unit/test_cli_hints.bats
@@ -271,10 +195,6 @@ teardown() {
     run_dir=$(get_aicommit_tmp_dir)
     printf 'all changes\n' > "${run_dir}/USER_HINTS"
 
-    # Simulate LLM collapsing both components into a single group
-    mock_ollama_api '{"groups":[{"name":"lumped changes","type":"feat","files":["src/app.js","test/unit/test_cli_hints.bats"]}]}'
-
-    export AI_ENABLE_LLM_GROUPING="true"
     run group_staged_files_logically "$(printf 'src/app.js\ntest/unit/test_cli_hints.bats')"
     [ "$status" -eq 0 ]
     local count
@@ -297,43 +217,7 @@ teardown() {
     assert_output_contains "touch /tmp/pwned_aicommit_test"
 }
 
-@test "SEC-02: sensitive files are not leaked into grouping prompt even when named in hint" {
-    export AI_ENABLE_LLM_GROUPING="true"
-    export AI_MODEL="test-model"
-    init_aicommit_run
-    local run_dir
-    run_dir=$(get_aicommit_tmp_dir)
-
-    echo "SECRET=123" > .env
-    mkdir -p src
-    echo "normal" > src/app.js
-    git add .env src/app.js
-
-    printf 'update .env credentials\n' > "${run_dir}/USER_HINTS"
-    mock_ollama_api '{"groups":[{"name":"app","type":"feat","files":["src/app.js"]}]}'
-
-    run name_groups_with_ai "$(printf '1\t.env\n2\tsrc/app.js')" "$(printf '.env\nsrc/app.js')"
-    [ "$status" -eq 0 ]
-    [ -f "${run_dir}/GROUPING_USER" ]
-    # .env must be filtered from the component listing
-    run grep -F "GROUP 1: M:.env" "${run_dir}/GROUPING_USER"
-    [ "$status" -eq 1 ]
-}
-
-@test "SEC-03: path traversal in model response is rejected by reconcile" {
-    echo "content" > test.txt
-    git add test.txt
-
-    # Malicious LLM outputs external/traversal paths
-    local raw='{"groups":[{"name":"hack","type":"chore","files":["../../../../etc/passwd","/etc/shadow","test.txt"]}]}'
-    run reconcile_grouping_json "$raw" "test.txt" "1\ttest.txt"
-    [ "$status" -eq 0 ]
-    assert_output_contains $'hack\ttest.txt'
-    refute_output_contains "etc/passwd"
-    refute_output_contains "etc/shadow"
-}
-
-@test "SEC-04: run directories and USER_HINTS created with secure permissions" {
+@test "SEC-02: run directories and USER_HINTS created with secure permissions" {
     echo "content" > test.txt
     git add test.txt
 

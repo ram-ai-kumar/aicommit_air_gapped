@@ -256,48 +256,6 @@ EOF
     [ "$seen" = "$(printf '%s\n' "$files" | sort)" ]
 }
 
-# ─── reconcile_grouping_json ─────────────────────────────────────────────────
-
-@test "reconcile_grouping_json assigns every staged file exactly once" {
-    local staged="app/models/product.rb\napp/models/spare.rb\nconfig/initializers/devise.rb\nmissed_file.txt"
-    local comp="1\tapp/models/product.rb\tapp/models/spare.rb
-2\tconfig/initializers/devise.rb
-3\tmissed_file.txt"
-    local raw='{"groups":[
-      {"name":"product models","type":"feat","files":["app/models/product.rb","app/models/spare.rb","hallucinated_file.rb"]},
-      {"name":"auth config","type":"feat","files":["config/initializers/devise.rb"]}]}'
-    run reconcile_grouping_json "$raw" "$(printf '%b' "$staged")" "$comp"
-    [ "$status" -eq 0 ]
-    assert_output_contains $'product models\tapp/models/product.rb\tapp/models/spare.rb'
-    assert_output_contains $'auth config\tconfig/initializers/devise.rb'
-    refute_output_contains "hallucinated_file.rb"
-    # the dropped file is re-attached to its deterministic component
-    assert_output_contains "missed_file.txt"
-}
-
-@test "reconcile_grouping_json rejects non-JSON output" {
-    run reconcile_grouping_json "garbage @@@ ui | app.js @@@" "app.js" "1\tapp.js"
-    [ "$status" -eq 1 ]
-}
-
-# ─── name_groups_with_ai ─────────────────────────────────────────────────────
-
-@test "name_groups_with_ai returns 1 when prompt template missing" {
-    export AI_GROUPING_PROMPT_FILE="/nonexistent/template.txt"
-    run name_groups_with_ai "1\tapp.js" "app.js"
-    [ "$status" -eq 1 ]
-}
-
-@test "name_groups_with_ai calls the API with schema-constrained request" {
-    export AI_ENABLE_LLM_GROUPING="true"
-    export AI_MODEL="test-model"
-    mock_ollama_api '{"groups":[{"name":"auth flow","type":"feat","files":["app.js"]}]}'
-    run name_groups_with_ai "1\tapp.js" "app.js"
-    export AI_ENABLE_LLM_GROUPING="false"
-    [ "$status" -eq 0 ]
-    assert_output_contains "auth flow"
-}
-
 # ─── count_staged_scopes ─────────────────────────────────────────────────────
 
 @test "count_staged_scopes counts distinct components" {
@@ -473,4 +431,170 @@ EOF
     assert_output_contains "app/models/invoice.rb"
 }
 
+# ─── replicated-edit signature edges (Cycle 2C) ──────────────────────────────
 
+@test "cluster_staged_files_deterministic merges identical added lines across directories" {
+    local files diff_file
+    files="$(printf 'app/models/a_item.rb\nlib/handlers/b_item.rb\napp/models/c_other.rb')"
+    diff_file="$TEST_TEMP_DIR/diff.txt"
+    cat > "$diff_file" <<'DEOF'
+diff --git a/app/models/a_item.rb b/app/models/a_item.rb
++        if attributes.slice('name', 'sku').values.any?(&:present?)
++          Spare.ensure_except_update(attributes, 'mrp')
+diff --git a/lib/handlers/b_item.rb b/lib/handlers/b_item.rb
++        if attributes.slice('name', 'sku').values.any?(&:present?)
++          Spare.ensure_except_update(attributes, 'mrp')
+diff --git a/app/models/c_other.rb b/app/models/c_other.rb
++        completely_different_change.call(args)
+DEOF
+    run cluster_staged_files_deterministic "$files" "$diff_file"
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s\n' "$output" | count_lines)" -eq 2 ]
+    assert_output_contains $'app/models/a_item.rb\tlib/handlers/b_item.rb'
+}
+
+@test "cluster_staged_files_deterministic merges receiver-varied safe-nav edits" {
+    local files diff_file
+    files="$(printf 'app/views/a/edit.html.erb\napp/views/b/new.html.erb\napp/views/c/show.html.erb\napp/views/d/other.html.erb')"
+    diff_file="$TEST_TEMP_DIR/diff.txt"
+    cat > "$diff_file" <<'DEOF'
+diff --git a/app/views/a/edit.html.erb b/app/views/a/edit.html.erb
++  | <%= @invoice.financial_year&.name %>
+diff --git a/app/views/b/new.html.erb b/app/views/b/new.html.erb
++      <%= @jobcard.financial_year&.name %>
+diff --git a/app/views/c/show.html.erb b/app/views/c/show.html.erb
++  <dd><%= @financial_year&.name %></dd>
+diff --git a/app/views/d/other.html.erb b/app/views/d/other.html.erb
++  <dd><%= @record.title %></dd>
+DEOF
+    run cluster_staged_files_deterministic "$files" "$diff_file"
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s\n' "$output" | count_lines)" -eq 2 ]
+    assert_output_contains $'app/views/a/edit.html.erb\tapp/views/b/new.html.erb\tapp/views/c/show.html.erb'
+}
+
+# ─── bulk-added test consolidation (Cycle 5) ─────────────────────────────────
+
+@test "cluster_staged_files_deterministic does not feature-pair newly added tests" {
+    local files diff_file
+    files="$(printf 'app/models/estimate_item.rb\ntest/controllers/estimate_items_controller_test.rb')"
+    diff_file="$TEST_TEMP_DIR/diff.txt"
+    cat > "$diff_file" <<'DEOF'
+diff --git a/app/models/estimate_item.rb b/app/models/estimate_item.rb
++        Spare.ensure_except_update(attributes, 'mrp')
+diff --git a/test/controllers/estimate_items_controller_test.rb b/test/controllers/estimate_items_controller_test.rb
+new file mode 100644
++    test 'creates item' do
++      assert_response :success
+DEOF
+    run cluster_staged_files_deterministic "$files" "$diff_file"
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s\n' "$output" | count_lines)" -eq 2 ]
+}
+
+@test "cluster_staged_files_deterministic still pairs modified tests with subjects" {
+    local files diff_file
+    files="$(printf 'app/models/estimate_item.rb\ntest/models/estimate_item_test.rb')"
+    diff_file="$TEST_TEMP_DIR/diff.txt"
+    cat > "$diff_file" <<'DEOF'
+diff --git a/app/models/estimate_item.rb b/app/models/estimate_item.rb
++        Spare.ensure_except_update(attributes, 'mrp')
+diff --git a/test/models/estimate_item_test.rb b/test/models/estimate_item_test.rb
++      assert_equal 2, item.quantity
+DEOF
+    run cluster_staged_files_deterministic "$files" "$diff_file"
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s\n' "$output" | count_lines)" -eq 1 ]
+    assert_output_contains $'app/models/estimate_item.rb\ttest/models/estimate_item_test.rb'
+}
+
+@test "cluster_staged_files_deterministic buckets unpaired added tests by layer" {
+    local files diff_file
+    files="$(printf 'app/models/d.rb\ntest/controllers/a_controller_test.rb\ntest/controllers/b_controller_test.rb\ntest/models/c_test.rb')"
+    diff_file="$TEST_TEMP_DIR/diff.txt"
+    cat > "$diff_file" <<'DEOF'
+diff --git a/app/models/d.rb b/app/models/d.rb
++        unrelated_model_change = true
+diff --git a/test/controllers/a_controller_test.rb b/test/controllers/a_controller_test.rb
+new file mode 100644
++    test 'a works' do
+diff --git a/test/controllers/b_controller_test.rb b/test/controllers/b_controller_test.rb
+new file mode 100644
++    test 'b works' do
+diff --git a/test/models/c_test.rb b/test/models/c_test.rb
+new file mode 100644
++    test 'c works' do
+DEOF
+    run cluster_staged_files_deterministic "$files" "$diff_file"
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s\n' "$output" | count_lines)" -eq 3 ]
+    assert_output_contains $'test/controllers/a_controller_test.rb\ttest/controllers/b_controller_test.rb'
+}
+
+@test "cluster_staged_files_deterministic splits oversized test bucket at AI_MAX_GROUP_SIZE" {
+    local files diff_file
+    files="$(printf 'test/controllers/a_test.rb\ntest/controllers/b_test.rb\ntest/controllers/c_test.rb')"
+    diff_file="$TEST_TEMP_DIR/diff.txt"
+    cat > "$diff_file" <<'DEOF'
+diff --git a/test/controllers/a_test.rb b/test/controllers/a_test.rb
+new file mode 100644
++    test 'a works' do
+diff --git a/test/controllers/b_test.rb b/test/controllers/b_test.rb
+new file mode 100644
++    test 'b works' do
+diff --git a/test/controllers/c_test.rb b/test/controllers/c_test.rb
+new file mode 100644
++    test 'c works' do
+DEOF
+    AI_MAX_GROUP_SIZE=2
+    run cluster_staged_files_deterministic "$files" "$diff_file"
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s\n' "$output" | count_lines)" -eq 2 ]
+    assert_output_contains $'test/controllers/a_test.rb\ttest/controllers/b_test.rb'
+}
+
+# ─── symbol/dir-union noise dampeners ────────────────────────────────────────
+
+@test "cluster_staged_files_deterministic ignores helper defs defined inside test files" {
+    local files diff_file
+    files="$(printf 'app/models/a.rb\nlib/z/b.rb\ntest/controllers/a_controller_test.rb\ntest/controllers/b_controller_test.rb')"
+    diff_file="$TEST_TEMP_DIR/diff.txt"
+    cat > "$diff_file" <<'DEOF'
+diff --git a/app/models/a.rb b/app/models/a.rb
++        make_widget(attributes)
+diff --git a/lib/z/b.rb b/lib/z/b.rb
++        unrelated_b_change = true
+diff --git a/test/controllers/a_controller_test.rb b/test/controllers/a_controller_test.rb
+new file mode 100644
++    def make_widget(attrs)
++      Widget.create!(attrs)
+diff --git a/test/controllers/b_controller_test.rb b/test/controllers/b_controller_test.rb
+new file mode 100644
++      make_widget(name: 'x')
+DEOF
+    run cluster_staged_files_deterministic "$files" "$diff_file"
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s\n' "$output" | count_lines)" -eq 3 ]
+    assert_output_contains $'test/controllers/a_controller_test.rb\ttest/controllers/b_controller_test.rb'
+}
+
+@test "cluster_staged_files_deterministic does not sweep same-dir strays into a multi-dir component" {
+    local files diff_file
+    files="$(printf 'app/models/m.rb\napp/models/u.rb\napp/views/x/a.html.erb\napp/views/x/b.html.erb')"
+    diff_file="$TEST_TEMP_DIR/diff.txt"
+    cat > "$diff_file" <<'DEOF'
+diff --git a/app/models/m.rb b/app/models/m.rb
++    self.total = items.reload.sum(&:amount)
+diff --git a/app/models/u.rb b/app/models/u.rb
++    self.other = something.else(:entirely)
+diff --git a/app/views/x/a.html.erb b/app/views/x/a.html.erb
++    self.other = items.reload.sum(&:total)
+diff --git a/app/views/x/b.html.erb b/app/views/x/b.html.erb
++    self.more = items.reload.sum(&:qty)
+DEOF
+    run cluster_staged_files_deterministic "$files" "$diff_file"
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s\n' "$output" | count_lines)" -eq 2 ]
+    assert_output_contains $'app/models/m.rb\tapp/views/x/a.html.erb\tapp/views/x/b.html.erb'
+    assert_output_contains $'\tapp/models/u.rb'
+}

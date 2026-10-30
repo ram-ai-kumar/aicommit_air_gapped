@@ -13,16 +13,15 @@ This update provides:
 3. Pre-clustering guardrails (Edge 2 symbol ceiling $K \le 4$, Edge 3.5 scoped relocation signatures).
 4. Full Conventional Commit `type` and intent propagation downstream into commit message generation.
 5. Topological DAG sorting to guarantee intermediate tree validity.
-6. Exact content-addressed caching (`staged_state_key`, `grouping_state_key`) with always-regroup semantics and mid-run still-staged filtering.
+6. Exact content-addressed caching (`staged_state_key`) for generated messages with always-regroup semantics and mid-run still-staged filtering.
 
 ## Files to Touch
 
 | File | Change |
 | --- | --- |
-| `config/defaults.sh` | Add knobs: `AI_GROUPING_TIMEOUT`, `AI_GROUPING_NUM_PREDICT*`, `AI_GROUPING_MAX_*`, `AI_SYMBOL_MAX_FILES`, `AICOMMIT_GROUPING_ALGO_VERSION` |
-| `templates/context-grouping-prompt.txt` | Prompt rewrite with reviewer archetypes, group sizing guidelines (3-8 commits), status tags, and user intent hints section |
+| `config/defaults.sh` | Knobs: `AI_SYMBOL_MAX_FILES`, `AI_MAX_GROUP_SIZE` (LLM-grouping knobs later removed — grouping is fully deterministic) |
 | `aicommit.sh` | Ingest positional non-flag arguments and comma-separated tokens as user hints, write `${tmp_dir}/USER_HINTS`, forward to flows |
-| `lib/context-analyzer.sh` | Guarded clustering edges, faceted summaries, `staged_status_map`, `grouping_state_key` (including user hints hash), DAG topological sort, type retention |
+| `lib/context-analyzer.sh` | Guarded clustering edges, replicated-edit signatures, unpaired-test bucketing, DAG topological sort, type retention (purely deterministic — LLM grouping path and result cache removed) |
 | `lib/core.sh` | `staged_state_key()`, group-DIFF cache isolation, 3-field `_aicommit_split_tab_line`, `GROUP_TYPE`/`GROUP_INTENT` context injection |
 | `lib/split-flow.sh` | Always-regroup on current staged set, mid-run still-staged filtering (`_split_sync_to_staged`), provenance display, formatted group previews with hints |
 | `lib/backends.sh` | Dynamic `num_predict` override support in `build_ollama_request` |

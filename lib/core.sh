@@ -11,7 +11,6 @@
 #       FULL_PROMPT           audit artifact (system rules + user context)
 #       MSG_KEY/MSG_CACHE/    last request hash + assembled message
 #       MSG_REQUEST/SEED_OFFSET
-#       GROUPS_KEY/GROUPS_CACHE  grouping cache (sha of sorted staged list)
 #       COCHANGE              co-change pairs, HEAD sha on line 1
 #     runs/<pid>.XXXXXX/      private to one invocation — two terminals never
 #       STAGED_DIFF           share files; removed on exit

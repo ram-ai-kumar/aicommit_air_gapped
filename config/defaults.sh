@@ -46,41 +46,14 @@ AI_ENABLE_REFLECTION="${AI_ENABLE_REFLECTION:-true}"
 AI_REFLECTION_MODE="${AI_REFLECTION_MODE:-on-failure}"
 AI_REFLECTION_PROMPT_FILE="${AI_REFLECTION_PROMPT_FILE:-$AICOMMIT_DIR/templates/reflection-prompt.txt}"
 
-# Path to prompt template for logical context grouping
-AI_GROUPING_PROMPT_FILE="${AI_GROUPING_PROMPT_FILE:-$AICOMMIT_DIR/templates/context-grouping-prompt.txt}"
-
 # Path to declarative framework patterns configuration for vertical feature slicing
 AI_FRAMEWORK_PATTERNS_FILE="${AI_FRAMEWORK_PATTERNS_FILE:-$AICOMMIT_DIR/config/framework-patterns.json}"
-
-# Enable AI model for logical scope grouping (false by default for deterministic resource efficiency)
-AI_ENABLE_LLM_GROUPING="${AI_ENABLE_LLM_GROUPING:-false}"
-
-# Timeout for the grouping/naming LLM call (seconds)
-AI_GROUPING_TIMEOUT="${AI_GROUPING_TIMEOUT:-60}"
-
-# Response token floor for the grouping call — scaled up by component count
-# (the flat AI_NUM_PREDICT default truncates the JSON on large group counts)
-AI_GROUPING_NUM_PREDICT="${AI_GROUPING_NUM_PREDICT:-2048}"
-AI_GROUPING_NUM_PREDICT_MAX="${AI_GROUPING_NUM_PREDICT_MAX:-8192}"
-
-# Cap on file paths listed in the grouping prompt (per-component tail truncated beyond it)
-AI_GROUPING_MAX_PATHS="${AI_GROUPING_MAX_PATHS:-1000}"
-
-# Cap on staged paths inlined as an enum in the grouping schema — keeps
-# decode-time path validation affordable; beyond it files[] is a plain string
-AI_GROUPING_MAX_ENUM_PATHS="${AI_GROUPING_MAX_ENUM_PATHS:-300}"
 
 # Cap on files sharing a symbol before Edge 2 skips unioning (prevents over-clustering on ubiquitous symbols)
 AI_SYMBOL_MAX_FILES="${AI_SYMBOL_MAX_FILES:-4}"
 
-# Minimum keyword similarity threshold for vertical feature overlap clustering
-AI_KEYWORD_SIMILARITY_MIN="${AI_KEYWORD_SIMILARITY_MIN:-0.5}"
-
-# Maximum files in an atomic feature group before splitting oversized clusters
+# Maximum files per unpaired-test coverage bucket before deterministic split
 AI_MAX_GROUP_SIZE="${AI_MAX_GROUP_SIZE:-14}"
-
-# Grouping algorithm version — bumping invalidates all cached groupings
-AICOMMIT_GROUPING_ALGO_VERSION="${AICOMMIT_GROUPING_ALGO_VERSION:-v4}"
 
 # Timeout for LLM inference (seconds). Increase for large models or slow hardware.
 # Override in ~/.aicommitrc: AI_TIMEOUT=240
