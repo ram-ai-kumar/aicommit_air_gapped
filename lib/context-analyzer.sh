@@ -188,7 +188,7 @@ cluster_staged_files_deterministic() {
     local cochange_file="${3:-}"
     local framework_patterns_file="${AI_FRAMEWORK_PATTERNS_FILE:-$AICOMMIT_DIR/config/framework-patterns.json}"
 
-    printf '%s\n' "$staged_files" | LC_ALL=C sort | awk \
+    printf '%s\n' "$staged_files" | LC_ALL=C sort | LC_ALL=C awk \
         -v diff_file="$diff_file" \
         -v cochange_file="$cochange_file" \
         -v cochange_min="${AI_COCHANGE_MIN:-2}" \
@@ -746,7 +746,7 @@ build_cochange_cache() {
     local tmp="${cache}.tmp"
     {
         printf '%s\n' "$head_sha"
-        agit log -300 --pretty=format:'__aicommit_commit__' --name-only 2>/dev/null | awk '
+        agit log -300 --pretty=format:'__aicommit_commit__' --name-only 2>/dev/null | LC_ALL=C awk '
             function flush(   i, j, a, b) {
                 # Mass commits carry mostly noise — cap fan-out per commit
                 if (n >= 2 && n <= 40)
@@ -790,7 +790,7 @@ _name_component_lines() {
         [ ${#_aicommit_split_files[@]} -eq 0 ] && continue
 
         # Identify dominant domain feature keyword among member files if present
-        dom_feat=$(printf '%s\n' "${_aicommit_split_files[@]}" | awk '
+        dom_feat=$(printf '%s\n' "${_aicommit_split_files[@]}" | LC_ALL=C awk '
         function basename_of(p,   b) { b = p; sub(/^.*\//, "", b); return b }
         function dirname_of(p,   d) { d = p; return (sub(/\/[^\/]*$/, "", d) ? d : ".") }
         function norm_stem(path,    b, s) {
@@ -878,7 +878,7 @@ _name_component_lines() {
         else
             # All-member test component → name by layer bucket rather than a
             # numeric "test-N" (controller-tests, model-tests, test-infrastructure)
-            name=$(printf '%s\n' "${_aicommit_split_files[@]}" | awk -F/ '
+            name=$(printf '%s\n' "${_aicommit_split_files[@]}" | LC_ALL=C awk -F/ '
                 function is_test_path(p) {
                     return p ~ /(^|\/)(tests?|spec|__tests__|testdata)\// || \
                            p ~ /(_test|_spec|\.test|\.spec)\.[^.\/]+$/ || \
@@ -903,7 +903,7 @@ _name_component_lines() {
             # Plurality context across members — a merged component keeps the
             # minority member's file from dictating the group name.
             name=$(for f in "${_aicommit_split_files[@]}"; do infer_logical_file_context "$f"; done \
-                | awk '{ c[$0]++; if (!($0 in seen)) seen[$0] = NR }
+                | LC_ALL=C awk '{ c[$0]++; if (!($0 in seen)) seen[$0] = NR }
                        END { bc = -1; bi = 999999; b = ""
                              for (k in c) if (c[k] > bc || (c[k] == bc && seen[k] < bi)) { bc = c[k]; b = k; bi = seen[k] }
                              print b }')
@@ -913,7 +913,7 @@ _name_component_lines() {
             case "$name" in
                 docs|config|scripts|core|ui|routes)
                     if [ ${#_aicommit_split_files[@]} -ge 1 ]; then
-                        common_dir=$(printf '%s\n' "${_aicommit_split_files[@]}" | awk -F/ '
+                        common_dir=$(printf '%s\n' "${_aicommit_split_files[@]}" | LC_ALL=C awk -F/ '
                             { n = split($0, a, "/")
                               if (NR == 1) { m = n - 1; for (i = 1; i <= m; i++) c[i] = a[i] }
                               else { for (i = 1; i <= m && i < n; i++) if (a[i] != c[i]) m = i - 1 }

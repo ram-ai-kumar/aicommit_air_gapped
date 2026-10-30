@@ -253,9 +253,9 @@ _aicommit_main() {
     # When running as 'aic', assume all-in-one commit without checking for logical grouping.
     if [ "$is_aic" != "true" ] && [ "$auto_yes" != "true" ] && [ "$split_mode" = "false" ] && [ "$dry_run" != "true" ]; then
         scope_groups=$(group_staged_files_by_scope "$staged_files" "$changes" "$numstat_data")
-        scope_groups=$(printf '%s\n' "$scope_groups" | awk -F'\t' 'NF>=2 && $1!="" && $2!="" && $1 !~ /=/ && $1 !~ /^(joined_files|staged_files|files)/ {print $0}')
+        scope_groups=$(printf '%s\n' "$scope_groups" | LC_ALL=C awk -F'\t' 'NF>=2 && $1!="" && $2!="" && $1 !~ /=/ && $1 !~ /^(joined_files|staged_files|files)/ {print $0}')
         num_scopes=$(printf '%s\n' "$scope_groups" | count_lines)
-        scope_names=$(printf '%s\n' "$scope_groups" | awk -F'\t' '{printf (NR>1?", ":"") $1} END{print ""}')
+        scope_names=$(printf '%s\n' "$scope_groups" | LC_ALL=C awk -F'\t' '{printf (NR>1?", ":"") $1} END{print ""}')
 
         # If changes span 2+ scopes, prompt user for approval
         if [ "$num_scopes" -ge 2 ]; then

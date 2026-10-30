@@ -723,3 +723,28 @@ DEOF
     assert_output_contains $'app/models/m.rb\tapp/views/x/a.html.erb\tapp/views/x/b.html.erb'
     assert_output_contains $'\tapp/models/u.rb'
 }
+
+@test "cluster_staged_files_deterministic handles multibyte UTF-8 characters crossing line truncation boundaries" {
+    local files diff_file
+    files="$(printf 'docs/pricing.md\nsrc/service.py')"
+    diff_file="$TEST_TEMP_DIR/multibyte_diff.txt"
+
+    # Construct a line exceeding 300 bytes with a 3-byte Rupee symbol at byte offset 298
+    local prefix=" +| **Hero Plan** | "
+    while [ ${#prefix} -lt 295 ]; do
+        prefix="${prefix}padding "
+    done
+    local long_line="${prefix:0:295} **₹9,999 / mo** | more text"
+
+    cat > "$diff_file" <<DEOF
+diff --git a/docs/pricing.md b/docs/pricing.md
+${long_line}
+diff --git a/src/service.py b/src/service.py
++def compute_pricing_summary():
++    pass
+DEOF
+
+    run cluster_staged_files_deterministic "$files" "$diff_file"
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s\n' "$output" | count_lines)" -eq 2 ]
+}

@@ -43,10 +43,10 @@ _aicommit_split_flow() {
         # Always group the currently staged files — deterministic grouping is
         # cheap, so there is nothing to reuse and nothing that can go stale.
         scope_groups=$(group_staged_files_by_scope "$staged_files" "$changes" "$numstat_data")
-        scope_groups=$(printf '%s\n' "$scope_groups" | awk -F'\t' 'NF>=2 && $1!="" && $2!="" && $1 !~ /=/ && $1 !~ /^(joined_files|staged_files|files)/ {print $0}')
+        scope_groups=$(printf '%s\n' "$scope_groups" | LC_ALL=C awk -F'\t' 'NF>=2 && $1!="" && $2!="" && $1 !~ /=/ && $1 !~ /^(joined_files|staged_files|files)/ {print $0}')
     fi
     num_scopes=$(printf '%s\n' "$scope_groups" | count_lines)
-    scope_names=$(printf '%s\n' "$scope_groups" | awk -F'\t' '{printf (NR>1?", ":"") $1} END{print ""}')
+    scope_names=$(printf '%s\n' "$scope_groups" | LC_ALL=C awk -F'\t' '{printf (NR>1?", ":"") $1} END{print ""}')
 
     if [ "$dry_run" != "true" ] && ! validate_prerequisites; then
         return 1
