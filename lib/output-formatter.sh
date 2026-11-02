@@ -14,8 +14,8 @@ display_staged_files() {
 
     local file_count adds dels plural git_status file rest
     file_count=$(printf '%s\n' "$staged_files" | grep -c '.')
-    adds=$(printf '%s\n' "$numstat_data" | awk '{a += $1} END {print a + 0}')
-    dels=$(printf '%s\n' "$numstat_data" | awk '{d += $2} END {print d + 0}')
+    adds=$(printf '%s\n' "$numstat_data" | LC_ALL=C awk '{a += $1} END {print a + 0}')
+    dels=$(printf '%s\n' "$numstat_data" | LC_ALL=C awk '{d += $2} END {print d + 0}')
     plural="s"
     [ "$file_count" -eq 1 ] && plural=""
 
@@ -288,7 +288,7 @@ format_group_files_compact() {
     fi
     [ -z "$input" ] && return 0
 
-    printf '%s\n' "$input" | awk '
+    printf '%s\n' "$input" | LC_ALL=C awk '
 function get_type(file,   base, ext) {
     base = file; sub(/^.*\//, "", base)
     if (base ~ /^\./ && base !~ /^[.][^.]+[.]/) {
@@ -377,7 +377,7 @@ display_resolved_atomic_groups() {
             summary_lines=$(format_group_files_compact <<< "$grp_raw_files")
         fi
 
-        line_count=$(printf '%s\n' "$summary_lines" | awk 'NF { c++ } END { print c + 0 }')
+        line_count=$(printf '%s\n' "$summary_lines" | LC_ALL=C awk 'NF { c++ } END { print c + 0 }')
 
         if [ "$line_count" -le 1 ]; then
             echo "  $bullet $grp_scope -> $summary_lines"

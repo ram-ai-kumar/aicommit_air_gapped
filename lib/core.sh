@@ -360,7 +360,7 @@ _aicommit_split_tab_line() {
 # `|| echo "0"` fallback appends a second "0" line and callers that expect a
 # single integer (e.g. `[ "$n" -ge 2 ]`) blow up with "integer expression expected".
 count_lines() {
-    awk '$0 != "" { c++ } END { print c + 0 }'
+    LC_ALL=C awk '$0 != "" { c++ } END { print c + 0 }'
 }
 
 # Build file context — writes FILE_CONTEXT, CHANGE_STATS, and FILE_COUNT.
@@ -382,7 +382,7 @@ build_file_context() {
     # numstat travels via file, not -v: BSD awk rejects literal newlines in -v
     printf '%s' "$numstat_data" > "${out_dir}/NUMSTAT"
 
-    printf '%s\n' "$staged_files" | awk \
+    printf '%s\n' "$staged_files" | LC_ALL=C awk \
         -v numstat_file="${out_dir}/NUMSTAT" \
         -v out="$out_dir" \
         -v sensitive="$_AICOMMIT_SENSITIVE_RE" '
@@ -433,7 +433,7 @@ filter_and_truncate_diff() {
     local tier2_cap="${1:-20}"
     local tier3_cap="${2:-80}"
 
-    awk -v sensitive="$_AICOMMIT_SENSITIVE_RE" \
+    LC_ALL=C awk -v sensitive="$_AICOMMIT_SENSITIVE_RE" \
         -v cap2="$tier2_cap" -v cap3="$tier3_cap" '
     BEGIN { tier = 3; max_lines = cap3; file_lines = 0 }
     /^diff --git/ {
@@ -502,7 +502,7 @@ filter_and_truncate_diff() {
 # The model is told to describe THESE facts instead of guessing. Reads diff
 # text on stdin.
 build_facts() {
-    awk '
+    LC_ALL=C awk '
     /^diff --git / {
         file = $0
         if (match(file, / b\/.*$/)) file = substr(file, RSTART + 3)
@@ -565,7 +565,7 @@ build_facts() {
 # Emits one allowed type per line. The schema enum makes a wrong type
 # unrepresentable instead of merely discouraged.
 infer_allowed_types() {
-    awk '
+    LC_ALL=C awk '
     {
         if ($0 == "") next
         n++
@@ -734,7 +734,7 @@ build_ai_context() {
     local stat_only_stat=""
     if [ -n "$stat_only_files" ]; then
         printf '%s\n' "$stat_only_files" > "${out_dir}/STAT_ONLY_NAMES"
-        stat_only_stat=$(printf '%s\n' "$numstat_data" | awk -v list_file="${out_dir}/STAT_ONLY_NAMES" '
+        stat_only_stat=$(printf '%s\n' "$numstat_data" | LC_ALL=C awk -v list_file="${out_dir}/STAT_ONLY_NAMES" '
             BEGIN {
                 FS = "\t"
                 while ((getline f < list_file) > 0) {
@@ -2153,7 +2153,7 @@ regenerate_commit_message() {
 # Args: $1=diff_file, $2=numstat_file, $3=index_file (lines "i\tf1\tf2..."), $4=groups_dir
 _split_diff_by_groups() {
     local diff_file="$1" numstat_file="$2" index_file="$3" groups_dir="$4"
-    awk -v index_file="$index_file" -v outdir="$groups_dir" '
+    LC_ALL=C awk -v index_file="$index_file" -v outdir="$groups_dir" '
     BEGIN {
         while ((getline l < index_file) > 0) {
             n = split(l, p, "\t")
@@ -2215,7 +2215,10 @@ prepare_group_run_dirs() {
     local n=$i
     [ "$n" -eq 0 ] && return 1
 
-    _split_diff_by_groups "${tmp_dir}/STAGED_DIFF" "${tmp_dir}/NUMSTAT" "$index_file" "$groups_root"
+    if ! _split_diff_by_groups "${tmp_dir}/STAGED_DIFF" "${tmp_dir}/NUMSTAT" "$index_file" "$groups_root"; then
+        display_error "Failed to split diff by groups"
+        return 1
+    fi
 
     # Per-group contexts (facts, allowed types, scope candidates land per group)
     for ((i = 1; i <= n; i++)); do

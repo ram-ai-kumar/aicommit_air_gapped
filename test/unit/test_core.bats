@@ -1398,6 +1398,76 @@ EOF
     refute_output_contains "m="
 }
 
+# ─── Non-UTF-8 diff & file handling ──────────────────────────────────────────
+
+@test "_split_diff_by_groups splits diffs containing non-UTF-8 bytes and filenames with spaces" {
+    local tdir="$TEST_TEMP_DIR/split_non_utf8"
+    mkdir -m 700 -p "$tdir/groups/1" "$tdir/groups/2"
+
+    local f1="Spare Parts Pricelists - samples/2017-08-27 HSN PARTS WISE.csv"
+    local f2="Spare Parts Pricelists - samples/2017-08-27 HSN PARTS WISE.xlsx"
+    local f3="src/normal file.js"
+
+    printf '1\t%s\t%s\n2\t%s\n' "$f1" "$f2" "$f3" > "$tdir/groups/INDEX"
+    printf '10\t2\t%s\n0\t0\t%s\n5\t1\t%s\n' "$f1" "$f2" "$f3" > "$tdir/NUMSTAT"
+
+    {
+        printf 'diff --git a/%s b/%s\n' "$f1" "$f1"
+        printf 'index 0000000..1111111 100644\n--- a/%s\n+++ b/%s\n@@ -0,0 +1,2 @@\n' "$f1" "$f1"
+        printf '+price \x80\xff Indian Rupees\n'
+        printf 'diff --git a/%s b/%s\n' "$f2" "$f2"
+        printf 'Binary files differ\n'
+        printf 'diff --git a/%s b/%s\n' "$f3" "$f3"
+        printf 'index 2222222..3333333 100644\n--- a/%s\n+++ b/%s\n@@ -0,0 +1 @@\n+console.log(1);\n' "$f3" "$f3"
+    } > "$tdir/STAGED_DIFF"
+
+    run _split_diff_by_groups "$tdir/STAGED_DIFF" "$tdir/NUMSTAT" "$tdir/groups/INDEX" "$tdir/groups"
+    [ "$status" -eq 0 ]
+    [ -s "$tdir/groups/1/DIFF" ]
+    [ -s "$tdir/groups/2/DIFF" ]
+    grep -q "2017-08-27 HSN PARTS WISE.csv" "$tdir/groups/1/DIFF"
+    grep -q "2017-08-27 HSN PARTS WISE.xlsx" "$tdir/groups/1/DIFF"
+    grep -q "src/normal file.js" "$tdir/groups/2/DIFF"
+}
+
+@test "prepare_group_run_dirs succeeds on groups containing non-UTF-8 diffs and space paths" {
+    local tdir="$TEST_TEMP_DIR/prep_group_non_utf8"
+    mkdir -m 700 -p "$tdir"
+
+    local dpath="Spare Parts Pricelists - samples"
+    mkdir -p "$dpath"
+    local f1="$dpath/2017-08-27 HSN PARTS WISE.csv"
+    local f2="$dpath/2017-08-27 HSN PARTS WISE.xlsx"
+    printf 'price \x80\xff INR\n' > "$f1"
+    printf 'PK\x03\x04mock xlsx binary\x80\xff' > "$f2"
+
+    git add "$f1" "$f2"
+    git diff --staged -M --diff-algorithm=histogram > "$tdir/STAGED_DIFF"
+    git diff --staged --numstat > "$tdir/NUMSTAT"
+
+    local scope_groups
+    scope_groups=$(printf 'inventory\t%s\t%s\n' "$f1" "$f2")
+
+    run prepare_group_run_dirs "$scope_groups" "$tdir"
+    [ "$status" -eq 0 ]
+    [ -s "$tdir/groups/1/DIFF" ]
+    [ -s "$tdir/groups/1/STAGED_NAMES" ]
+    [ -s "$tdir/groups/1/FACTS" ]
+}
+
+@test "build_facts and filter_and_truncate_diff succeed on non-UTF-8 diff streams" {
+    local diff_data
+    diff_data=$(printf 'diff --git a/sample.csv b/sample.csv\nindex 0000000..1111111 100644\n--- a/sample.csv\n+++ b/sample.csv\n@@ -0,0 +1 @@\n+price \x80\xff INR\n')
+
+    run bash -c "source '$AICOMMIT_DIR/aicommit.sh'; printf '%s\n' \"\$1\" | build_facts" _ "$diff_data"
+    [ "$status" -eq 0 ]
+    assert_output_contains "=== FACTS ==="
+
+    run bash -c "source '$AICOMMIT_DIR/aicommit.sh'; printf '%s\n' \"\$1\" | filter_and_truncate_diff 20 80" _ "$diff_data"
+    [ "$status" -eq 0 ]
+    assert_output_contains "sample.csv"
+}
+
 
 
 
