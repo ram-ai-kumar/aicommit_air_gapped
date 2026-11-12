@@ -332,9 +332,14 @@ aicommit() {
         [[ "$-" =~ m ]] && _saved_monitor=true
         set +m
     fi
+    # Anchor to the repo toplevel — semver file scans and changelog writes are
+    # CWD-relative and must resolve against the worktree root, not wherever the
+    # caller happened to be standing. PWD is always restored before returning.
+    _aicommit_enter_repo_root
     _aicommit_main "$@"
     _rc=$?
     aicommit_cleanup_run_dir
+    _aicommit_leave_repo_root
     if [ -n "$BASH_VERSION" ]; then
         trap - INT TERM EXIT
         [ -n "$_saved_traps" ] && eval "$_saved_traps"

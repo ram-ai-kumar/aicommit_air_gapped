@@ -1630,7 +1630,7 @@ apply_semver_release() {
 # ─── Standalone SemVer Engine (ais / aisemver) ─────────────────────────────────
 
 # Standalone Semantic Versioning bump command implementation
-_aisemver_main() {
+_aisemver_run() {
     [ -n "$ZSH_VERSION" ] && setopt localoptions localtraps shwordsplit nonomatch nomonitor nonotify typesetsilent
 
     local dry_run=false verbose=false
@@ -2056,6 +2056,18 @@ _aisemver_main() {
     fi
     echo ""
     return 0
+}
+
+# Public entry for ais / aisemver / aisx — anchors CWD to the repo toplevel so
+# the CWD-relative manifest/changelog scans and writes resolve against the
+# worktree root (same invariant the commit flows get via aicommit()).
+_aisemver_main() {
+    [ -n "$ZSH_VERSION" ] && setopt localoptions localtraps shwordsplit nonomatch nomonitor nonotify typesetsilent
+    _aicommit_enter_repo_root
+    _aisemver_run "$@"
+    local _rc=$?
+    _aicommit_leave_repo_root
+    return $_rc
 }
 
 

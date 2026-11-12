@@ -371,3 +371,55 @@ teardown() {
     git cat-file -e "HEAD:b_two.js"
 }
 
+@test "MC-06: aiccs run from a repo subdirectory resolves semver files at repo root and leaves a clean tree" {
+    echo "1.0.0" > VERSION
+    echo "# Changelog" > CHANGELOG.md
+    git add VERSION CHANGELOG.md
+    git commit -m "chore: initial" >/dev/null 2>&1
+    git tag v1.0.0
+
+    mkdir -p src/auth src/billing
+    echo "x = 1" > src/auth/login.py
+    echo "y = 2" > src/billing/invoice.py
+    git add src/auth/login.py src/billing/invoice.py
+
+    export AI_MODEL="test-model"
+    mock_ollama_api 'feat(core): add capability'
+
+    # Semver file scans are CWD-relative — invoking from a nested subdirectory
+    # must still resolve manifests and the changelog against the repo toplevel.
+    mkdir -p src/auth/deep
+    cd src/auth/deep
+    run aiccs
+    cd "$TEST_REPO_DIR"
+
+    [ "$status" -eq 0 ]
+    assert_output_contains "All atomic commits completed!"
+    # No leftover staged/modified files and no phantom changelog in the subdir
+    [ -z "$(git status --porcelain)" ]
+    [ ! -e "src/auth/deep/CHANGELOG.md" ]
+    # Root changelog gained release sections and VERSION was bumped
+    grep -q "^## \[1\." CHANGELOG.md
+    ! grep -qx "1.0.0" VERSION
+    git cat-file -e "HEAD:CHANGELOG.md"
+    git cat-file -e "HEAD:VERSION"
+}
+
+@test "MC-07: ais run from a repo subdirectory bumps root VERSION and CHANGELOG with a clean tree" {
+    echo "1.0.0" > VERSION
+    git add VERSION
+    git commit -m "chore: initial" >/dev/null 2>&1
+
+    mkdir -p src/deep/nested
+    cd src/deep/nested
+    run ais
+    cd "$TEST_REPO_DIR"
+
+    [ "$status" -eq 0 ]
+    assert_output_contains "SemVer Release Successful"
+    ! grep -qx "1.0.0" VERSION
+    [ -f CHANGELOG.md ]
+    [ ! -e "src/deep/nested/CHANGELOG.md" ]
+    [ -z "$(git status --porcelain)" ]
+}
+

@@ -288,6 +288,30 @@ to_pathspec() {
     printf ':(top,literal)%s' "$1"
 }
 
+# Normalize CWD to the repo toplevel for the duration of a run. Staged paths,
+# grouping, and commit_staged_subset pathspecs are all repo-root-relative, and
+# the semver file scans in semver.sh (find ., [ -f package.json ], git add
+# <file>) only resolve correctly when CWD == toplevel. Invoked from a
+# subdirectory they used to create CWD/CHANGELOG.md, stage it under a
+# CWD-relative name that never matched the root-relative staged set, and leave
+# it staged-but-uncommitted after every split commit. No-op outside a git
+# worktree — callers then fail exactly as they did before.
+_aicommit_enter_repo_root() {
+    _AICOMMIT_ORIG_PWD="$PWD"
+    local top=""
+    top=$(agit rev-parse --show-toplevel 2>/dev/null || true)
+    if [ -n "$top" ]; then
+        cd "$top" 2>/dev/null || true
+    fi
+}
+
+# Restore the caller's CWD after _aicommit_enter_repo_root. Safe to call when
+# enter was a no-op (non-git dir): _AICOMMIT_ORIG_PWD still holds $PWD.
+_aicommit_leave_repo_root() {
+    [ -n "${_AICOMMIT_ORIG_PWD:-}" ] && cd "$_AICOMMIT_ORIG_PWD" 2>/dev/null || true
+    _AICOMMIT_ORIG_PWD=""
+}
+
 # Exact staged-state identity — sha256 of the raw staged diff (per-file old/new
 # mode, old/new blob sha, status letter, rename pair + similarity score).
 # Content-exact: any difference in file names, statuses, content, modes, count,
