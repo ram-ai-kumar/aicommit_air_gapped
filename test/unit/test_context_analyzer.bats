@@ -740,11 +740,176 @@ DEOF
 diff --git a/docs/pricing.md b/docs/pricing.md
 ${long_line}
 diff --git a/src/service.py b/src/service.py
-+def compute_pricing_summary():
++def render_markdown_table():
 +    pass
 DEOF
 
     run cluster_staged_files_deterministic "$files" "$diff_file"
     [ "$status" -eq 0 ]
     [ "$(printf '%s\n' "$output" | count_lines)" -eq 2 ]
+}
+
+# ─── Full-path keyword pairing (Cycle 1.7) ──────────────────────────────────
+
+@test "path keywords: models/abc.py groups with nested tests/models/abc files" {
+    local files comp
+    files="$(printf 'models/abc.py\ntests/models/abc/that.py\ntests/models/abc/this.py')"
+    run cluster_staged_files_deterministic "$files"
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s\n' "$output" | count_lines)" -eq 1 ]
+    assert_output_contains $'\tmodels/abc.py\ttests/models/abc/that.py\ttests/models/abc/this.py'
+
+    comp=$(cluster_staged_files_deterministic "$files")
+    run _name_component_lines "$comp"
+    [ "$status" -eq 0 ]
+    assert_output_contains $'abc\tmodels/abc.py'
+}
+
+@test "path keywords: dir-only keyword merges same-tree non-test files" {
+    local files
+    files="$(printf 'app/services/abc/helper.rb\napp/models/abc.rb')"
+    run cluster_staged_files_deterministic "$files"
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s\n' "$output" | count_lines)" -eq 1 ]
+}
+
+@test "path keywords: dir-only keyword keeps cross-tree non-test files split" {
+    local files
+    files="$(printf 'backend/app/public_api/admin.py\nfrontend/src/routes/admin/index.tsx\nfrontend/src/routes/admin/route.tsx')"
+    run cluster_staged_files_deterministic "$files"
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s\n' "$output" | count_lines)" -eq 2 ]
+}
+
+@test "path keywords: test files sharing a dir keyword merge across test trees" {
+    local files
+    files="$(printf 'spec/models/abc/b_test.rb\ntests/models/abc/a_test.py')"
+    run cluster_staged_files_deterministic "$files"
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s\n' "$output" | count_lines)" -eq 1 ]
+}
+
+@test "path keywords: keyword over AI_PATH_KEYWORD_MAX members is ignored" {
+    local files
+    export AI_PATH_KEYWORD_MAX=2
+    files="$(printf 'a/feat/x.py\nb/feat/y.py\nc/feat/z.py')"
+    run cluster_staged_files_deterministic "$files"
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s\n' "$output" | count_lines)" -eq 3 ]
+    unset AI_PATH_KEYWORD_MAX
+}
+
+@test "path keywords: AI_DISABLE_PATH_KEYWORDS restores stem-only grouping" {
+    local files
+    export AI_DISABLE_PATH_KEYWORDS=true
+    files="$(printf 'models/abc.py\ntests/models/abc/that.py\ntests/models/abc/this.py')"
+    run cluster_staged_files_deterministic "$files"
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s\n' "$output" | count_lines)" -eq 2 ]
+    unset AI_DISABLE_PATH_KEYWORDS
+}
+
+# ─── Content-keyword rescue (Cycle 3.7) ─────────────────────────────────────
+
+@test "content keywords: untouched file with matching import attaches to feature group" {
+    local files diff_file
+    files="$(printf 'models/abc.py\ntests/x.py')"
+    diff_file="$TEST_TEMP_DIR/ck_import.diff"
+    cat > "$diff_file" <<'DEOF'
+diff --git a/models/abc.py b/models/abc.py
++class Abc:
++    pass
+diff --git a/tests/x.py b/tests/x.py
++from models.abc import Abc
++def run():
++    return Abc()
+DEOF
+    run cluster_staged_files_deterministic "$files" "$diff_file"
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s\n' "$output" | count_lines)" -eq 1 ]
+}
+
+@test "content keywords: comment naming a staged path attaches the file" {
+    local files diff_file
+    files="$(printf 'models/billing.py\napp/worker.py')"
+    diff_file="$TEST_TEMP_DIR/ck_comment.diff"
+    cat > "$diff_file" <<'DEOF'
+diff --git a/models/billing.py b/models/billing.py
++class Billing:
++    pass
+diff --git a/app/worker.py b/app/worker.py
++# covers models/billing.py retry edge cases
++def tick():
++    pass
+DEOF
+    run cluster_staged_files_deterministic "$files" "$diff_file"
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s\n' "$output" | count_lines)" -eq 1 ]
+}
+
+@test "content keywords: ambiguous double match stays split" {
+    local files diff_file
+    files="$(printf 'src/alpha.py\nlib/beta.py\ntests/gamma_test.py')"
+    diff_file="$TEST_TEMP_DIR/ck_ambig.diff"
+    # comment-only hunks: no definer symbols, so Cycle 2B cannot pre-empt 3.7
+    cat > "$diff_file" <<'DEOF'
+diff --git a/src/alpha.py b/src/alpha.py
++# alpha feature notes
+diff --git a/lib/beta.py b/lib/beta.py
++# beta feature notes
+diff --git a/tests/gamma_test.py b/tests/gamma_test.py
++# relates to src/alpha.py and lib/beta.py
++def test_gamma():
++    pass
+DEOF
+    run cluster_staged_files_deterministic "$files" "$diff_file"
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s\n' "$output" | count_lines)" -eq 3 ]
+}
+
+@test "content keywords: AI_DISABLE_CONTENT_KEYWORDS skips rescue edges" {
+    local files diff_file
+    export AI_DISABLE_CONTENT_KEYWORDS=true
+    files="$(printf 'models/abc.py\ntests/x.py')"
+    diff_file="$TEST_TEMP_DIR/ck_off.diff"
+    cat > "$diff_file" <<'DEOF'
+diff --git a/models/abc.py b/models/abc.py
++class Abc:
++    pass
+diff --git a/tests/x.py b/tests/x.py
++from models.abc import Abc
++def run():
++    return Abc()
+DEOF
+    run cluster_staged_files_deterministic "$files" "$diff_file"
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s\n' "$output" | count_lines)" -eq 2 ]
+    unset AI_DISABLE_CONTENT_KEYWORDS
+}
+
+@test "content keywords: full-file fallback merges unchanged import outside hunks" {
+    mkdir -p "$TEST_REPO_DIR/models" "$TEST_REPO_DIR/tests"
+    cat > "$TEST_REPO_DIR/models/abc.py" <<'PYEOF'
+class Abc:
+    def compute(self):
+        return 1
+PYEOF
+    cat > "$TEST_REPO_DIR/tests/x.py" <<'PYEOF'
+from models.abc import Abc
+
+
+def unrelated_helper():
+    return "noise"
+PYEOF
+    git add -A && git commit -qm baseline
+
+    # stage changes that do NOT touch the import line — it stays out of hunks
+    printf '\n    def extra(self):\n        return 2\n' >> "$TEST_REPO_DIR/models/abc.py"
+    printf '\n\ndef another_noise():\n    return 3\n' >> "$TEST_REPO_DIR/tests/x.py"
+    git add -A
+
+    run group_staged_files_logically "$(printf 'models/abc.py\ntests/x.py')"
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s\n' "$output" | count_lines)" -eq 1 ]
+    assert_output_contains $'\tmodels/abc.py\ttests/x.py'
 }

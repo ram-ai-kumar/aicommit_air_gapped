@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+## [1.0.7] - 2026-11-18
+
+- docs: add unreleased changelog entry for full-path keyword pairing
+
+
+- feat(grouping): match staged files by keywords across the full path and file contents
+  - Cycle 1.7 unions files sharing a domain keyword found in any path segment
+    (directories + filename stem), so `models/abc.py` groups with
+    `tests/models/abc/{this,that}.py`; stem-owned keywords bridge trees, test
+    files may attach cross-tree, and non-test dir-derived members keep the
+    existing tree-containment guards
+  - Cycle 3.7 rescues still-ungrouped files via keywords mined from staged
+    diff hunks (imports, def/class names, comments, file-path tokens), joining
+    only a unique best-scoring component; a bounded second pass reads staged
+    blobs for files still singleton so unchanged imports/comments count too
+  - Group naming now counts directory-segment keywords so merged components
+    are named by the shared feature (e.g. `abc`) rather than a generic scope
+  - New knobs: `AI_DISABLE_PATH_KEYWORDS`, `AI_DISABLE_CONTENT_KEYWORDS`,
+    `AI_PATH_KEYWORD_MAX`, `AI_CONTENT_KEYWORD_MAX`,
+    `AI_CONTENT_FALLBACK_MAX`, `AI_CONTENT_MAX_BYTES`
+
 ## [1.0.6] - 2026-11-12
 
 - refactor(core): anchor CWD to repo toplevel for semver resolution

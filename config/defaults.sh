@@ -55,6 +55,30 @@ AI_SYMBOL_MAX_FILES="${AI_SYMBOL_MAX_FILES:-4}"
 # Maximum files per unpaired-test coverage bucket before deterministic split
 AI_MAX_GROUP_SIZE="${AI_MAX_GROUP_SIZE:-14}"
 
+# Full-path keyword pairing: union staged files sharing a domain keyword found
+# in any path segment (directories + filename stem), not just the stem.
+# Disable to restore stem-only feature matching.
+AI_DISABLE_PATH_KEYWORDS="${AI_DISABLE_PATH_KEYWORDS:-false}"
+
+# Max member files per path keyword before it is treated as too generic to edge on
+AI_PATH_KEYWORD_MAX="${AI_PATH_KEYWORD_MAX:-10}"
+
+# Content-keyword rescue: attach still-ungrouped files to a uniquely
+# best-matching component via keywords mined from staged diff hunks
+# (imports, def/class names, comments, file-path tokens).
+# Disable to skip content-derived edges and the full-file fallback pass.
+AI_DISABLE_CONTENT_KEYWORDS="${AI_DISABLE_CONTENT_KEYWORDS:-false}"
+
+# Max staged files owning a path keyword that a single content keyword may hit
+AI_CONTENT_KEYWORD_MAX="${AI_CONTENT_KEYWORD_MAX:-10}"
+
+# Max singleton files whose full staged blobs are read for the fallback pass
+# (0 disables the second clustering pass)
+AI_CONTENT_FALLBACK_MAX="${AI_CONTENT_FALLBACK_MAX:-20}"
+
+# Per-file byte cap when reading staged blobs for content keyword extraction
+AI_CONTENT_MAX_BYTES="${AI_CONTENT_MAX_BYTES:-131072}"
+
 # Timeout for LLM inference (seconds). Increase for large models or slow hardware.
 # Override in ~/.aicommitrc: AI_TIMEOUT=240
 AI_TIMEOUT="${AI_TIMEOUT:-120}"
