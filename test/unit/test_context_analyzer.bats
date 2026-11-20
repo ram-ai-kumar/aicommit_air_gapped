@@ -913,3 +913,147 @@ PYEOF
     [ "$(printf '%s\n' "$output" | count_lines)" -eq 1 ]
     assert_output_contains $'\tmodels/abc.py\ttests/x.py'
 }
+
+# ─── Timestamp tiebreak (Cycle 3.7) ─────────────────────────────────────────
+
+_tie_scenario() {
+    # writes $1=diff_file $2=mtimes_file for the alpha/beta/gamma tie setup
+    cat > "$1" <<'DEOF'
+diff --git a/src/alpha.py b/src/alpha.py
++# alpha notes
+diff --git a/lib/beta.py b/lib/beta.py
++# beta notes
+diff --git a/tests/gamma.py b/tests/gamma.py
++# relates to src/alpha.py and lib/beta.py
++x = 1
+DEOF
+}
+
+_tie_files() { printf 'src/alpha.py\nlib/beta.py\ntests/gamma.py'; }
+
+@test "time tiebreak: temporally closest tied candidate wins" {
+    local files diff_file mtimes now
+    files="$(_tie_files)"; diff_file="$TEST_TEMP_DIR/tie.diff"; mtimes="$TEST_TEMP_DIR/mtimes.txt"
+    _tie_scenario "$diff_file"
+    now=$(date +%s)
+    printf 'src/alpha.py\t%s\nlib/beta.py\t%s\ntests/gamma.py\t%s\n' "$now" "$((now-100000))" "$((now-10))" > "$mtimes"
+    run cluster_staged_files_deterministic "$files" "$diff_file" "" "" "$mtimes"
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s\n' "$output" | count_lines)" -eq 2 ]
+    assert_output_contains $'\tsrc/alpha.py\ttests/gamma.py'
+}
+
+@test "time tiebreak: outside window keeps ambiguous files split" {
+    local files diff_file mtimes now
+    files="$(_tie_files)"; diff_file="$TEST_TEMP_DIR/tie.diff"; mtimes="$TEST_TEMP_DIR/mtimes.txt"
+    _tie_scenario "$diff_file"
+    now=$(date +%s)
+    printf 'src/alpha.py\t%s\nlib/beta.py\t%s\ntests/gamma.py\t%s\n' "$now" "$now" "$((now-100000))" > "$mtimes"
+    run cluster_staged_files_deterministic "$files" "$diff_file" "" "" "$mtimes"
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s\n' "$output" | count_lines)" -eq 3 ]
+}
+
+@test "time tiebreak: missing mtime keeps split" {
+    local files diff_file mtimes
+    files="$(_tie_files)"; diff_file="$TEST_TEMP_DIR/tie.diff"; mtimes="$TEST_TEMP_DIR/mtimes.txt"
+    _tie_scenario "$diff_file"
+    printf 'src/alpha.py\t100\nlib/beta.py\t200\n' > "$mtimes"
+    run cluster_staged_files_deterministic "$files" "$diff_file" "" "" "$mtimes"
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s\n' "$output" | count_lines)" -eq 3 ]
+}
+
+@test "time tiebreak: AI_DISABLE_TIME_GROUPING ignores mtimes" {
+    local files diff_file mtimes now
+    export AI_DISABLE_TIME_GROUPING=true
+    files="$(_tie_files)"; diff_file="$TEST_TEMP_DIR/tie.diff"; mtimes="$TEST_TEMP_DIR/mtimes.txt"
+    _tie_scenario "$diff_file"
+    now=$(date +%s)
+    printf 'src/alpha.py\t%s\nlib/beta.py\t%s\ntests/gamma.py\t%s\n' "$now" "$((now-100000))" "$((now-10))" > "$mtimes"
+    run cluster_staged_files_deterministic "$files" "$diff_file" "" "" "$mtimes"
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s\n' "$output" | count_lines)" -eq 3 ]
+    unset AI_DISABLE_TIME_GROUPING
+}
+
+@test "time tiebreak: unique content winner unaffected by mtimes" {
+    local files diff_file mtimes
+    files="$(printf 'models/abc.py\ntests/x.py')"
+    diff_file="$TEST_TEMP_DIR/tie_uniq.diff"
+    cat > "$diff_file" <<'DEOF'
+diff --git a/models/abc.py b/models/abc.py
++class Abc:
++    pass
+diff --git a/tests/x.py b/tests/x.py
++from models.abc import Abc
++x = 1
+DEOF
+    mtimes="$TEST_TEMP_DIR/mtimes.txt"
+    printf 'models/abc.py\t1\ntests/x.py\t999999999\n' > "$mtimes"
+    run cluster_staged_files_deterministic "$files" "$diff_file" "" "" "$mtimes"
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s\n' "$output" | count_lines)" -eq 1 ]
+}
+
+@test "time tiebreak: end-to-end via group_staged_files_logically" {
+    mkdir -p "$TEST_REPO_DIR/src" "$TEST_REPO_DIR/lib" "$TEST_REPO_DIR/tests"
+    printf 'x = 1\n' > "$TEST_REPO_DIR/src/alpha.py"
+    printf 'x = 2\n' > "$TEST_REPO_DIR/lib/beta.py"
+    printf 'x = 3\n' > "$TEST_REPO_DIR/tests/gamma.py"
+    git add -A && git commit -qm "chore: baseline"
+    # gamma edited same session as alpha; beta untouched for days
+    printf '\n# relates to src/alpha.py and lib/beta.py\ny = 4\n' >> "$TEST_REPO_DIR/tests/gamma.py"
+    printf '\n# alpha notes\nz = 5\n' >> "$TEST_REPO_DIR/src/alpha.py"
+    touch -t 202001010000 "$TEST_REPO_DIR/lib/beta.py"
+    git add -A
+    run group_staged_files_logically "$(printf 'src/alpha.py\nlib/beta.py\ntests/gamma.py')"
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s\n' "$output" | count_lines)" -eq 2 ]
+    assert_output_contains $'\tsrc/alpha.py\ttests/gamma.py'
+}
+
+@test "time tiebreak: equal time deltas keep split deterministically" {
+    local files diff_file mtimes now
+    files="$(_tie_files)"; diff_file="$TEST_TEMP_DIR/tie.diff"; mtimes="$TEST_TEMP_DIR/mtimes.txt"
+    _tie_scenario "$diff_file"
+    now=$(date +%s)
+    # gamma equidistant from alpha and beta — no unique temporal winner
+    printf 'src/alpha.py\t%s\nlib/beta.py\t%s\ntests/gamma.py\t%s\n' "$((now-100))" "$((now+100))" "$now" > "$mtimes"
+    run cluster_staged_files_deterministic "$files" "$diff_file" "" "" "$mtimes"
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s\n' "$output" | count_lines)" -eq 3 ]
+}
+
+@test "time tiebreak: AI_GROUP_TIME_WINDOW_MIN shrinks the window" {
+    local files diff_file mtimes now
+    export AI_GROUP_TIME_WINDOW_MIN=0
+    files="$(_tie_files)"; diff_file="$TEST_TEMP_DIR/tie.diff"; mtimes="$TEST_TEMP_DIR/mtimes.txt"
+    _tie_scenario "$diff_file"
+    now=$(date +%s)
+    printf 'src/alpha.py\t%s\nlib/beta.py\t%s\ntests/gamma.py\t%s\n' "$now" "$((now-100000))" "$((now-10))" > "$mtimes"
+    run cluster_staged_files_deterministic "$files" "$diff_file" "" "" "$mtimes"
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s\n' "$output" | count_lines)" -eq 3 ]
+    unset AI_GROUP_TIME_WINDOW_MIN
+}
+
+@test "time tiebreak: members without mtimes are skipped in delta scan" {
+    local files diff_file mtimes now
+    files="$(printf 'src/alpha.py\nlib/beta1.py\nlib/beta2.py\ntests/gamma.py')"
+    diff_file="$TEST_TEMP_DIR/tie_mem.diff"
+    cat > "$diff_file" <<'DEOF'
+diff --git tests/gamma.py b/tests/gamma.py
++# relates to src/alpha.py and lib/beta1.py
++x = 1
+DEOF
+    mtimes="$TEST_TEMP_DIR/mtimes.txt"
+    now=$(date +%s)
+    # beta component = {beta1,beta2} (same leaf dir); beta1 has no mtime row,
+    # beta2 is far — alpha stays the unique close candidate
+    printf 'src/alpha.py\t%s\nlib/beta2.py\t%s\ntests/gamma.py\t%s\n' "$now" "$((now-100000))" "$((now-10))" > "$mtimes"
+    run cluster_staged_files_deterministic "$files" "$diff_file" "" "" "$mtimes"
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s\n' "$output" | count_lines)" -eq 2 ]
+    assert_output_contains $'\tsrc/alpha.py\ttests/gamma.py'
+}

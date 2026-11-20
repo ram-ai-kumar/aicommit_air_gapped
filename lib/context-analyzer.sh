@@ -195,6 +195,7 @@ cluster_staged_files_deterministic() {
     local diff_file="${2:-}"
     local cochange_file="${3:-}"
     local contents_dir="${4:-}"
+    local mtimes_file="${5:-}"
     local framework_patterns_file="${AI_FRAMEWORK_PATTERNS_FILE:-$AICOMMIT_DIR/config/framework-patterns.json}"
 
     printf '%s\n' "$staged_files" | LC_ALL=C sort | LC_ALL=C awk \
@@ -210,7 +211,10 @@ cluster_staged_files_deterministic() {
         -v ckw_max="${AI_CONTENT_KEYWORD_MAX:-10}" \
         -v pathkw_re="$_AICOMMIT_PATH_KW_EXCL_RE" \
         -v path_kw_off="${AI_DISABLE_PATH_KEYWORDS:-false}" \
-        -v content_kw_off="${AI_DISABLE_CONTENT_KEYWORDS:-false}" '
+        -v content_kw_off="${AI_DISABLE_CONTENT_KEYWORDS:-false}" \
+        -v mtimes_file="$mtimes_file" \
+        -v time_win="$(( ${AI_GROUP_TIME_WINDOW_MIN:-60} * 60 ))" \
+        -v time_off="${AI_DISABLE_TIME_GROUPING:-false}" '
     function basename_of(p,   b) { b = p; sub(/^.*\//, "", b); return b }
     function dirname_of(p,   d) { d = p; return (sub(/\/[^\/]*$/, "", d) ? d : ".") }
     function dir2(p,   d, a, n) {
@@ -987,6 +991,16 @@ cluster_staged_files_deterministic() {
             }
         }
 
+        # Index mtimes (path<TAB>epoch) for the temporal tiebreak — files
+        # absent from the file keep mtime 0 and are skipped in comparisons.
+        if (mtimes_file != "" && time_off != "true") {
+            while ((getline mline < mtimes_file) > 0) {
+                split(mline, mf, "\t")
+                if (mf[1] != "" && mf[2] + 0 > 0) mtime[mf[1]] = mf[2] + 0
+            }
+            close(mtimes_file)
+        }
+
         cyc = "3.7"
         # Cycle 3.7 — Content-keyword rescue: files untouched by every
         # structural edge may still belong to a feature group — their diff
@@ -1017,14 +1031,37 @@ cluster_staged_files_deterministic() {
                         if (!(k2 in ckroot)) { ckroot[k2] = 1; cscore[r] += w }
                     }
                 }
-                best = ""; bestscore = 1; nbest = 0
+                best = ""; bestscore = 1; nties = 0; delete tb_ties
                 for (r in cscore) {
-                    if (cscore[r] > bestscore) { bestscore = cscore[r]; best = r; nbest = 1 }
-                    else if (cscore[r] == bestscore) nbest++
+                    if (cscore[r] > bestscore) { bestscore = cscore[r]; best = r; nties = 1; delete tb_ties; tb_ties[1] = r }
+                    else if (cscore[r] == bestscore) { nties++; tb_ties[nties] = r }
                 }
-                if (best != "" && nbest == 1) {
+                if (best != "" && nties == 1) {
                     for (oi = 1; oi <= nf; oi++) {
                         if (find(files[oi]) == best) { union(f, files[oi]); break }
+                    }
+                } else if (best != "" && nties > 1 && time_off != "true" && mtime[f] > 0) {
+                    # Temporal tiebreak: among equally-scored candidates pick the
+                    # component whose members were modified closest to f — only
+                    # when the minimum delta is unique and inside the window.
+                    tb_bestd = -1; tb_ndel = 0; tb_brest = ""
+                    for (ti = 1; ti <= nties; ti++) {
+                        tb_rt = tb_ties[ti]
+                        tb_dmin = -1
+                        for (oi = 1; oi <= nf; oi++) {
+                            tb_mm = files[oi]
+                            if (find(tb_mm) != tb_rt || mtime[tb_mm] == 0) continue
+                            tb_dd = mtime[tb_mm] - mtime[f]; if (tb_dd < 0) tb_dd = -tb_dd
+                            if (tb_dmin < 0 || tb_dd < tb_dmin) tb_dmin = tb_dd
+                        }
+                        if (tb_dmin < 0) continue
+                        if (tb_bestd < 0 || tb_dmin < tb_bestd) { tb_bestd = tb_dmin; tb_brest = tb_rt; tb_ndel = 1 }
+                        else if (tb_dmin == tb_bestd) tb_ndel++
+                    }
+                    if (tb_brest != "" && tb_ndel == 1 && tb_bestd <= time_win + 0) {
+                        for (oi = 1; oi <= nf; oi++) {
+                            if (find(files[oi]) == tb_brest) { union(f, files[oi]); break }
+                        }
                     }
                 }
             }
@@ -1388,9 +1425,11 @@ group_staged_files_logically() {
     if [ -n "$state_dir" ]; then
         build_cochange_cache "$state_dir" >/dev/null 2>&1 && cochange_file="${state_dir}/COCHANGE"
     fi
+    local mtimes_file="${tmp_dir}/MTIMES"
+    _aicommit_group_mtimes "$tmp_dir"
 
     local comp_lines contents_dir=""
-    comp_lines=$(cluster_staged_files_deterministic "$staged_files" "$diff_file" "$cochange_file")
+    comp_lines=$(cluster_staged_files_deterministic "$staged_files" "$diff_file" "$cochange_file" "" "$mtimes_file")
 
     # Full-content fallback: pass-1 singletons may have unchanged imports or
     # comments outside the diff hunks — read their staged blobs (bounded) and
@@ -1398,7 +1437,7 @@ group_staged_files_logically() {
     if [ "${AI_DISABLE_CONTENT_KEYWORDS:-false}" != "true" ] && [ "${AI_CONTENT_FALLBACK_MAX:-20}" -gt 0 ] 2>/dev/null; then
         contents_dir=$(_aicommit_group_content_fallback "$staged_files" "$comp_lines" "$tmp_dir")
         if [ -n "$contents_dir" ]; then
-            comp_lines=$(cluster_staged_files_deterministic "$staged_files" "$diff_file" "$cochange_file" "$contents_dir")
+            comp_lines=$(cluster_staged_files_deterministic "$staged_files" "$diff_file" "$cochange_file" "$contents_dir" "$mtimes_file")
         fi
     fi
 
@@ -1407,6 +1446,20 @@ group_staged_files_logically() {
     _write_grouping_source "deterministic"
 
     printf '%s\n' "$result"
+}
+
+# Index mtimes for staged files: `git ls-files --debug` emits path lines
+# followed by indented stat fields; the mtime field carries epoch:nsec of the
+# worktree file as last recorded by the index. Writes path<TAB>epoch rows to
+# ${tmp_dir}/MTIMES for the clusterer's temporal tiebreak (files absent from
+# the index — deletions — simply have no row).
+# Args: $1=tmp_dir
+_aicommit_group_mtimes() {
+    local tmp_dir="$1"
+    agit ls-files --debug 2>/dev/null | LC_ALL=C awk '
+        /^[^ \t]/ { cur = $0; next }
+        /mtime:/ { split($2, a, ":"); if (cur != "" && a[1] + 0 > 0) print cur "\t" a[1] }
+    ' > "${tmp_dir}/MTIMES" 2>/dev/null || : > "${tmp_dir}/MTIMES"
 }
 
 # Pass-1 singleton rescue prep: for each staged file that landed alone in its

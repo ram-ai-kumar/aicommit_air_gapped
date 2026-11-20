@@ -79,6 +79,15 @@ AI_CONTENT_FALLBACK_MAX="${AI_CONTENT_FALLBACK_MAX:-20}"
 # Per-file byte cap when reading staged blobs for content keyword extraction
 AI_CONTENT_MAX_BYTES="${AI_CONTENT_MAX_BYTES:-131072}"
 
+# Timestamp tiebreak: when content-keyword scoring ties multiple candidate
+# components, the one whose files were modified closest in time wins.
+# Timestamps never create merges on their own — they only order equal matches.
+# Disable to ignore mtimes entirely.
+AI_DISABLE_TIME_GROUPING="${AI_DISABLE_TIME_GROUPING:-false}"
+
+# Minutes; files modified within this window of each other count as the same batch
+AI_GROUP_TIME_WINDOW_MIN="${AI_GROUP_TIME_WINDOW_MIN:-60}"
+
 # Timeout for LLM inference (seconds). Increase for large models or slow hardware.
 # Override in ~/.aicommitrc: AI_TIMEOUT=240
 AI_TIMEOUT="${AI_TIMEOUT:-120}"

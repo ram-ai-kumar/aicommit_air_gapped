@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-11-21
+
+- feat(docs): add timestamp tiebreak feature to changelog
+
+
 ## [1.0.7] - 2026-11-18
 
 - docs: add unreleased changelog entry for full-path keyword pairing
@@ -27,6 +32,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - New knobs: `AI_DISABLE_PATH_KEYWORDS`, `AI_DISABLE_CONTENT_KEYWORDS`,
     `AI_PATH_KEYWORD_MAX`, `AI_CONTENT_KEYWORD_MAX`,
     `AI_CONTENT_FALLBACK_MAX`, `AI_CONTENT_MAX_BYTES`
+- feat(grouping): use file mtimes as a tiebreaker for ambiguous content matches
+  - When content-keyword scoring ties multiple candidate components, the one
+    whose files were modified closest in time wins (within
+    `AI_GROUP_TIME_WINDOW_MIN`, default 60). Timestamps never create merges
+    on their own; `AI_DISABLE_TIME_GROUPING` opts out.
 
 ## [1.0.6] - 2026-11-12
 
